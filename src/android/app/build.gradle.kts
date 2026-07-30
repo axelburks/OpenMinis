@@ -22,6 +22,20 @@ val appCustomization = Properties().apply {
 fun customizationValue(key: String): String =
     (appCustomization.getProperty(key) ?: "").replace("\"", "\\\"")
 
+// [Minix] Release signing comes ONLY from environment variables:
+//   ANDROID_KEYSTORE_FILE / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS /
+//   ANDROID_KEY_PASSWORD — set by scripts/release.sh, which sources them from an
+//   out-of-repo (iCloud) android.env. `$HOME` is expanded by the shell before
+//   gradle sees the path, so it stays portable.
+// When they're absent (debug builds, fresh clone, upstream mirror, CI without
+// secrets) no release signing config is created; a release build then fails
+// fast via the taskGraph guard below. Debug builds are unaffected.
+val ksStoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
+val ksStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+val ksKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+val ksKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+val hasReleaseSigning = ksStoreFile != null && file(ksStoreFile).exists()
+
 android {
     namespace = "com.openminis.app"
     // [T-android-dynamic-island] Bumped 35→36 so the Android 16 (Baklava)
@@ -33,7 +47,13 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.openminis.app"
+        // [Minix] Distinct applicationId so this build installs alongside the
+        // original Minis (com.openminis.app) instead of overwriting it. Android
+        // isolates data dir / FileProvider·Shizuku authorities (all derived via
+        // ${applicationId} or context.packageName) automatically off this id.
+        // NOTE: `namespace` (com.openminis.app) is deliberately NOT changed —
+        // it drives the R class + relative class names.
+        applicationId = "com.axel.minix"
         minSdk = 26
         targetSdk = 35
         versionCode = 20
@@ -68,6 +88,19 @@ android {
         }
     }
 
+    // [Minix] Persistent release signing config, active only when a keystore is
+    // resolved from the ANDROID_KEYSTORE_* env vars. See the block above.
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(ksStoreFile!!)
+                storePassword = ksStorePassword
+                keyAlias = ksKeyAlias
+                keyPassword = ksKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -75,7 +108,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            // [Minix] Release MUST be signed with a real key — NO debug-signing
+            // fallback (a debug-signed "release" can't be shared or upgraded).
+            // When no key is resolved we leave signingConfig unset here and fail
+            // hard below, but only if a release build is actually requested, so
+            // `assembleDebug` (which still runs this config block) is unaffected.
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -113,6 +153,23 @@ android {
         // a fixed detector (tracked at issuetracker.google.com/388538014).
         checkReleaseBuilds = false
         disable += "NonNullableMutableLiveData"
+    }
+}
+
+// [Minix] Fail a RELEASE build that has no signing key, instead of silently
+// producing an unsigned/debug-signed APK. Scoped to the task graph so it only
+// trips when a release task is actually requested — `assembleDebug` and other
+// non-release builds are never affected.
+gradle.taskGraph.whenReady {
+    val wantsRelease = allTasks.any {
+        it.project == project && it.name.contains("Release")
+    }
+    if (wantsRelease && !hasReleaseSigning) {
+        throw GradleException(
+            "Release signing not configured. Set ANDROID_KEYSTORE_FILE/…_PASSWORD/" +
+            "KEY_ALIAS/KEY_PASSWORD via scripts/.env → MINIX_ANDROID_ENV " +
+            "(see scripts/release.env.example), or run ./scripts/release.sh android."
+        )
     }
 }
 

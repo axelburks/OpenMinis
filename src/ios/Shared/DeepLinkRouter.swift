@@ -46,8 +46,14 @@ enum DeepLinkRouter {
 
     @MainActor
     static func handle(url: URL, shareCoordinator: ShareCoordinator) {
-        guard url.scheme == "minis", let host = url.host else {
-            deepLinkLog.info("ignored — non-minis or missing host: \(url.absoluteString)")
+        // Accept both the shared `minis` scheme and this build's dedicated
+        // `minix` scheme. The Share Extension redirects via `minix://share`
+        // so the handoff lands in THIS app rather than another install that
+        // also registers `minis` (e.g. the App Store build). Resource URLs
+        // (minis://workspace/…) are resolved in-process elsewhere and keep
+        // the `minis` scheme unchanged.
+        guard url.scheme == "minis" || url.scheme == "minix", let host = url.host else {
+            deepLinkLog.info("ignored — non-minis/minix or missing host: \(url.absoluteString)")
             return
         }
         let coord = DeepLinkCoordinator.shared

@@ -55,7 +55,7 @@ object MinisOpenUrlBroker {
      */
     fun isSupportedScheme(scheme: String?): Boolean {
         val s = scheme?.lowercase() ?: return false
-        return s == "http" || s == "https" || s == "about" || s == "minis"
+        return s == "http" || s == "https" || s == "about" || s == "minis" || s == "minix"
     }
 
     /**

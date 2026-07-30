@@ -186,6 +186,10 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="minis" />
+                <!-- [Minix] Dedicated scheme so external minix:// links open THIS
+                     build rather than being disambiguated against the original
+                     Minis (which also registers minis://). -->
+                <data android:scheme="minix" />
             </intent-filter>
         </activity>
 

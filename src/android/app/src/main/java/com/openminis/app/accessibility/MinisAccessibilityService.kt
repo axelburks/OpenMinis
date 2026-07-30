@@ -29,7 +29,11 @@ class MinisAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "MinisA11y"
-        const val SERVICE_ID = "com.openminis.app/.accessibility.MinisAccessibilityService"
+        // [Minix] Format is "<packageName>/<fully-qualified class>". The package
+        // part is the applicationId (com.axel.minix), but the class stays under
+        // the unchanged namespace (com.openminis.app...). The "/.relative" short
+        // form can't be used here because package != class package anymore.
+        const val SERVICE_ID = "com.axel.minix/com.openminis.app.accessibility.MinisAccessibilityService"
         private const val EVENT_RING_CAP = 1024
 
         @Volatile

@@ -75,6 +75,7 @@ fastlane/appstore-keys/
 
 # Claude Code
 .claude/
+.agents
 
 # Temporary patches
 deps/*.patch

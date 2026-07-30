@@ -32,7 +32,7 @@
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.openminis.app.liveactivity-refresh</string>
+		<string>com.axel.minix.liveactivity-refresh</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>
@@ -303,7 +303,7 @@
 			<string>Claude OAuth Callback</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.openminis.app</string>
+				<string>com.axel.minix</string>
 			</array>
 		</dict>
 		<dict>
@@ -312,6 +312,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>minis</string>
+				<string>minix</string>
 			</array>
 		</dict>
 		<dict>

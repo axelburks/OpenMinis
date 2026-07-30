@@ -68,9 +68,10 @@ class ShareViewController: UIViewController {
 
     // MARK: - Redirect to main app
 
+    /// Redirects to the host app via the `minix://share` deep link.
     private func redirectToHostApp() {
-        guard let url = URL(string: "minis://share") else {
-            NSLog("[ShareExt] ERROR: Failed to create minis://share URL")
+        guard let url = URL(string: "minix://share") else {
+            NSLog("[ShareExt] ERROR: Failed to create minix://share URL")
             return
         }
 

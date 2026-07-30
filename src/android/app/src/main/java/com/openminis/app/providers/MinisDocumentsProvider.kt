@@ -42,7 +42,10 @@ import java.io.FileNotFoundException
 class MinisDocumentsProvider : DocumentsProvider() {
 
     companion object {
-        const val AUTHORITY = "com.openminis.minis.documents"
+        // [Minix] Unique authority so that if this DocumentsProvider is ever
+        // wired into the manifest, it won't collide with the original Minis.
+        // (Currently dormant — not registered in AndroidManifest.)
+        const val AUTHORITY = "com.axel.minix.documents"
         private const val ROOT_ID = "minis-root"
         private const val ROOT_DOC_ID = ""        // empty = providerRoot
         private val TOP_LEVEL = listOf("memory", "skills", "shared")

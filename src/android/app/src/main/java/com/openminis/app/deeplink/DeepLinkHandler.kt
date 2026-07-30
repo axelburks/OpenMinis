@@ -98,7 +98,10 @@ sealed class DeepLinkAction {
 
 object DeepLinkHandler {
     fun parse(uri: Uri?): DeepLinkAction {
-        if (uri == null || uri.scheme != "minis") return DeepLinkAction.Unknown
+        // [Minix] Accept both the shared `minis` scheme and this build's
+        // dedicated `minix` scheme (external links open THIS app). Resource
+        // URLs keep using `minis://` and are resolved elsewhere in-process.
+        if (uri == null || (uri.scheme != "minis" && uri.scheme != "minix")) return DeepLinkAction.Unknown
         val host = uri.host ?: return DeepLinkAction.Unknown
         val path = uri.path.orEmpty()
 
