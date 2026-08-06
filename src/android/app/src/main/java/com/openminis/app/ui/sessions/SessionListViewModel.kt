@@ -354,7 +354,7 @@ class SessionListViewModel(
                     }
 
                     val provider = try {
-                        ProviderFactory.create(instance, apiKey, entry.model, context)
+                        ProviderFactory.create(instance, apiKey, entry.model, context, entry)
                     } catch (e: Exception) {
                         Log.w(TAG, "Provider creation failed for ${entry.model.displayName}: ${e.message}")
                         continue
@@ -377,6 +377,9 @@ class SessionListViewModel(
                         // reasoning model doesn't spend the budget on hidden
                         // thinking; the T334 maxTokens bump above stays as a
                         // safety net for models where OFF is a no-op (Qwen3).
+                        provider.requestSessionId = id
+                        provider.usesConversationRequestControlState =
+                            false
                         val response = provider.sendMessage(
                             messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
                             // [T-android-titlegen-systemprompt-unify] Shared with

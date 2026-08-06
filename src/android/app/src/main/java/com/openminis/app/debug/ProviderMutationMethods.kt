@@ -63,11 +63,13 @@ internal object ProviderMutationMethods {
             throw RPCException(-32602, "customBaseURL only supported for providerType=openAI")
         }
 
-        // [T-ua-block-oauth-provider] customUserAgent only for apiKey providers.
-        val customUserAgent = params.optString("customUserAgent", "").ifEmpty { null }
-        if (customUserAgent != null && credentialType != ProviderCredential.apiKey) {
-            throw RPCException(-32602, "Custom User-Agent is only supported for third-party API-key providers. OAuth providers (Anthropic/Codex) use their own authentication UA and cannot be overridden.")
-        }
+        val customRequestHeaders = params.optJSONArray("customRequestHeaders")?.let { array ->
+            buildList {
+                for (i in 0 until array.length()) {
+                    array.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+            }
+        } ?: emptyList()
 
         val instance = ProviderInstance(
             id = UUID.randomUUID().toString(),
@@ -78,7 +80,7 @@ internal object ProviderMutationMethods {
             customBaseURL = customBaseURL,
             appendV1Suffix = appendV1Suffix,
             useResponsesAPI = useResponsesAPI,
-            customUserAgent = customUserAgent,
+            customRequestHeaders = customRequestHeaders,
         )
 
         // Inline copy of repo.addInstance with the seedBuiltInModels switch —
@@ -121,19 +123,19 @@ internal object ProviderMutationMethods {
         val current = repo.instance(id)
             ?: throw RPCException(-32602, "Instance not found: $id")
 
-        // [T-ua-block-oauth-provider] customUserAgent only applies to third-party
-        // API-key providers. OAuth providers (Anthropic/Codex) ride their own
-        // authentication request chain with a fixed client UA — overriding it can
-        // break the handshake or be rejected upstream. Reject any write (including
-        // the empty-string clear) for non-apiKey instances, mirroring the
-        // minis-config writer guard in ProvidersCollection.kt.
-        val customUserAgent: String? = if (params.has("customUserAgent")) {
-            if (current.credentialType != ProviderCredential.apiKey) {
-                throw RPCException(-32602, "Custom User-Agent is only supported for third-party API-key providers. OAuth providers (Anthropic/Codex) use their own authentication UA and cannot be overridden.")
+        val customRequestHeaders: List<String> = if (params.has("customRequestHeaders")) {
+            if (params.isNull("customRequestHeaders")) {
+                emptyList()
+            } else {
+                val array = params.optJSONArray("customRequestHeaders")
+                    ?: throw RPCException(-32602, "customRequestHeaders must be an array of strings")
+                buildList {
+                    for (i in 0 until array.length()) {
+                        array.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                    }
+                }
             }
-            if (params.isNull("customUserAgent")) null
-            else params.optString("customUserAgent", "").ifEmpty { null }
-        } else current.customUserAgent
+        } else current.customRequestHeaders
 
         // [GH#68] Optional imageEndpointMode patch. Accepts the Kotlin enum
         // name or the wire SerialName (images_generations / chat_completions).
@@ -157,7 +159,7 @@ internal object ProviderMutationMethods {
             appendV1Suffix = if (params.has("appendV1Suffix")) params.optBoolean("appendV1Suffix", current.appendV1Suffix) else current.appendV1Suffix,
             useResponsesAPI = if (params.has("useResponsesAPI")) params.optBoolean("useResponsesAPI", current.useResponsesAPI) else current.useResponsesAPI,
             isEnabled = if (params.has("isEnabled")) params.optBoolean("isEnabled", current.isEnabled) else current.isEnabled,
-            customUserAgent = customUserAgent,
+            customRequestHeaders = customRequestHeaders,
             imageEndpointMode = imageEndpointMode,
             imageEndpointResolved = if (params.has("imageEndpointMode") && imageEndpointMode != ImageEndpointMode.auto) {
                 null
@@ -288,7 +290,7 @@ internal object ProviderMutationMethods {
             put("customBaseURL", inst.customBaseURL ?: JSONObject.NULL)
             put("appendV1Suffix", inst.appendV1Suffix)
             put("useResponsesAPI", inst.useResponsesAPI)
-            put("customUserAgent", inst.customUserAgent ?: JSONObject.NULL)
+            put("customRequestHeaders", org.json.JSONArray(inst.customRequestHeaders))
             put("createdAt", inst.createdAt)
             put("hasCredential", repo.loadApiKey(inst.id)?.isNotEmpty() == true)
             put("modelEntryCount", entryCount)

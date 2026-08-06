@@ -59,7 +59,7 @@ class ProvidersCollection(
             appendV1Suffix(forId),
             useResponsesAPI(forId),
             azureMode(forId),
-            customUserAgent(forId),
+            customRequestHeaders(forId),
             apiKeyField(forId),
             // OAuth token stays fully hidden — the flow is browser-driven
             // and can't be expressed as a single value.
@@ -311,41 +311,26 @@ class ProvidersCollection(
             },
         )
 
-    /**
-     * [T-android-minisconfig-custom-useragent] Per-provider User-Agent
-     * override. Empty string clears the override and falls back to the
-     * branded default (Minis/<version> (Android <release>; <model>) — see
-     * MinisUserAgent.DEFAULT) at request build time. Cloned from
-     * [customBaseURL] in shape; the underlying field on ProviderInstance
-     * has been wired through ProviderFactory + applyUserAgentOverride
-     * since #802, so a write here takes effect on the very next outbound
-     * call without any restart.
-     */
-    private fun customUserAgent(id: String): ConfigField =
+    private fun customRequestHeaders(id: String): ConfigField =
         ClosureField(
-            path = "providers.$id.customUserAgent",
-            displayName = "Custom User-Agent",
-            description = "Override the outbound User-Agent header. Empty string = use default.",
-            valueSchema = ConfigSchema.Str(maxLength = 256),
+            path = "providers.$id.customRequestHeaders",
+            displayName = "Custom Request Headers",
+            description = "Provider-level request header expressions. Same-name headers replace defaults.",
+            valueSchema = ConfigSchema.Array(ConfigSchema.Str(maxLength = 512)),
             risk = ConfigRisk.NORMAL,
             revertable = true,
             reader = {
                 val inst = repo.instance(id) ?: return@ClosureField ConfigValue.Null
-                ConfigValue.Str(inst.customUserAgent ?: "")
+                ConfigValue.Arr(inst.customRequestHeaders.map { ConfigValue.Str(it) })
             },
             writer = { v ->
-                val s = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
-                // [T-ua-block-oauth-provider] Custom UA only applies to
-                // third-party API-key providers. OAuth providers (Anthropic /
-                // Codex) ride their own authentication request chain with a
-                // fixed client UA — overriding it can break the handshake or be
-                // rejected upstream. Block ALL writes (including clearing to "")
-                // for non-apiKey credentials; reads stay unblocked.
-                val inst = repo.instance(id) ?: throw ConfigError.InvalidValue("Provider not found")
-                if (inst.credentialType != ProviderCredential.apiKey) {
-                    throw ConfigError.InvalidValue("Custom User-Agent is only supported for third-party API-key providers. OAuth providers (Anthropic/Codex) use their own authentication UA and cannot be overridden.")
+                val arr = (v as? ConfigValue.Arr)?.value ?: throw ConfigError.TypeMismatch("array")
+                val lines = arr.map { item ->
+                    (item as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("array<string>")
+                }.map { it.trim() }.filter { it.isNotEmpty() }
+                mutate(id) {
+                    it.copy(customRequestHeaders = lines)
                 }
-                mutate(id) { it.copy(customUserAgent = s.ifEmpty { null }) }
             },
         )
 

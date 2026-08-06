@@ -139,7 +139,7 @@ object ScheduledAgentRunner {
                 sessionId = sessionId,
                 text = task.prompt,
                 attachments = emptyList(),
-                thinkingLevel = null,
+                thinkingDefinitionId = null,
                 wait = wait,
                 timeoutMs = RUN_TIMEOUT_MS,
             )

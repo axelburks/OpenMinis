@@ -98,35 +98,12 @@ final class OpenAIAgentProvider: AgentProvider {
         if !toolsPayload.isEmpty {
             body["tools"] = toolsPayload
         }
-        // Inject provider-specific thinking parameters.
-        // Some families (Qwen3, DeepSeek V4, etc.) think by default server-side —
-        // when the user toggles thinking off, we MUST explicitly disable, otherwise
-        // the server runs in thinking mode and later rejects our tool-call history
-        // for missing `reasoning_content` (observed as DeepSeek 400 on
-        // deepseek-v4-flash with the toggle off).
-        // Always inject for these families and OpenRouter; other models only
-        // when thinking is enabled.
-        // `supportsReasoning == nil` (catalog unknown — e.g. DeepSeek V4 fetched
-        // from /v1/models) is treated as "allowed"; the UI lets the user toggle
-        // in this case, so honor their choice and send the params.
-        if model.supportsReasoning ?? true {
-            // Mistral rejects `reasoning: {effort: ...}` with 422. Don't
-            // inject thinking params at all on this endpoint.
-            //
-            // [T-thinking-off-explicit] Previously the OFF case only injected
-            // for the families that need an explicit disable (OpenRouter /
-            // Qwen / DeepSeek-V4) and OMITTED the field everywhere else —
-            // letting each vendor apply its own default reasoning tier. Now
-            // injectThinkingParams is always consulted (it owns the per-family
-            // rules, including which families must keep omitting) and receives
-            // the provider-appropriate off value: official OpenAI understands
-            // "none"; custom-base vendors get "minimal" (Ark's smallest tier,
-            // also a valid OpenAI value, so relays serving gpt models work too).
-            if !provider.isMistral {
-                let offEffort = Self.explicitOffEffort(for: provider, model: model, level: thinkingLevel)
-                Self.injectThinkingParams(into: &body, model: model, level: thinkingLevel, isOpenRouter: provider.useOpenRouterCompat, maxTokens: maxTokens, offEffort: offEffort, unifiedReasoningEffort: provider.usesUnifiedReasoningEffort)
-            }
-        }
+        Self.applyDefaultChatThinking(
+            into: &body,
+            provider: provider,
+            model: model,
+            level: thinkingLevel
+        )
 
         let (lineStream, _) = try await provider.streamRaw(body: body, isResponsesAPI: false)
 
@@ -407,12 +384,19 @@ final class OpenAIAgentProvider: AgentProvider {
             // synthesize a fallback key server-side — see Wei-Shaw/sub2api#1134.
             "prompt_cache_key": Self.derivePromptCacheKey(from: messages),
         ]
-        // Thinking level → Responses API `reasoning.effort`.
-        // Applies to every Responses flavor (Codex OAuth + forceResponsesAPI +
-        // custom-base). Previously only Codex honored the user's level, so
-        // Responses-API provider types silently ignored thinking settings.
+        // Thinking level → Responses API `reasoning.effort`. A semantic
+        // thinking control owns the mapping for every Responses backend,
+        // including Codex OAuth, and is applied after this default body.
         var reasoningRequested = false
-        if thinkingLevel.isEnabled, let effort = Self.reasoningEffort(for: model, level: thinkingLevel) {
+        if provider.requestCustomization?.disablesBuiltInThinkingInjection == true {
+            reasoningRequested = false
+        } else if thinkingLevel == .off,
+                  model.supportsReasoning == true {
+            body["reasoning"] = ["effort": "none"]
+        } else if isCodexOAuth,
+                  thinkingLevel.isEnabled,
+                  thinkingLevel != .ultra,
+                  let effort = Self.reasoningEffort(for: model, level: thinkingLevel) {
             // `summary: "auto"` opts in to streaming the human-readable
             // reasoning summary (delivered as `response.reasoning_summary_text.delta`
             // SSE events). Without it the Responses API only returns
@@ -421,21 +405,18 @@ final class OpenAIAgentProvider: AgentProvider {
             // OpenAI ignores unknown variants and falls back to "auto"-equiv.
             body["reasoning"] = ["effort": effort, "summary": "auto"]
             reasoningRequested = true
-        } else if isCodexOAuth {
+        } else if isCodexOAuth,
+                  thinkingLevel != .ultra {
             // Codex requires a `reasoning` object on every request — fall back
             // to "low" when the user has thinking off.
             body["reasoning"] = ["effort": "low", "summary": "auto"]
             reasoningRequested = true
-        } else if model.supportsReasoning ?? false,
-                  let offEffort = Self.explicitOffEffort(for: provider, model: model, level: thinkingLevel) {
-            // [T-thinking-off-explicit] Thinking OFF on a reasoning-capable
-            // model: send the explicit off tier instead of omitting the
-            // `reasoning` key — omission lets the vendor default kick in.
-            // Same ALLOWLIST as the Chat path (official OpenAI → "none",
-            // Volcano Ark → "minimal"); vendors with undocumented off
-            // semantics keep the historical omission. No summary/include:
-            // nothing should stream back.
-            body["reasoning"] = ["effort": offEffort]
+        } else if model.supportsReasoning == true,
+                  thinkingLevel.isEnabled,
+                  thinkingLevel != .ultra,
+                  let effort = Self.reasoningEffort(for: model, level: thinkingLevel) {
+            body["reasoning"] = ["effort": effort, "summary": "auto"]
+            reasoningRequested = true
         }
         // Request the encrypted reasoning payload whenever reasoning is
         // requested. The `encrypted_content` is opaque + model-specific; we
@@ -453,11 +434,9 @@ final class OpenAIAgentProvider: AgentProvider {
         // fell back to their own tiny defaults (Ark 4096, some relays 1000)
         // and long outputs were truncated. Official field name for the
         // Responses API is max_output_tokens (NOT max_completion_tokens).
-        // Codex OAuth is EXCLUDED: its body shape is part of the codex_cli
-        // client fingerprint (same discipline as the extra-body skip in
-        // OpenAIProvider) and the ChatGPT backend applies its own generous
-        // output limit — the truncation complaint only concerns third-party
-        // Responses vendors.
+        // Codex OAuth is excluded because its private backend owns the output
+        // limit; the truncation complaint only concerns third-party Responses
+        // vendors.
         if maxTokens > 0, !isCodexOAuth {
             body["max_output_tokens"] = maxTokens
         }
@@ -792,244 +771,36 @@ final class OpenAIAgentProvider: AgentProvider {
 
     // MARK: - Thinking Config
 
-    /// [T-thinking-off-explicit] The wire value for "thinking OFF", or nil to
-    /// keep the historical omit-the-field behavior. ALLOWLIST, not blanket:
-    /// the first pass sent "minimal" to every custom-base vendor and the
-    /// on-device sweep showed why that's wrong — MiMo's strict enum rejects
-    /// it outright, and generic-branch vendors with unknown semantics (xAI
-    /// grok, NVIDIA NIM-hosted models) can't be assumed to accept it either.
-    /// Only vendors whose off tier is DOCUMENTED get an explicit value:
-    ///   • official OpenAI base → "none" (their documented off tier);
-    ///   • Volcano Ark (volces/ark bases, seed/doubao families) → "minimal"
-    ///     (their smallest tier — the vendor whose non-off default motivated
-    ///     this fix in the first place).
-    /// Everyone else keeps field omission = the vendor's own default, which
-    /// is exactly the pre-fix behavior.
-    static func explicitOffEffort(for provider: OpenAIProvider, model: LLMModel, level: ThinkingLevel) -> String? {
-        guard !level.isEnabled else { return nil }
-        if provider.customBaseURL == nil && !provider.isAzure { return "none" }
-        let base = provider.customBaseURL?.lowercased() ?? ""
-        let lid = model.id.lowercased()
-        if base.contains("volces") || base.contains("ark.")
-            || lid.contains("seed-") || lid.contains("doubao") {
-            return "minimal"
-        }
-        return nil
-    }
-
     /// Returns the reasoning effort level string for the model, or nil if not supported.
-    /// [T-xhigh-effort-clamp] Model families whose backends only accept
-    /// low/medium/high for reasoning_effort and reject "xhigh" outright
-    /// (MiMo-2.5/Pro → 400 literal_error; Agnes → 422 unknown variant).
+    /// Ultra is reserved for user-authored controls and is never emitted by
+    /// the built-in OpenAI mapping.
     static func reasoningEffort(for model: LLMModel, level: ThinkingLevel = .medium) -> String? {
         guard model.supportsReasoning ?? false else { return nil }
         return switch level {
-        case .off: nil
+        case .off: "none"
+        case .minimal: "minimal"
         case .low: "low"
         case .medium: "medium"
         case .high: "high"
         case .xhigh: "xhigh"
-        // [T-ios-ultra-effort-clamp] Ultra is a CLIENT-SIDE "Max + multi-agent
-        // orchestration" toggle, not a server reasoning-effort tier. The wire
-        // `reasoning.effort` field tops out at "max": ChatGPT/Codex compact
-        // endpoints reject a literal "ultra" (400 invalid effort / silently
-        // ignored), and CLIProxyAPI / sub2api both send "max" for Ultra (their
-        // forwarding registries list levels only up to "max"; the "ultra" entry
-        // is display-manifest-only and never enters the request body). So clamp
-        // ultra → "max" here. If/when we implement the orchestration layer it
-        // stays a local behavior; the effort string never becomes "ultra".
-        case .max, .ultra: "max"
+        case .max: "max"
+        case .ultra: nil
         }
     }
 
-    /// Inject provider-specific thinking parameters into the Chat Completions request body.
-    /// Different OpenAI-compatible providers use different mechanisms:
-    ///   - OpenAI native: `reasoning_effort` (low/medium/high)
-    ///   - Qwen3: `enable_thinking: true` + `thinking_budget` in extra body
-    ///   - DeepSeek/GLM/Kimi/MiniMax: no params needed (model always reasons)
-    /// [T-thinking-off-explicit] `offEffort` is the provider-appropriate wire
-    /// value for "thinking OFF" ("none" for official OpenAI, "minimal" for
-    /// custom-base providers like Volcano Ark whose smallest tier is minimal).
-    /// nil = keep the historical omit-the-field behavior. Only the branches
-    /// where an explicit off value is known-safe consume it; forced-reasoning
-    /// families (DeepSeek pre-V4 / GLM / Kimi / MiniMax) and OpenRouter keep
-    /// omitting, because those backends reject or misinterpret an off tier
-    /// ("Reasoning is mandatory for this endpoint").
-    /// - Parameter unifiedReasoningEffort: [T-unified-reasoning-effort] true when
-    ///   the endpoint (Volcengine Ark / Azure) exposes EVERY model through a single
-    ///   OpenAI `reasoning_effort` surface. When set, the vendor-native id branches
-    ///   (`deepseek-v4` → `thinking:{}`, and the `deepseek/glm/kimi/minimax`
-    ///   self-reasoning skip) are bypassed so those models fall through to the
-    ///   generic `reasoning_effort` path instead. Only Ark/Azure set this, so
-    ///   official direct DeepSeek/GLM/Kimi endpoints keep their native behavior.
-    static func injectThinkingParams(into body: inout [String: Any], model: LLMModel, level: ThinkingLevel, isOpenRouter: Bool = false, maxTokens: Int = 0, offEffort: String? = nil, unifiedReasoningEffort: Bool = false) {
-        let lid = model.id.lowercased()
-        // [T-thinking-off-explicit] Families whose backends validate
-        // reasoning_effort against a STRICT low/medium/high enum and reject
-        // everything else (the same backends the xhigh clamp exists for:
-        // MiMo-2.5/Pro 400s, Agnes 422s). Device test 2026-07-21 (iPhone 11,
-        // api.xiaomimimo.com): `reasoning_effort:"minimal"` killed the whole
-        // request — no reply at all, worse than the vendor-default reasoning
-        // we were trying to avoid. For these, OFF keeps omitting the field.
-        let strictEffortEnum = lid.contains("mimo") || lid.contains("agnes")
-        let offEffort = strictEffortEnum ? nil : offEffort
-
-        // OpenRouter: unified `reasoning` parameter — auto-adapts to backend provider.
-        // When thinking is off, omit the parameter entirely so forced-reasoning models
-        // (DeepSeek R1, Kimi K2.5, etc.) use their default behavior instead of rejecting
-        // `effort: "none"` with "Reasoning is mandatory for this endpoint".
-        if isOpenRouter {
-            guard level.isEnabled else { return }
-            let effort: String = switch level {
-            case .off: "low" // unreachable due to guard above
-            case .low: "low"
-            case .medium: "medium"
-            case .high: "high"
-            case .xhigh: "xhigh"
-            // [T-ios-ultra-effort-clamp] Ultra → "max" on the wire (see
-            // reasoningEffort(for:level:)); "ultra" is a client-side orchestration
-            // concept, never a valid server effort string.
-            case .max, .ultra: "max"
-            }
+    /// Default Chat Completions thinking mapping. This is deliberately
+    /// provider/protocol-level only: model/vendor-specific mappings belong in
+    /// user-authored structured controls.
+    static func applyDefaultChatThinking(into body: inout [String: Any], provider: OpenAIProvider, model: LLMModel, level: ThinkingLevel) {
+        guard provider.requestCustomization?.disablesBuiltInThinkingInjection != true else { return }
+        guard model.supportsReasoning == true else { return }
+        guard level != .ultra else { return }
+        guard let effort = reasoningEffort(for: model, level: level) else { return }
+        if provider.useOpenRouterCompat {
             body["reasoning"] = ["effort": effort]
-            return
+        } else {
+            body["reasoning_effort"] = effort
         }
-
-        // OpenAI native o-series and GPT-5.x: reasoning_effort
-        if lid.hasPrefix("o1") || lid.hasPrefix("o3") || lid.hasPrefix("o4")
-            || lid.hasPrefix("gpt-5") || lid.hasPrefix("gpt-4") {
-            if let effort = reasoningEffort(for: model, level: level) {
-                body["reasoning_effort"] = effort
-            } else if !level.isEnabled, let offEffort, model.supportsReasoning ?? false {
-                // [T-thinking-off-explicit] OFF must be SENT, not omitted:
-                // with the field missing, each vendor applies its own default
-                // tier (OpenAI "none", Volcano Ark "minimal", others higher) —
-                // user report: toggle off, capture showed no reasoning field
-                // and the server still reasoned. Same supportsReasoning gate
-                // as the enabled path: non-reasoning models (e.g. gpt-4o)
-                // reject the parameter outright.
-                body["reasoning_effort"] = offEffort
-            }
-            return
-        }
-
-        // Qwen3 models: enable_thinking + thinking_budget
-        // DashScope expects these in extra_body; some endpoints accept top-level.
-        // Send both for maximum compatibility.
-        // When off, explicitly disable — Qwen3 thinks by default.
-        if lid.contains("qwen") {
-            let enabled = level.isEnabled
-            var budget: Int = switch level {
-            case .off: 0
-            case .low: 4096
-            case .medium: 16384
-            case .high: 32768
-            case .xhigh, .max, .ultra: 65536
-            }
-            // [T-ios-qwen3-thinking-budget-max-tokens-constraint] (issue #35, #641)
-            // DashScope/Bailian enforces a STRICT `thinking_budget <
-            // max_completion_tokens` and 400s otherwise — equal values are
-            // rejected too ("[16384] must be greater than [16384]"). Our budget
-            // ladder is independent of maxTokens, so xhigh=65536 vs a 64000 max,
-            // or medium=16384 vs a 16384 max, both violate it. Clamp strictly
-            // below max_completion_tokens (== maxTokens) with a margin for the
-            // answer after thinking. The margin and ceiling are computed
-            // relative to maxTokens (which varies per qwen model — 64000,
-            // 16384, …), never a hardcoded threshold, and the ceiling is forced
-            // to at least maxTokens-1 so a tiny maxTokens can't leave the budget
-            // >= max. maxTokens<=0 means "not provided" (e.g. the title-gen
-            // reference) — skip the clamp then.
-            if budget > 0 && maxTokens > 0 {
-                if maxTokens < 2 {
-                    // No room for any positive budget strictly below max — drop
-                    // thinking_budget entirely rather than emit an invalid value.
-                    budget = 0
-                } else {
-                    let margin = max(2048, maxTokens / 8)
-                    // Stay strictly below max; never let the ceiling collapse to
-                    // <=0 when maxTokens is small — fall back to maxTokens-1.
-                    let ceiling = max(1, min(maxTokens - margin, maxTokens - 1))
-                    if budget >= ceiling {
-                        budget = ceiling
-                    }
-                }
-            }
-            body["enable_thinking"] = enabled
-            if budget > 0 { body["thinking_budget"] = budget }
-            body["extra_body"] = [
-                "enable_thinking": enabled,
-                "thinking_budget": budget > 0 ? budget : NSNull(),
-            ] as [String: Any]
-            return
-        }
-
-        // DeepSeek V4 (deepseek-v4-flash / deepseek-v4-pro):
-        // Thinking is ON by default on V4 and must be toggled explicitly via the
-        // `thinking` object — distinct from deepseek-reasoner, which always reasons
-        // with no user-facing toggle. deepseek-chat (V3) and deepseek-reasoner keep
-        // the forced-reasoning path below so existing behavior is preserved.
-        // [T-unified-reasoning-effort] On Volcengine Ark / Azure, deepseek-v4 is
-        // controlled by the platform's uniform `reasoning_effort` field, NOT the
-        // vendor-native `thinking:{}` object — sending the latter leaves thinking
-        // uncontrolled (user report #7). Skip this branch there and fall through
-        // to the generic reasoning_effort path below.
-        if lid.contains("deepseek-v4") && !unifiedReasoningEffort {
-            if level.isEnabled {
-                let effort: String = switch level {
-                case .off, .low, .medium: "high"
-                case .high, .xhigh, .max, .ultra: "max"
-                }
-                body["thinking"] = ["type": "enabled", "reasoning_effort": effort]
-            } else {
-                body["thinking"] = ["type": "disabled"]
-            }
-            return
-        }
-
-        // DeepSeek (pre-V4), GLM, Kimi, MiniMax, etc.:
-        // These models always return reasoning_content when they reason.
-        // No additional params needed — the model ID itself determines thinking.
-        // We just let the response parsing handle reasoning_content / <think> tags.
-        //
-        // [T-unified-reasoning-effort] EXCEPTION: on Volcengine Ark / Azure these
-        // families are re-hosted behind a uniform OpenAI surface that controls
-        // thinking ONLY via `reasoning_effort` (min tier `minimal`) — omitting it
-        // there means the gateway applies its own default and the user's level
-        // (including OFF) is ignored (user reports #6/#8/#9). Fall through to the
-        // generic reasoning_effort path in that case; keep the native skip for
-        // direct vendor endpoints.
-        if !unifiedReasoningEffort,
-           ["deepseek", "glm", "kimi", "minimax"].contains(where: { lid.contains($0) }) {
-            return
-        }
-
-        // [T-reasoning-effort-fallback] Generic fallback for OpenAI-compatible
-        // third-party reasoning models whose IDs match none of the branches
-        // above (e.g. Volcano/Ark "seed" models): inject the standard Chat
-        // Completions `reasoning_effort` field. Tri-state supportsReasoning:
-        // only a hard `false` blocks injection — nil (unknown) lets the user
-        // enable thinking in the UI, so the request must honor that here too.
-        guard model.supportsReasoning != false else { return }
-        if !level.isEnabled {
-            // [T-thinking-off-explicit] Same as the OpenAI-native branch: send
-            // the provider's off tier instead of omitting the field, so the
-            // vendor default (Ark "minimal", etc.) can't silently re-enable
-            // thinking. nil offEffort keeps the historical omit.
-            if let offEffort { body["reasoning_effort"] = offEffort }
-            return
-        }
-        let effort: String = switch level {
-        case .off: "low" // unreachable — level.isEnabled guarded above
-        case .low: "low"
-        case .medium: "medium"
-        case .high: "high"
-        case .xhigh: "xhigh"
-        // [T-ios-ultra-effort-clamp] Ultra → "max" on the wire (see
-        // reasoningEffort(for:level:)); "ultra" is a client-side orchestration
-        // concept, never a valid server effort string.
-        case .max, .ultra: "max"
-        }
-        body["reasoning_effort"] = effort
     }
 
     // MARK: - DashScope Cache Control

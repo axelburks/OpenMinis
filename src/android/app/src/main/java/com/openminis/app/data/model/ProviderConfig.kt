@@ -1,5 +1,6 @@
 package com.openminis.app.data.model
 
+import com.openminis.app.provider.catalogMaxThinkingLevel
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.util.UUID
@@ -35,21 +36,18 @@ enum class ProviderCredential {
 
 @Serializable
 enum class ThinkingLevel {
-    // [T-android-thinking-level-arch] New cases MUST be appended at the end.
-    // Kotlinx Serialization encodes enums by NAME string ("OFF"/"LOW"/...),
-    // not declaration-order ordinal, so appending does not corrupt already-
-    // persisted data. GPT-5.6 sol/terra reach ULTRA, luna reaches MAX.
-    OFF, LOW, MEDIUM, HIGH, XHIGH, MAX, ULTRA;
+    OFF, MINIMAL, LOW, MEDIUM, HIGH, XHIGH, MAX, ULTRA;
 
     val isEnabled: Boolean get() = this != OFF
 
     val displayName: String
         get() = when (this) {
             OFF -> "Off"
+            MINIMAL -> "Minimal"
             LOW -> "Low"
             MEDIUM -> "Medium"
             HIGH -> "High"
-            XHIGH -> "XHigh"   // was "Max"; the label now belongs to the new MAX case
+            XHIGH -> "XHigh"
             MAX -> "Max"
             ULTRA -> "Ultra"
         }
@@ -59,18 +57,13 @@ enum class ThinkingLevel {
     val rank: Int get() = ordinal
 
     companion object {
-        /**
-         * [T-android-thinking-level-arch] Safe deserialization fallback for a
-         * level string that this app build doesn't recognize — e.g. an older
-         * build reading a token a NEWER build persisted (Room DB / JSON mirror).
-         * Mirrors the `runCatching { … }.getOrNull()` guard already used for
-         * ImageEndpointMode (ProviderConfigMapping.kt). NEVER throws: an unknown
-         * value clamps to the highest level THIS build knows (XHIGH) rather than
-         * letting the caller handle an exception or drop the whole config. Use
-         * this for every "read from persisted data" path.
-         */
-        fun decoded(raw: String): ThinkingLevel =
-            runCatching { valueOf(raw) }.getOrElse { XHIGH }
+        fun availableLevels(model: LLMModel): List<ThinkingLevel> {
+            if (model.supportsReasoning == false) return emptyList()
+            val maxLevel = model.catalogMaxThinkingLevel
+            return entries.filter { level ->
+                level == OFF || level.rank <= maxLevel.rank
+            }
+        }
     }
 }
 
@@ -118,12 +111,8 @@ data class ModelGroup(
     val memberEntryIds: MutableList<String> = mutableListOf(),
     var strategy: RoutingStrategy = RoutingStrategy.fallback,
     var fallbackStrategy: FallbackStrategy = FallbackStrategy.default,
-    // T312: per-group session defaults. Mirrors iOS ModelGroup fields.
-    // null = "no default override" — sessions bound to this group keep
-    // OFF / unlimited unless the user opts in. Pre-T312 persisted JSON
-    // simply lacks both keys; kotlinx.serialization fills them with the
-    // declared defaults so older configs round-trip cleanly.
-    var defaultThinkingLevel: ThinkingLevel? = null,
+    // Immutable definition ID so levelId/title edits never require migration.
+    var defaultThinkingDefinitionId: String? = null,
     var contextLimitTokens: Int? = null,
     // T-ctxslider 54ab8e93: persisted memory of the last user-selected context
     // limit, so toggling the "Limit Context Window" switch OFF→leave→ON
@@ -142,15 +131,8 @@ data class ProviderInstance(
     val createdAt: Long = System.currentTimeMillis(),
     var customBaseURL: String? = null,
     var appendV1Suffix: Boolean = true,
-    // [T-provider-custom-user-agent] Optional per-provider User-Agent
-    // override. Some relay gateways only accept requests whose UA looks like
-    // an official client (e.g. Claude Code); Minis' default UA gets rejected.
-    // null/blank → keep the default UA; non-blank → replace the User-Agent
-    // header on every outbound request (chat / models / responses) for this
-    // instance. Only surfaced in the UI for custom-base OpenAI-/Anthropic-
-    // compat providers. Field name matches iOS for cross-platform
-    // export/import interop.
-    var customUserAgent: String? = null,
+    var customRequestHeaders: List<String> = emptyList(),
+    var customRequestBody: List<String> = emptyList(),
     // OpenAI-only: when true, traffic goes through /v1/responses instead of
     // /v1/chat/completions. Mirrors iOS `ProviderType.openAIResponses` flag,
     // but modeled here as a switch on the instance so an existing OpenAI
@@ -220,13 +202,9 @@ data class ModelOverrides(
     // user explicitly flipped this dimension; null means "inherit baseModel".
     val inputModalities: List<String>? = null,
     val outputModalities: List<String>? = null,
-    // [T-android-thinking-level-arch] User-set ceiling for this model's thinking
-    // intensity. Highest-priority source in the resolution chain (overrides the
-    // built-in ThinkingLevelCatalog rule). null = inherit the catalog default.
-    // Adding an optional field is safe for kotlinx.serialization deserialization
-    // of older JSON (unlike adding an enum case) — old configs simply lack the
-    // key and it defaults to null.
-    val maxThinkingLevel: ThinkingLevel? = null,
+    val customRequestHeaders: List<String> = emptyList(),
+    val customRequestBody: List<String> = emptyList(),
+    val requestBodyControls: List<RequestBodyControl> = emptyList(),
 ) {
     val isEmpty: Boolean
         get() = displayName == null
@@ -235,7 +213,9 @@ data class ModelOverrides(
             && supportsReasoning == null
             && inputModalities == null
             && outputModalities == null
-            && maxThinkingLevel == null
+            && customRequestHeaders.isEmpty()
+            && customRequestBody.isEmpty()
+            && requestBodyControls.isEmpty()
 }
 
 @Serializable

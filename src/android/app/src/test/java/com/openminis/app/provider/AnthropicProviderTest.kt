@@ -5,6 +5,12 @@ import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.LLMStreamChunk
+import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.ModelOverrides
+import com.openminis.app.data.model.ProviderCredential
+import com.openminis.app.data.model.ProviderInstance
+import com.openminis.app.data.model.ProviderType
+import com.openminis.app.data.model.RequestBodyControl
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.anthropic.AnthropicProvider
 import kotlinx.coroutines.flow.toList
@@ -373,6 +379,156 @@ class AnthropicProviderTest {
         // Unchanged below the cutoffs.
         assertEquals(false, AnthropicProvider.modelUsesAdaptiveThinking("claude-3-5-sonnet"))
         assertEquals(false, AnthropicProvider.supportsThinking("claude-3-5-sonnet"))
+    }
+
+    // -- Request customization end-to-end (header + body + controls) --
+    //
+    // [Minix] The RequestCustomization dictionary layer is exercised exhaustively
+    // in RequestCustomizationTest; these cases prove the Anthropic provider
+    // actually threads customization.apply(...) into the real outgoing request
+    // (headers + JSON body) rather than relying on cross-provider code homogeneity.
+
+    private fun customizedProvider(
+        instance: ProviderInstance,
+        entry: ModelEntry,
+        model: LLMModel,
+    ): AnthropicProvider = AnthropicProvider(
+        apiKey = "test-key",
+        model = model,
+        basePath = server.url("/").toString().trimEnd('/'),
+        requestCustomization = RequestCustomization(instance, entry),
+    )
+
+    @Test
+    fun testStreamMessage_appliesCustomHeaderAndBodyToRequest_BitsUT() = runBlocking {
+        val instance = ProviderInstance(
+            id = "provider",
+            label = "Anthropic",
+            providerType = ProviderType.anthropic,
+            credentialType = ProviderCredential.apiKey,
+            customRequestHeaders = listOf("""X-Provider = "prov""""),
+            customRequestBody = listOf("""metadata.provider = "custom""""),
+        )
+        val model = LLMModel(
+            id = "test-model",
+            displayName = "Test Model",
+            provider = "Anthropic",
+            supportsReasoning = true,
+        )
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(
+                customRequestHeaders = listOf("""X-Model = "mdl""""),
+                customRequestBody = listOf("""metadata.model = "custom""""),
+            ),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        val request = server.takeRequest()
+        assertEquals("prov", request.getHeader("X-Provider"))
+        assertEquals("mdl", request.getHeader("X-Model"))
+        val metadata = JSONObject(request.body.readUtf8()).getJSONObject("metadata")
+        assertEquals("custom", metadata.getString("provider"))
+        assertEquals("custom", metadata.getString("model"))
+    }
+
+    @Test
+    fun testStreamMessage_customHeaderCanReadDefaultAuthValue_BitsUT() = runBlocking {
+        // A custom base URL uses Bearer auth (x-api-key on the real endpoint), so
+        // {{ headers.Authorization }} lets a customization copy the resolved auth.
+        val instance = ProviderInstance(
+            id = "provider",
+            label = "Anthropic",
+            providerType = ProviderType.anthropic,
+            credentialType = ProviderCredential.apiKey,
+            customRequestHeaders = listOf("X-Auth-Copy = {{ headers.Authorization }}"),
+        )
+        val model = LLMModel(id = "test-model", displayName = "Test Model", provider = "Anthropic")
+        val entry = ModelEntry(providerInstanceId = instance.id, baseModel = model, uuid = "entry")
+        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        val request = server.takeRequest()
+        assertEquals("Bearer test-key", request.getHeader("X-Auth-Copy"))
+    }
+
+    @Test
+    fun testStreamMessage_headerDeleteRemovesCustomHeaderFromRequest_BitsUT() = runBlocking {
+        // Provider layer sets X-Temp; the model layer deletes it. The final
+        // request must not carry it. (Provider-hardcoded defaults like
+        // anthropic-version are re-added unconditionally in buildRequest and are
+        // out of scope here — see the delete-semantics note in the PR.)
+        val instance = ProviderInstance(
+            id = "provider",
+            label = "Anthropic",
+            providerType = ProviderType.anthropic,
+            credentialType = ProviderCredential.apiKey,
+            customRequestHeaders = listOf("""X-Temp = "set-by-provider""""),
+        )
+        val model = LLMModel(id = "test-model", displayName = "Test Model", provider = "Anthropic")
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(customRequestHeaders = listOf("X-Temp = delete()")),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        val request = server.takeRequest()
+        assertNull(request.getHeader("X-Temp"))
+    }
+
+    @Test
+    fun testStreamMessage_thinkingControlInjectsEffortIntoRequestBody_BitsUT() = runBlocking {
+        // A thinkingBudget optionGroup control resolves to a definition and its
+        // payloadExpressions must land in the real body. Uses an explicit option
+        // (not RequestBodyControlDefaults) so the assertion is self-contained.
+        val instance = ProviderInstance(
+            id = "provider",
+            label = "Anthropic",
+            providerType = ProviderType.anthropic,
+            credentialType = ProviderCredential.apiKey,
+        )
+        val model = LLMModel(
+            id = "test-model",
+            displayName = "Test Model",
+            provider = "Anthropic",
+            supportsReasoning = true,
+        )
+        val control = RequestBodyControl(
+            id = "thinking",
+            title = "Thinking",
+            kind = RequestBodyControl.Kind.toggle,
+            defaultIsActive = true,
+            payloadExpressions = listOf(
+                """body.thinking = {type: "adaptive", display: "summarized"}""",
+                """body.output_config.effort = "high"""",
+            ),
+        )
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(requestBodyControls = listOf(control)),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        val body = JSONObject(server.takeRequest().body.readUtf8())
+        assertEquals("adaptive", body.getJSONObject("thinking").getString("type"))
+        assertEquals("high", body.getJSONObject("output_config").getString("effort"))
     }
 
     // -- Provider metadata --

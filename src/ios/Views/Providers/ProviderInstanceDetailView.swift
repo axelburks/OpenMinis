@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
 
 /// Detail view for a single ProviderInstance.
 /// Allows editing label, managing credential, viewing/hiding models, and deleting.
@@ -19,7 +21,6 @@ struct ProviderInstanceDetailView: View {
     @State private var showAddCustomModel = false
     @State private var oauthRefreshTrigger = false
     @State private var editingCustomBaseURL = ""
-    @State private var editingCustomUserAgent = ""
     @State private var showManualTokenInput = false
     @State private var manualTokenInputText = ""
     @State private var editingModelEntry: ModelEntry?
@@ -156,16 +157,16 @@ struct ProviderInstanceDetailView: View {
             customBaseURLSection(instance)
 
             // [T-mimo-shadow-voice] These LLM-config fields are gated by their own
-            // providerType/capability checks (supportsCustomUserAgent, API-format
+            // providerType/capability checks (supportsCustomRequestHeaders, API-format
             // = OpenAI, supportsAzureMode, supportsImageEndpointSetting), so they
             // already show only where relevant. The old `!isVoiceOnlyProvider`
             // wrapper is removed: an instance is no longer classified voice-only,
             // and a mixed vendor (MiMo) is a normal OpenAI-compat provider that
             // should expose these settings.
 
-            // MARK: Custom User-Agent (custom-base OpenAI/Anthropic-compat only)
-            if instance.supportsCustomUserAgent {
-                customUserAgentSection(instance)
+            // MARK: Custom Request Headers
+            if instance.supportsCustomRequestHeaders {
+                providerRequestCustomizationSection(instance)
             }
 
             // MARK: API Format (OpenAI only)
@@ -178,7 +179,7 @@ struct ProviderInstanceDetailView: View {
                             // Swap between .openAI and .openAIResponses
                             // This requires recreating the instance since providerType is let.
                             // Carry ALL other fields forward — otherwise switching the
-                            // format would silently reset imageEndpointMode / customUserAgent
+                            // format would silently reset imageEndpointMode / custom headers
                             // / azureMode to their defaults. [T-ios-azure-openai]
                             let newInstance = ProviderInstance(
                                 id: instance.id,
@@ -191,7 +192,8 @@ struct ProviderInstanceDetailView: View {
                                 appendV1Suffix: instance.appendV1Suffix,
                                 imageEndpointMode: instance.imageEndpointMode,
                                 imageEndpointResolved: instance.imageEndpointResolved,
-                                customUserAgent: instance.customUserAgent,
+                                customRequestHeaders: instance.customRequestHeaders,
+                                customRequestBody: instance.customRequestBody,
                                 azureMode: instance.azureMode
                             )
                             store.updateInstance(newInstance)
@@ -528,7 +530,7 @@ struct ProviderInstanceDetailView: View {
         }
     }
 
-    // MARK: - Custom User-Agent
+    // MARK: - Custom Request Headers
 
     @ViewBuilder
     // [T-ios-azure-openai] Azure OpenAI toggle. Orthogonal to the API Format
@@ -550,29 +552,21 @@ struct ProviderInstanceDetailView: View {
         }
     }
 
-    private func customUserAgentSection(_ instance: ProviderInstance) -> some View {
+    private func providerRequestCustomizationSection(_ instance: ProviderInstance) -> some View {
         Section {
-            TextField(String(localized: "Default"), text: $editingCustomUserAgent)
-                .font(.system(.body, design: .monospaced))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .onAppear { editingCustomUserAgent = instance.customUserAgent ?? "" }
-                .onSubmit { saveCustomUserAgent(instance) }
-                .onDisappear { saveCustomUserAgent(instance) }
-        } header: {
-            Text(String(localized: "Custom User-Agent"))
+            NavigationLink {
+                ProviderRequestCustomizationEditor(instance: instance)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(String(localized: "Request Customization"))
+                    Text(String(localized: "\(instance.customRequestHeaders.count) headers · \(instance.customRequestBody.count) body expressions"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         } footer: {
-            Text(String(localized: "Override the User-Agent header sent to this endpoint. Leave empty to use the Minis default. Useful for relays that only accept specific clients (e.g. \"claude-cli/1.0\")."))
+            Text(String(localized: "Configure provider-level custom request headers and request body expressions. Model-level customization is applied after provider-level customization."))
         }
-    }
-
-    private func saveCustomUserAgent(_ instance: ProviderInstance) {
-        let current = instance.customUserAgent ?? ""
-        let trimmed = editingCustomUserAgent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed != current else { return }
-        var updated = instance
-        updated.customUserAgent = trimmed.isEmpty ? nil : trimmed
-        store.updateInstance(updated)
     }
 
     // MARK: - Image Generation Endpoint
@@ -1201,10 +1195,16 @@ struct ModelEntryDetailSheet: View {
     @State private var contextWindowText: String = ""
     @State private var supportsThinking: Bool = false
     @State private var maxTokensText: String = ""
+    @State private var customRequestHeadersText: String = ""
+    @State private var customRequestBodyText: String = ""
+    @State private var requestBodyControls: [RequestBodyControl] = []
     /// [T-ios-model-quick-test] Presents the modality-matched Quick Test sheet.
     @State private var showQuickTest: Bool = false
-    @State private var showForceThinkingAlert: Bool = false
     @State private var showResetAlert: Bool = false
+    @State private var showDiscardAlert: Bool = false
+    @State private var hasUnsavedChanges: Bool = false
+    @State private var hasLoadedInitialValues: Bool = false
+    @State private var hasInitialized: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -1295,32 +1295,14 @@ struct ModelEntryDetailSheet: View {
 
                         maxTokensField()
 
-                        HStack {
-                            Text(String(localized: "Thinking"))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            if supportsThinking {
-                                Label(String(localized: "Supported"), systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                    .labelStyle(.titleAndIcon)
-                            } else if entry.baseModel.supportsReasoning == false {
-                                Text(String(localized: "Not Supported"))
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text(String(localized: "Unknown"))
-                                    .foregroundStyle(.tertiary)
-                                Button(String(localized: "Force Enable")) {
-                                    showForceThinkingAlert = true
-                                }
-                                .font(.caption)
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                            }
-                        }
+                        Toggle(
+                            String(localized: "Thinking"),
+                            isOn: $supportsThinking
+                        )
                     } header: {
                         Text(String(localized: "Capabilities"))
                     } footer: {
-                        Text(String(localized: "Leave Context Window empty to use auto-detected value. Leave Max Output Tokens empty to follow the provider default."))
+                    Text(String(localized: "Leave Context Window empty to use auto-detected value. Leave Max Output Tokens empty to follow the provider default."))
                     }
                 }
 
@@ -1328,6 +1310,32 @@ struct ModelEntryDetailSheet: View {
                     Toggle("Hidden", isOn: $isHidden)
                 } footer: {
                     Text("Hidden models won't appear in the model picker.")
+                }
+
+                Section {
+                    NavigationLink {
+                        ModelRequestCustomizationEditor(
+                            entry: entry,
+                            provider: store.instance(for: entry.providerInstanceId),
+                            customRequestHeadersText: $customRequestHeadersText,
+                            customRequestBodyText: $customRequestBodyText,
+                            requestBodyControls: $requestBodyControls,
+                            onSave: {
+                                save(dismissAfter: false)
+                                hasUnsavedChanges = false
+                                return true
+                            }
+                        )
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(localized: "Request Customization"))
+                            Text(requestCustomizationSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } footer: {
+                    Text(String(localized: "Configure custom request headers, request body expressions, and request controls."))
                 }
 
                 Section {
@@ -1380,19 +1388,30 @@ struct ModelEntryDetailSheet: View {
                     Text(String(localized: "Run a quick test matching this model's main capability."))
                 }
             }
-            .navigationTitle("Model Details")
+            .navigationTitle(String(localized: "Model Details"))
             .navigationBarTitleDisplayMode(.inline)
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") { cancelOrConfirmDiscard() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Save") { save() }
                         .font(.body.weight(.semibold))
                 }
             }
-            .onAppear { loadFromEntry() }
+            .onAppear {
+                guard !hasInitialized else { return }
+                hasInitialized = true
+                loadFromEntry()
+            }
+            .interactiveDismissDisabled(true)
+            .onChange(of: supportsThinking) { _ in
+                markDirtyIfLoaded()
+            }
+            .onChange(of: customRequestHeadersText) { _ in markDirtyIfLoaded() }
+            .onChange(of: customRequestBodyText) { _ in markDirtyIfLoaded() }
+            .onChange(of: requestBodyControls) { _ in markDirtyIfLoaded() }
             .sheet(isPresented: $showQuickTest) {
                 // [T-quicktest-stale-session] Fresh identity per model — this
                 // detail view's entry is fixed, but keep the same pattern as
@@ -1404,17 +1423,6 @@ struct ModelEntryDetailSheet: View {
                     .presentationDragIndicator(.visible)
             }
             .alert(
-                String(localized: "Force Enable Thinking"),
-                isPresented: $showForceThinkingAlert
-            ) {
-                Button(String(localized: "Enable"), role: .destructive) {
-                    supportsThinking = true
-                }
-                Button(String(localized: "Cancel"), role: .cancel) {}
-            } message: {
-                Text(String(localized: "The provider has not declared whether this model supports thinking. Force-enabling may cause errors — you can disable it or retry if needed."))
-            }
-            .alert(
                 String(localized: "Reset Model Settings"),
                 isPresented: $showResetAlert
             ) {
@@ -1424,6 +1432,13 @@ struct ModelEntryDetailSheet: View {
                 Button(String(localized: "Cancel"), role: .cancel) {}
             } message: {
                 Text(String(localized: "This will clear all customizations (including force-enabled thinking) and restore the provider's default values."))
+            }
+            .alert(String(localized: "Unsaved Changes"), isPresented: $showDiscardAlert) {
+                Button(String(localized: "Save")) { save() }
+                Button(String(localized: "Discard"), role: .destructive) { dismiss() }
+                Button(String(localized: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(String(localized: "Save your model request customization before closing?"))
             }
         }
     }
@@ -1462,6 +1477,18 @@ struct ModelEntryDetailSheet: View {
         return typed > apiMax
     }
 
+    private var requestCustomizationSummary: String {
+        let headerCount = customRequestHeadersText
+            .split(whereSeparator: \.isNewline)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .count
+        let bodyCount = customRequestBodyText
+            .split(whereSeparator: \.isNewline)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .count
+        return String(localized: "\(headerCount) headers · \(bodyCount) body expressions · \(requestBodyControls.count) controls")
+    }
+
     @ViewBuilder
     private func maxTokensField() -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1487,6 +1514,7 @@ struct ModelEntryDetailSheet: View {
     }
 
     private func loadFromEntry() {
+        hasLoadedInitialValues = false
         // Show the effective (user-visible) name — this is `baseModel.displayName` overlaid
         // with any existing displayName override.
         displayName = entry.model.displayName
@@ -1517,6 +1545,13 @@ struct ModelEntryDetailSheet: View {
         } else {
             maxTokensText = ""
         }
+        customRequestHeadersText = (entry.overrides.customRequestHeaders ?? []).joined(separator: "\n")
+        customRequestBodyText = (entry.overrides.customRequestBody ?? []).joined(separator: "\n")
+        requestBodyControls = entry.overrides.requestBodyControls ?? []
+        hasUnsavedChanges = false
+        DispatchQueue.main.async {
+            hasLoadedInitialValues = true
+        }
     }
 
     private func resetToDefault() {
@@ -1541,9 +1576,26 @@ struct ModelEntryDetailSheet: View {
         videoInput = modality.contains(.videoInput)
         imageOutput = modality.contains(.imageOutput)
         audioOutput = modality.contains(.audioOutput)
+        customRequestHeadersText = ""
+        customRequestBodyText = ""
+        requestBodyControls = []
+        hasUnsavedChanges = true
     }
 
-    private func save() {
+    private func cancelOrConfirmDiscard() {
+        if hasUnsavedChanges {
+            showDiscardAlert = true
+        } else {
+            dismiss()
+        }
+    }
+
+    private func markDirtyIfLoaded() {
+        guard hasLoadedInitialValues else { return }
+        hasUnsavedChanges = true
+    }
+
+    private func save(dismissAfter: Bool = true) {
         let trimmedName = displayName.trimmingCharacters(in: .whitespaces)
         let trimmedId = modelId.trimmingCharacters(in: .whitespaces)
         let trimmedMaxTokens = maxTokensText.trimmingCharacters(in: .whitespaces)
@@ -1606,6 +1658,23 @@ struct ModelEntryDetailSheet: View {
         if supportsThinking != (entry.baseModel.supportsReasoning ?? false) {
             newOverrides.supportsReasoning = supportsThinking
         }
+        let customHeaders = customRequestHeadersText
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !customHeaders.isEmpty {
+            newOverrides.customRequestHeaders = customHeaders
+        }
+        let customBody = customRequestBodyText
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !customBody.isEmpty {
+            newOverrides.customRequestBody = customBody
+        }
+        if !requestBodyControls.isEmpty {
+            newOverrides.requestBodyControls = requestBodyControls
+        }
 
         let updatedEntry = ModelEntry(
             uuid: entry.uuid,
@@ -1617,9 +1686,13 @@ struct ModelEntryDetailSheet: View {
             userModifiedAt: newOverrides.isEmpty && !isHidden ? nil : Date()
         )
         store.updateEntry(updatedEntry)
-        dismiss()
+        hasUnsavedChanges = false
+        if dismissAfter {
+            dismiss()
+        }
     }
 }
+
 
 // MARK: - Share Sheet
 
@@ -1630,4 +1703,3 @@ private struct ProviderShareSheet: UIViewControllerRepresentable {
     }
     func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
-

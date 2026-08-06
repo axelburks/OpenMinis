@@ -1,5 +1,6 @@
 package com.openminis.app.ui.chat
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -80,7 +81,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -109,7 +109,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Description
@@ -129,6 +128,7 @@ import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
@@ -145,8 +145,6 @@ import com.openminis.app.ui.components.MinisMenuDivider
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -197,7 +195,6 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
@@ -230,7 +227,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.outlined.Forum
@@ -406,6 +402,7 @@ fun ChatScreen(
      *  management screen — wired to the "Edit" button on the model picker's
      *  Model Groups section header. */
     onModelGroupsClick: () -> Unit = {},
+    onEditCurrentModel: (instanceId: String, entryId: String) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -679,10 +676,7 @@ fun ChatScreen(
     val coroutineScope = rememberCoroutineScope()
 
     var showModelPicker by remember { mutableStateOf(false) }
-    // [T-android-thinking-badge-navbar] Whether the thinking-level sheet
-    // (opened by tapping the navbar thinking badge) is presented. Mirrors iOS
-    // AIChatView.showThinkingLevelSheet.
-    var showThinkingLevelSheet by remember { mutableStateOf(false) }
+    var showRequestControlsSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showSkillsSheet by remember { mutableStateOf(false) }
@@ -1231,6 +1225,7 @@ fun ChatScreen(
     // path). Caller decides whether to invoke this — gating (canActivate,
     // armFraction, swipedUp) stays at the call site.
     val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
+        showRequestControlsSheet = false
         if (viewModel.tryExecuteInputAsSlashCommand(rawText)) {
             viewModel.setInputText("")
             keyboardController?.hide()
@@ -2109,7 +2104,9 @@ fun ChatScreen(
                                 // keeps its intrinsic width and always renders in
                                 // full — the level label never gets clipped.
                                 if (providerName.isNotEmpty() || modelName.isNotEmpty()) {
-                                    val thinkingLevelBadgeState by viewModel.thinkingLevel.collectAsState()
+                                    val thinkingDefinitionBadgeId by
+                                        viewModel.thinkingDefinitionId
+                                            .collectAsState()
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -2159,20 +2156,16 @@ fun ChatScreen(
                                         //     the bound model actually supports
                                         //     thinking (no badge for models that
                                         //     can't reason);
-                                        //   - level.isEnabled (≠ Off) → thinking is
-                                        //     switched on right now.
-                                        // When Off we render NOTHING (no greyed
-                                        // placeholder): iOS found a grey "Off" pill
-                                        // read as ambiguous ("is thinking on or
-                                        // off?"), so the badge simply disappears.
-                                        // The sheet still lists Off, so users can
-                                        // turn thinking back off from there.
+                                        // Auto means the client does not select an
+                                        // intensity, so only explicit levels get a
+                                        // badge. None remains visible because it is
+                                        // an explicit semantic level, not Auto.
                                         if (viewModel.availableThinkingLevels.isNotEmpty() &&
-                                            thinkingLevelBadgeState.isEnabled
+                                            thinkingDefinitionBadgeId != "auto"
                                         ) {
                                             ThinkingLevelBadge(
-                                                level = thinkingLevelBadgeState,
-                                                onClick = { showThinkingLevelSheet = true },
+                                                definitionId =
+                                                    thinkingDefinitionBadgeId,
                                             )
                                         }
                                     }
@@ -3791,8 +3784,6 @@ fun ChatScreen(
                 ) { viewModel.filteredSlashCommands() }
 
                 if (showSlashMenu && filteredSlashCommands.isNotEmpty()) {
-                    val thinkingLevelState by viewModel.thinkingLevel.collectAsState()
-                    val thinkingSupported = viewModel.currentModelSupportsReasoning
                     val memoryOnState by viewModel.memoryEnabled.collectAsState()
                     androidx.compose.ui.window.Popup(
                         popupPositionProvider = remember {
@@ -3873,48 +3864,23 @@ fun ChatScreen(
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                                     )
                                 }
-                                val isThinking = cmd.id == "thinking"
-                                val isThinkingActive = isThinking && thinkingLevelState.isEnabled && thinkingSupported
-                                val titleColor = if (isThinkingActive) ChatColors.sendButton else ChatColors.primaryText
-                                val subtitleColor = if (isThinking && !thinkingSupported) {
-                                    ChatColors.secondaryText
-                                } else if (isThinkingActive) {
-                                    ChatColors.sendButton.copy(alpha = 0.7f)
-                                } else ChatColors.secondaryText
-                                val iconTint = if (isThinkingActive) ChatColors.sendButton else ChatColors.primaryText
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .let {
-                                            if (!isThinking) {
-                                                it.clickable {
-                                                    // [T-android-slash-menu-clears-input] Pass the
-                                                    // LIVE input so an action command keeps the
-                                                    // user's body text instead of wiping it.
-                                                    viewModel.setInputText(viewModel.executeSlashCommand(cmd, inputText))
-                                                    // For Skill rows, "/<name> "
-                                                    // is a typing aid — the user
-                                                    // still needs to type
-                                                    // arguments. Bring the IME
-                                                    // back up + grab focus so
-                                                    // they can keep typing
-                                                    // without an extra tap on
-                                                    // the composer.
-                                                    if (cmd.isSkill) {
-                                                        try {
-                                                            inputFocusRequester.requestFocus()
-                                                        } catch (_: IllegalStateException) {
-                                                            // FocusRequester not attached yet.
-                                                        }
-                                                        keyboardController?.show()
-                                                    }
+                                        .clickable {
+                                            // [T-android-slash-menu-clears-input] Pass the
+                                            // LIVE input so an action command keeps the
+                                            // user's body text instead of wiping it.
+                                            viewModel.setInputText(viewModel.executeSlashCommand(cmd, inputText))
+                                            // For Skill rows, "/<name> " is a typing aid.
+                                            if (cmd.isSkill) {
+                                                try {
+                                                    inputFocusRequester.requestFocus()
+                                                } catch (_: IllegalStateException) {
+                                                    // FocusRequester not attached yet.
                                                 }
-                                            } else if (thinkingSupported) {
-                                                it.clickable {
-                                                    val newLevel = if (thinkingLevelState.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
-                                                    viewModel.setThinkingLevel(newLevel)
-                                                }
-                                            } else it
+                                                keyboardController?.show()
+                                            }
                                         }
                                         // [T-android-slash-menu-density] Tighter
                                         // vertical padding (10→7) so slash rows
@@ -3925,7 +3891,7 @@ fun ChatScreen(
                                     Icon(
                                         imageVector = cmd.icon,
                                         contentDescription = null,
-                                        tint = iconTint,
+                                        tint = ChatColors.primaryText,
                                         modifier = Modifier.size(18.dp),
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
@@ -3934,7 +3900,7 @@ fun ChatScreen(
                                             text = "/${cmd.title.lowercase()}",
                                             fontSize = 14.sp,
                                             fontWeight = FontWeight.SemiBold,
-                                            color = titleColor,
+                                            color = ChatColors.primaryText,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
@@ -3947,7 +3913,7 @@ fun ChatScreen(
                                         Text(
                                             text = cmd.subtitle,
                                             fontSize = 11.sp,
-                                            color = subtitleColor,
+                                            color = ChatColors.secondaryText,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
@@ -3958,15 +3924,6 @@ fun ChatScreen(
                                             contentDescription = null,
                                             tint = if (memoryOnState) ChatColors.sendButton else ChatColors.secondaryText,
                                             modifier = Modifier.size(18.dp),
-                                        )
-                                    }
-                                    if (isThinking && thinkingSupported) {
-                                        ThinkingLevelPicker(
-                                            current = thinkingLevelState,
-                                            // [T-android-thinking-level-arch] Only
-                                            // offer tiers the bound model supports.
-                                            availableLevels = viewModel.availableThinkingLevels,
-                                            onSelect = { level -> viewModel.setThinkingLevel(level) },
                                         )
                                     }
                                 }
@@ -4523,6 +4480,94 @@ fun ChatScreen(
                         Spacer(modifier = Modifier.height(6.dp))
                     }
 
+                    if (showRequestControlsSheet) {
+                        val requestControlsPopupGapPx =
+                            with(LocalDensity.current) {
+                                16.dp.roundToPx()
+                            }
+                        androidx.compose.ui.window.Popup(
+                            popupPositionProvider = remember(
+                                requestControlsPopupGapPx,
+                            ) {
+                                object : androidx.compose.ui.window.PopupPositionProvider {
+                                    override fun calculatePosition(
+                                        anchorBounds: androidx.compose.ui.unit.IntRect,
+                                        windowSize: androidx.compose.ui.unit.IntSize,
+                                        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                                        popupContentSize: androidx.compose.ui.unit.IntSize,
+                                    ): androidx.compose.ui.unit.IntOffset {
+                                        val x = (
+                                            anchorBounds.left + anchorBounds.right - popupContentSize.width
+                                            ) / 2
+                                        return androidx.compose.ui.unit.IntOffset(
+                                            x.coerceIn(
+                                                0,
+                                                (windowSize.width - popupContentSize.width).coerceAtLeast(0),
+                                            ),
+                                            (
+                                                anchorBounds.top -
+                                                    popupContentSize.height -
+                                                    requestControlsPopupGapPx
+                                                )
+                                                .coerceAtLeast(0),
+                                        )
+                                    }
+                                }
+                            },
+                            onDismissRequest = { showRequestControlsSheet = false },
+                            properties = androidx.compose.ui.window.PopupProperties(
+                                focusable = false,
+                                dismissOnClickOutside = true,
+                                dismissOnBackPress = true,
+                            ),
+                        ) {
+                            val currentThinkingLevel by viewModel.thinkingLevel.collectAsState()
+                            val currentThinkingDefinitionId by
+                                viewModel.thinkingDefinitionId
+                                    .collectAsState()
+                            MinixChatRequestControlsPanel(
+                                providerName = providerName,
+                                modelName = modelName,
+                                currentLevel = currentThinkingLevel,
+                                currentDefinitionId =
+                                    currentThinkingDefinitionId,
+                                availableLevels = viewModel.availableThinkingLevels,
+                                controls = viewModel.currentRequestBodyControls,
+                                sessionKey =
+                                    viewModel.currentRequestBodyControlSessionKey,
+                                modelKey = viewModel.currentRequestBodyControlModelKey,
+                                onSelect = viewModel::setThinkingLevel,
+                                onSelectDefinitionId =
+                                    viewModel::setThinkingDefinitionId,
+                                onOpenModelPicker = {
+                                    showRequestControlsSheet = false
+                                    showModelPicker = true
+                                },
+                                onOpenRequestCustomization = {
+                                    viewModel.activeEntryId.value?.let { entryId ->
+                                        providerRepository.config.value
+                                            .modelEntries
+                                            .find { it.id == entryId }
+                                            ?.let { entry ->
+                                                showRequestControlsSheet = false
+                                                onEditCurrentModel(
+                                                    entry.providerInstanceId,
+                                                    entry.id,
+                                                )
+                                            }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .widthIn(max = 420.dp)
+                                    .padding(
+                                        start = 10.dp,
+                                        end = 10.dp,
+                                        bottom = 8.dp,
+                                    ),
+                            )
+                        }
+                    }
+
                     // While a voice session is active, the TextField is
                     // replaced by a live waveform + partial-transcription
                     // preview (matches iOS `inputFieldOrWaveform`). Recognized
@@ -4544,6 +4589,7 @@ fun ChatScreen(
                             providerRepository = providerRepository,
                             inputText = inputText,
                             onInputTextChange = { text ->
+                                showRequestControlsSheet = false
                                 viewModel.setInputText(text)
                                 viewModel.updateSlashMenuState(text)
                             },
@@ -4555,7 +4601,12 @@ fun ChatScreen(
                             // evaluated lazily at correction time.
                             conversationContextProvider = {
                                 com.openminis.app.speech.correction.VoiceCorrection
-                                    .buildConversationContext(context, viewModel.messages.value)
+                                    .buildConversationContext(
+                                        context,
+                                        viewModel.messages.value,
+                                        viewModel.realSessionId
+                                            .takeIf { it.isNotEmpty() },
+                                    )
                             },
                         )
                     } else if (recIsRecording) {
@@ -4612,6 +4663,7 @@ fun ChatScreen(
                         // truth for what "press Enter to send" means.
                         val performEnterSend: () -> Boolean = handler@{
                             if (inputText.isBlank() && attachments.isEmpty()) return@handler false
+                            showRequestControlsSheet = false
                             // Intercept slash commands so "/compact" et al.
                             // run locally instead of being sent as a chat
                             // turn. Mirrors iOS performSend().
@@ -4645,6 +4697,9 @@ fun ChatScreen(
                         BasicTextField(
                             value = inputFieldValue,
                             onValueChange = { tfv ->
+                                if (showRequestControlsSheet) {
+                                    showRequestControlsSheet = false
+                                }
                                 // T217-2: drop IME residue commits in 300ms post-send window.
                                 // finishComposingText (fired by clearFocus on send) makes
                                 // voice/Pinyin IMEs replay their pending candidate through
@@ -4730,7 +4785,12 @@ fun ChatScreen(
                                 .fillMaxWidth()
                                 .heightIn(min = 25.dp)
                                 .focusRequester(inputFocusRequester)
-                                .onFocusChanged { inputFocused = it.isFocused }
+                                .onFocusChanged {
+                                    inputFocused = it.isFocused
+                                    if (it.isFocused) {
+                                        showRequestControlsSheet = false
+                                    }
+                                }
                                 .onKeyEvent { event ->
                                     // T-at-filepicker-keyboard: while the @-mention
                                     // menu is open, hardware Up/Down navigates the
@@ -4942,8 +5002,33 @@ fun ChatScreen(
 
                         Spacer(modifier = Modifier.width(8.dp))
 
+                        val currentControls = viewModel.currentRequestBodyControls
+                        if (viewModel.availableThinkingLevels.isNotEmpty() || currentControls.isNotEmpty()) {
+                            InputCircleButton(onClick = {
+                                val opening = !showRequestControlsSheet
+                                if (opening) {
+                                    if (viewModel.showSlashMenu.value) {
+                                        viewModel.setInputText(viewModel.dismissSlashMenu(inputText))
+                                    }
+                                    viewModel.dismissMentionMenu()
+                                    focusManager.clearFocus()
+                                    keyboardController?.hide()
+                                }
+                                showRequestControlsSheet = opening
+                            }) {
+                                Icon(
+                                    Icons.Default.Tune,
+                                    contentDescription = "Request controls",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(19.dp),
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+
                         // Left: "/" slash command button (iOS: italic /, bold)
                         InputCircleButton(onClick = {
+                            showRequestControlsSheet = false
                             if (viewModel.showSlashMenu.value) {
                                 viewModel.setInputText(viewModel.dismissSlashMenu(inputText))
                             } else {
@@ -5468,22 +5553,6 @@ fun ChatScreen(
         )
     }
 
-    // [T-android-thinking-badge-navbar] Thinking-level sheet opened by tapping
-    // the navbar thinking badge. Mirrors iOS ThinkingLevelSheetView: an Off row
-    // plus every level the current model supports, each selectable.
-    if (showThinkingLevelSheet) {
-        val currentThinkingLevel by viewModel.thinkingLevel.collectAsState()
-        ThinkingLevelSheet(
-            currentLevel = currentThinkingLevel,
-            availableLevels = viewModel.availableThinkingLevels,
-            onSelect = { level ->
-                viewModel.setThinkingLevel(level)
-                showThinkingLevelSheet = false
-            },
-            onDismiss = { showThinkingLevelSheet = false },
-        )
-    }
-
     // Model Picker bottom sheet
     if (showModelPicker) {
         val config by providerRepository.config.collectAsState()
@@ -5754,8 +5823,7 @@ fun ChatScreen(
  */
 @Composable
 private fun ThinkingLevelBadge(
-    level: com.openminis.app.data.model.ThinkingLevel,
-    onClick: () -> Unit,
+    definitionId: String,
 ) {
     val context = LocalContext.current
     // Secondary grey for icon + label (iOS secondaryText parity) — no accent.
@@ -5767,8 +5835,6 @@ private fun ThinkingLevelBadge(
             .clip(RoundedCornerShape(50))
             // Faint translucent-grey capsule (iOS Color.secondary.opacity(0.10)).
             .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-            // Own clickable → consumes the tap, opens the thinking sheet.
-            .clickable(onClick = onClick)
             .padding(horizontal = 5.dp, vertical = 1.dp),
     ) {
         Icon(
@@ -5778,7 +5844,10 @@ private fun ThinkingLevelBadge(
             modifier = Modifier.size(9.dp),
         )
         Text(
-            text = level.localizedName(context),
+            text = com.openminis.app.data.model.ThinkingLevelRegistry.title(
+                definitionId,
+                context,
+            ) ?: definitionId,
             fontSize = 9.sp,
             lineHeight = 11.sp,
             fontWeight = FontWeight.Medium,
@@ -5787,81 +5856,3 @@ private fun ThinkingLevelBadge(
         )
     }
 }
-
-/**
- * [T-android-thinking-badge-navbar] Bottom-sheet thinking-level selector opened
- * from [ThinkingLevelBadge]. Mirrors iOS ThinkingLevelSheetView: an Off row
- * followed by every level the current model supports; the active level shows a
- * trailing check. Selecting any row calls [onSelect] (which also dismisses).
- */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-@Composable
-private fun ThinkingLevelSheet(
-    currentLevel: com.openminis.app.data.model.ThinkingLevel,
-    availableLevels: List<com.openminis.app.data.model.ThinkingLevel>,
-    onSelect: (com.openminis.app.data.model.ThinkingLevel) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    // Off is always offered (turns thinking off); availableLevels already
-    // excludes Off, so prepend it. De-dup defensively in case a caller ever
-    // includes it.
-    val rows = remember(availableLevels) {
-        listOf(com.openminis.app.data.model.ThinkingLevel.OFF) +
-            availableLevels.filter { it != com.openminis.app.data.model.ThinkingLevel.OFF }
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-            Text(
-                text = stringResource(R.string.thinking_level_sheet_title),
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = ChatColors.primaryText,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
-            HorizontalDivider(color = ChatColors.toolBorder, thickness = 0.5.dp)
-            val context = LocalContext.current
-            rows.forEach { level ->
-                // "Off selected" = the current level is disabled; otherwise an
-                // exact match.
-                val isSelected = if (level == com.openminis.app.data.model.ThinkingLevel.OFF) {
-                    !currentLevel.isEnabled
-                } else {
-                    currentLevel == level
-                }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelect(level) }
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lightbulb,
-                        contentDescription = null,
-                        tint = ChatColors.thinking.copy(
-                            alpha = if (level == com.openminis.app.data.model.ThinkingLevel.OFF) 0.4f else 1f,
-                        ),
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = level.localizedName(context),
-                        fontSize = 15.sp,
-                        color = ChatColors.primaryText,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (isSelected) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = null,
-                            tint = ChatColors.thinking,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-

@@ -892,6 +892,15 @@ final class ProviderConfigStore: ObservableObject {
         config.instances.filter { $0.providerType == providerType && $0.isEnabled }
     }
 
+    private static func jsonObject<T: Encodable>(
+        from value: T
+    ) -> Any? {
+        guard let data = try? JSONEncoder().encode(value) else {
+            return nil
+        }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
     /// Export an instance as shareable JSON (includes API key if present).
     func exportInstanceJSON(_ instanceId: String) -> String? {
         guard let instance = instance(for: instanceId) else { return nil }
@@ -926,26 +935,20 @@ final class ProviderConfigStore: ObservableObject {
                 if let field = base.interleavedReasoningField {
                     m["interleavedReasoningField"] = field
                 }
-                if !entry.overrides.isEmpty {
-                    // [T-provider-export-model-overrides] Serialize the FULL
-                    // ModelOverrides layer (the user's manual edits), not just
-                    // displayName/maxOutputTokens. modalityOverride, contextWindow
-                    // and supportsReasoning were previously dropped on export, so a
-                    // hand-corrected proxied model lost those edits on round-trip.
-                    // Each key is additive + optional: older builds ignore unknown
-                    // keys, and import below reads each independently so a partial
-                    // override object restores exactly the fields present.
-                    var o: [String: Any] = [:]
-                    if let dn = entry.overrides.displayName { o["displayName"] = dn }
-                    if let mt = entry.overrides.maxOutputTokens { o["maxOutputTokens"] = mt }
-                    if let mod = entry.overrides.modalityOverride { o["modalityOverride"] = mod.rawValue }
-                    if let ctx = entry.overrides.contextWindow { o["contextWindow"] = ctx }
-                    if let sr = entry.overrides.supportsReasoning { o["supportsReasoning"] = sr }
-                    m["overrides"] = o
+                if !entry.overrides.isEmpty,
+                   let overrides = Self.jsonObject(
+                       from: entry.overrides
+                   ) {
+                    m["overrides"] = overrides
                 }
                 return m
             },
         ]
+        if let definitions = Self.jsonObject(
+            from: ThinkingLevelRegistry.definitions
+        ) {
+            dict["thinkingLevelDefinitions"] = definitions
+        }
         if let key = ProviderKeychainHelper.loadAPIKey(instanceId: instanceId) {
             dict["apiKey"] = Data(key.utf8).base64EncodedString()
         }
@@ -995,11 +998,11 @@ final class ProviderConfigStore: ObservableObject {
         if !instance.appendV1Suffix {
             dict["appendV1Suffix"] = false
         }
-        // [T-provider-custom-user-agent] Additive + optional: only emitted when set.
-        // Old builds ignore the key; a new build reading an old export leaves it nil
-        // (default UA). No credential exposure — UA is not secret.
-        if let ua = instance.effectiveCustomUserAgent {
-            dict["customUserAgent"] = ua
+        if !instance.customRequestHeaders.isEmpty {
+            dict["customRequestHeaders"] = instance.customRequestHeaders
+        }
+        if !instance.customRequestBody.isEmpty {
+            dict["customRequestBody"] = instance.customRequestBody
         }
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
               let json = String(data: data, encoding: .utf8) else { return nil }
@@ -1039,15 +1042,40 @@ final class ProviderConfigStore: ObservableObject {
         // Create instance
         let customBaseURL = dict["customBaseURL"] as? String
         let appendV1 = dict["appendV1Suffix"] as? Bool ?? true
-        // [T-provider-custom-user-agent] Optional; absent in old exports → nil (default UA).
-        let customUserAgent = dict["customUserAgent"] as? String
+        let customRequestHeaders = dict["customRequestHeaders"] as? [String] ?? []
+        let customRequestBody = dict["customRequestBody"] as? [String] ?? []
+        var thinkingDefinitionIdRemap:
+            [String: String] = [:]
+        if let rawDefinitions = dict["thinkingLevelDefinitions"],
+           JSONSerialization.isValidJSONObject(rawDefinitions),
+           let definitionsData = try? JSONSerialization.data(
+               withJSONObject: rawDefinitions
+           ),
+           let importedDefinitions = try? JSONDecoder().decode(
+               [ThinkingLevelDefinition].self,
+               from: definitionsData
+           ) {
+            let result = ThinkingLevelRegistry.mergeResult(
+                local: ThinkingLevelRegistry.definitions,
+                importing: importedDefinitions
+            )
+            thinkingDefinitionIdRemap =
+                result.definitionIdRemap
+            if result.definitions
+                != ThinkingLevelRegistry.definitions {
+                ThinkingLevelRegistry.saveDefinitions(
+                    result.definitions
+                )
+            }
+        }
         let instance = ProviderInstance(
             label: resolvedLabel,
             providerType: providerType,
             credentialType: credentialType,
             customBaseURL: customBaseURL,
             appendV1Suffix: appendV1,
-            customUserAgent: customUserAgent
+            customRequestHeaders: customRequestHeaders,
+            customRequestBody: customRequestBody
         )
 
         // Save credentials to Keychain BEFORE addInstance(), so that
@@ -1166,18 +1194,46 @@ final class ProviderConfigStore: ObservableObject {
                                      interleavedReasoningField: model.interleavedReasoningField)
                 }
                 var overrides = ModelOverrides()
-                if let o = m["overrides"] as? [String: Any] {
-                    // [T-provider-export-model-overrides] Restore the full
-                    // overrides layer. Each key is read independently with `as?`
-                    // so a missing key (old export, or a partial override object)
-                    // simply stays nil → the field falls back to the baseModel /
-                    // inferred default. modalityOverride is an OptionSet stored as
-                    // its Int rawValue (same encoding as the baseModel modality).
-                    overrides.displayName = o["displayName"] as? String
-                    overrides.maxOutputTokens = o["maxOutputTokens"] as? Int
-                    overrides.modalityOverride = (o["modalityOverride"] as? Int).map { ModelModality(rawValue: $0) }
-                    overrides.contextWindow = o["contextWindow"] as? Int
-                    overrides.supportsReasoning = o["supportsReasoning"] as? Bool
+                if let rawOverrides = m["overrides"],
+                   JSONSerialization.isValidJSONObject(rawOverrides),
+                   let overridesData = try? JSONSerialization.data(
+                       withJSONObject: rawOverrides
+                   ),
+                   let decoded = try? JSONDecoder().decode(
+                       ModelOverrides.self,
+                       from: overridesData
+                   ) {
+                    overrides = decoded
+                }
+                if var controls =
+                    overrides.requestBodyControls,
+                   !thinkingDefinitionIdRemap.isEmpty {
+                    for controlIndex in
+                        controls.indices
+                    {
+                        for optionIndex in
+                            controls[controlIndex]
+                                .options.indices
+                        {
+                            guard let importedId =
+                                controls[controlIndex]
+                                    .options[optionIndex]
+                                    .thinkingDefinitionId,
+                                  let localId =
+                                    thinkingDefinitionIdRemap[
+                                        importedId
+                                    ]
+                            else {
+                                continue
+                            }
+                            controls[controlIndex]
+                                .options[optionIndex]
+                                .thinkingDefinitionId =
+                                localId
+                        }
+                    }
+                    overrides.requestBodyControls =
+                        controls
                 }
                 let entry = ModelEntry(
                     providerInstanceId: instance.id,
@@ -1317,6 +1373,23 @@ final class ProviderConfigStore: ObservableObject {
         stamped.userModifiedAt = Date()
         config.modelEntries[idx] = stamped
         save()
+    }
+
+    @discardableResult
+    func updateModelRequestCustomization(
+        entryId: String,
+        headers: [String],
+        body: [String],
+        controls: [RequestBodyControl]
+    ) -> Bool {
+        guard var entry = entry(for: entryId) else { return false }
+        var overrides = entry.overrides
+        overrides.customRequestHeaders = headers.isEmpty ? nil : headers
+        overrides.customRequestBody = body.isEmpty ? nil : body
+        overrides.requestBodyControls = controls.isEmpty ? nil : controls
+        entry.overrides = overrides
+        updateEntry(entry)
+        return true
     }
 
     func removeEntry(_ entryId: String) {
@@ -1750,6 +1823,14 @@ final class ProviderConfigStore: ObservableObject {
     func setInferenceConfig(_ cfg: SessionInferenceConfig, for sessionId: String) {
         config.sessionInferenceConfigs[sessionId] = cfg
         save()
+    }
+
+    func thinkingDefinitionReferenceCount(
+        _ definitionId: String
+    ) -> Int {
+        config.thinkingDefinitionReferenceCount(
+            definitionId
+        )
     }
 
     func removeInferenceConfig(for sessionId: String) {
@@ -2348,42 +2429,58 @@ final class ProviderConfigStore: ObservableObject {
     static func fetchModelsForInstance(_ instance: ProviderInstance, forceRefresh: Bool = false) async throws -> [LLMModel] {
         let customBase = instance.effectiveCustomBaseURL
         let appendV1 = instance.appendV1Suffix
-        // Custom UA only for custom-base OpenAI/Anthropic-compat instances (proxy/relay);
-        // OAuth-login paths keep their required client UA, so we never pass it there.
-        let ua = instance.supportsCustomUserAgent ? instance.effectiveCustomUserAgent : nil
         switch (instance.providerType, instance.credentialType) {
         case (.anthropic, .apiKey):
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
-            return try await AnthropicModelsAPI.fetchModels(apiKey: key, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: ua)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: [
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+            ])
+            return try await AnthropicModelsAPI.fetchModels(apiKey: key, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.anthropic, .oauth):
             if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
                 // Manual token — try Bearer auth first, fall back to x-api-key for compatibility
-                return try await AnthropicModelsAPI.fetchModels(bearerToken: manualToken, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: ua)
+                let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: manualToken, initialHeaders: [
+                    "Authorization": "Bearer \(manualToken)",
+                    "x-api-key": manualToken,
+                    "anthropic-version": "2023-06-01",
+                ])
+                return try await AnthropicModelsAPI.fetchModels(bearerToken: manualToken, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
             }
             let token = try await ClaudeOAuthManager.shared.validAccessToken(instanceId: instance.id)
-            return try await AnthropicModelsAPI.fetchModels(oauthToken: token, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: token, initialHeaders: [
+                "Authorization": "Bearer \(token)",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "oauth-2025-04-20",
+            ])
+            return try await AnthropicModelsAPI.fetchModels(oauthToken: token, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, customHeaders: headers)
         case (.gemini, .apiKey):
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
-            return try await GeminiModelsAPI.fetchModels(apiKey: key, customBaseURL: customBase, forceRefresh: forceRefresh)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: [:])
+            return try await GeminiModelsAPI.fetchModels(apiKey: key, customBaseURL: customBase, forceRefresh: forceRefresh, customHeaders: headers)
         case (.gemini, .oauth):
             if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
-                return try await GeminiModelsAPI.fetchModels(apiKey: manualToken, customBaseURL: customBase, forceRefresh: forceRefresh)
+                let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: manualToken, initialHeaders: [:])
+                return try await GeminiModelsAPI.fetchModels(apiKey: manualToken, customBaseURL: customBase, forceRefresh: forceRefresh, customHeaders: headers)
             }
             let token = try await GeminiOAuthManager.shared.validAccessToken(instanceId: instance.id)
             let projectID = GeminiOAuthManager.shared.gcpProjectID(instanceId: instance.id)
-            return try await GeminiModelsAPI.fetchModels(oauthToken: token, gcpProjectID: projectID ?? "", customBaseURL: customBase)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: token, initialHeaders: ["Authorization": "Bearer \(token)"])
+            return try await GeminiModelsAPI.fetchModels(oauthToken: token, gcpProjectID: projectID ?? "", customBaseURL: customBase, customHeaders: headers)
         case (.openAI, .apiKey):
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
-            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: ua)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: ["Authorization": "Bearer \(key)"])
+            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.openAI, .oauth):
             if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
-                return try await OpenAIModelsAPI.fetchModels(apiKey: manualToken, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: ua)
+                let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: manualToken, initialHeaders: ["Authorization": "Bearer \(manualToken)"])
+                return try await OpenAIModelsAPI.fetchModels(apiKey: manualToken, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
             }
             return OpenAIModelsAPI.fetchModelsOAuth()
         case (.antigravity, .apiKey):
@@ -2397,21 +2494,29 @@ final class ProviderConfigStore: ObservableObject {
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
-            return try await OpenRouterModelsAPI.fetchModels(apiKey: key, forceRefresh: forceRefresh)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: [
+                "Authorization": "Bearer \(key)",
+                "HTTP-Referer": "https://github.com/OpenMinis/OpenMinis",
+                "X-Title": "Minis App",
+            ])
+            return try await OpenRouterModelsAPI.fetchModels(apiKey: key, forceRefresh: forceRefresh, customHeaders: headers)
         case (.openRouter, .oauth):
             if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
-                return try await OpenRouterModelsAPI.fetchModels(apiKey: manualToken, forceRefresh: forceRefresh)
+                let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: manualToken, initialHeaders: ["Authorization": "Bearer \(manualToken)"])
+                return try await OpenRouterModelsAPI.fetchModels(apiKey: manualToken, forceRefresh: forceRefresh, customHeaders: headers)
             }
             // OpenRouter OAuth produces a permanent API key stored via ProviderKeychainHelper.saveAPIKey
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
-            return try await OpenRouterModelsAPI.fetchModels(apiKey: key, forceRefresh: forceRefresh)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: ["Authorization": "Bearer \(key)"])
+            return try await OpenRouterModelsAPI.fetchModels(apiKey: key, forceRefresh: forceRefresh, customHeaders: headers)
         case (.openAIResponses, .apiKey):
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
-            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: ua)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: ["Authorization": "Bearer \(key)"])
+            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.openAIResponses, .oauth):
             // Responses API provider type only supports API key auth
             return ModelsDevAPI.enrichModels(ProviderType.openAIResponses.builtInModels)
@@ -2421,33 +2526,33 @@ final class ProviderConfigStore: ObservableObject {
             }
             let xaiBase = customBase ?? "https://api.x.ai/v1"
             let xaiAppendV1 = customBase == nil ? false : appendV1
-            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: xaiBase, appendV1Suffix: xaiAppendV1, forceRefresh: forceRefresh, userAgent: ua)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: ["Authorization": "Bearer \(key)"])
+            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: xaiBase, appendV1Suffix: xaiAppendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.xAI, .oauth):
             let token: String
-            // Custom UA applies only to the manual-token (relay) sub-case; the xAI
-            // OAuth-login token keeps the default UA, matching the other OAuth paths.
-            var xaiUA: String? = nil
             if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
                 token = manualToken
-                xaiUA = ua
             } else {
                 token = try await XAIOAuthManager.shared.validAccessToken(instanceId: instance.id)
             }
             let xaiBase = customBase ?? "https://api.x.ai/v1"
             let xaiAppendV1 = customBase == nil ? false : appendV1
-            return try await OpenAIModelsAPI.fetchModels(apiKey: token, baseURL: xaiBase, appendV1Suffix: xaiAppendV1, forceRefresh: forceRefresh, userAgent: xaiUA)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: token, initialHeaders: ["Authorization": "Bearer \(token)"])
+            return try await OpenAIModelsAPI.fetchModels(apiKey: token, baseURL: xaiBase, appendV1Suffix: xaiAppendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.kimiCode, .apiKey):
             guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                 throw ModelRefreshError.noCredential
             }
             let kimiBase = customBase ?? "https://api.kimi.com/coding"
             let kimiAppendV1 = customBase == nil ? true : appendV1  // default base …/coding needs /v1 appended
-            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: kimiBase, appendV1Suffix: kimiAppendV1, forceRefresh: forceRefresh, userAgent: ua)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: key, initialHeaders: ["Authorization": "Bearer \(key)"])
+            return try await OpenAIModelsAPI.fetchModels(apiKey: key, baseURL: kimiBase, appendV1Suffix: kimiAppendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.kimiCode, .oauth):
             let token = try await KimiOAuthManager.shared.validAccessToken(instanceId: instance.id)
             let kimiBase = customBase ?? "https://api.kimi.com/coding"
             let kimiAppendV1 = customBase == nil ? true : appendV1  // default base …/coding needs /v1 appended
-            return try await OpenAIModelsAPI.fetchModels(apiKey: token, baseURL: kimiBase, appendV1Suffix: kimiAppendV1, forceRefresh: forceRefresh, userAgent: nil)
+            let headers = RequestCustomization.providerHeadersForModelList(provider: instance, apiKey: token, initialHeaders: ["Authorization": "Bearer \(token)"])
+            return try await OpenAIModelsAPI.fetchModels(apiKey: token, baseURL: kimiBase, appendV1Suffix: kimiAppendV1, forceRefresh: forceRefresh, userAgent: nil, customHeaders: headers)
         case (.unsupported, _):
             // Synced from a newer build — can't fetch; keep whatever's stored.
             return []

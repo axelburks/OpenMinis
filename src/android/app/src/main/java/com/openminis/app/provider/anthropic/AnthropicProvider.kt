@@ -11,9 +11,11 @@ import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.RequestCustomization
+import com.openminis.app.provider.applyDefaultUserAgent
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -38,15 +40,34 @@ class AnthropicProvider(
     private val basePath: String = "https://api.anthropic.com",
     /** Whether this provider uses OAuth credentials (Bearer + beta header). */
     val isOAuth: Boolean = false,
-    /**
-     * [T-provider-custom-user-agent] Per-provider User-Agent override.
-     * null/blank → default UA; non-blank → replaces User-Agent on the chat
-     * request. Only set for custom-base Anthropic-compat instances.
-     */
-    private val customUserAgent: String? = null,
+    private val requestCustomization: RequestCustomization? = null,
 ) : LLMProvider {
     override val name = "Anthropic"
     override val defaultMaxOutputTokens: Int get() = 64_000
+    override var thinkingDefinitionId: String? = null
+    override var requestSessionId: String?
+        get() = requestCustomization?.sessionId
+        set(value) {
+            requestCustomization?.sessionId = value
+        }
+    override var usesConversationRequestControlState: Boolean
+        get() = requestCustomization
+            ?.usesConversationRequestControlState
+            ?: false
+        set(value) {
+            requestCustomization
+                ?.usesConversationRequestControlState = value
+        }
+    override val requestCustomizationModelKey: String?
+        get() = requestCustomization?.modelEntry?.id
+    override fun resolvedThinkingDefinitionId(
+        requestedDefinitionId: String,
+    ): String? =
+        requestCustomization?.resolvedThinkingDefinitionId(
+            requestedDefinitionId,
+        ) ?: super.resolvedThinkingDefinitionId(
+            requestedDefinitionId,
+        )
 
     /**
      * [T-android-enhanced-cache] Enhanced Cache toggle — when true, every
@@ -91,7 +112,18 @@ class AnthropicProvider(
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = false, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
-        val request = buildRequest(body.toString(), body)
+        val customHeaders = defaultRequestHeaders(body)
+        requestCustomization?.let { customization ->
+            customization.thinkingDefinitionId =
+                thinkingDefinitionId
+                    ?: ThinkingLevelRegistry
+                        .definitionForLevelId(
+                            thinkingLevel.name.lowercase(),
+                            customization.context,
+                        )?.definitionId
+            customization.apply(body, customHeaders, apiKey)
+        }
+        val request = buildRequest(body.toString(), body, customHeaders)
         val response = client.newCall(request).execute()
         val responseBody = response.body?.string() ?: ""
 
@@ -125,12 +157,23 @@ class AnthropicProvider(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = callbackFlow {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
+        val customHeaders = defaultRequestHeaders(body)
+        requestCustomization?.let { customization ->
+            customization.thinkingDefinitionId =
+                thinkingDefinitionId
+                    ?: ThinkingLevelRegistry
+                        .definitionForLevelId(
+                            thinkingLevel.name.lowercase(),
+                            customization.context,
+                        )?.definitionId
+            customization.apply(body, customHeaders, apiKey)
+        }
         // T302: serialize the body exactly once and pass the string to
         // buildRequest. Pre-T302 body.toString() ran twice per call (once
         // here, once inside buildRequest); each emitted string was tens of
         // MB on long agent loops and stacked under GC pressure.
         val bodyStr = body.toString()
-        val request = buildRequest(bodyStr, body)
+        val request = buildRequest(bodyStr, body, customHeaders)
 
         val startTime = System.currentTimeMillis()
 
@@ -336,7 +379,8 @@ class AnthropicProvider(
         body.put("max_tokens", maxTokens)
         body.put("stream", stream)
 
-        if (temperature != null && !thinkingLevel.isEnabled && !modelRejectsTemperature(model.id)) {
+        val explicitThinkingLevel = thinkingLevel.isEnabled
+        if (temperature != null && !explicitThinkingLevel && !modelRejectsTemperature(model.id)) {
             body.put("temperature", temperature)
         }
 
@@ -348,7 +392,12 @@ class AnthropicProvider(
         //     Anthropic also requires temperature=1 on the request.
         // Claude 4.6+ rejects temperature outright (handled by the temperature guard
         // above; we don't re-inject it here).
-        if (thinkingLevel.isEnabled) {
+        if (requestCustomization?.disablesBuiltInThinkingInjection != true &&
+            thinkingLevel == ThinkingLevel.OFF &&
+            modelUsesAdaptiveThinking(model.id)
+        ) {
+            body.put("thinking", JSONObject().put("type", "disabled"))
+        } else if (requestCustomization?.disablesBuiltInThinkingInjection != true && explicitThinkingLevel) {
             if (modelUsesAdaptiveThinking(model.id)) {
                 // [T-anthropic-thinking-display] Explicitly request summarized
                 // thinking. This is the SECOND half of the "thinking on but no
@@ -379,15 +428,6 @@ class AnthropicProvider(
                     }
                 }
             }
-        } else if (modelUsesAdaptiveThinking(model.id)) {
-            // Adaptive-generation models (4.6+/5) think by DEFAULT when the
-            // request carries no thinking field at all — "off" must be sent
-            // explicitly, or small-maxTokens calls burn the whole budget on
-            // thinking_tokens and return zero text (iOS ea86dd8a observed:
-            // max_tokens=256 → stop_reason=max_tokens, thinking_tokens=256/256,
-            // empty body). Legacy (<=4.5) models default to no thinking, so
-            // absence is fine there.
-            body.put("thinking", JSONObject().put("type", "disabled"))
         }
 
         // System prompt blocks — mirrors iOS AnthropicProvider.resolveSystemPrompt.
@@ -824,7 +864,7 @@ class AnthropicProvider(
         fun thinkingBudget(maxTokens: Int, level: ThinkingLevel): Int {
             val cap = when (level) {
                 ThinkingLevel.OFF -> 0
-                ThinkingLevel.LOW -> 8192
+                ThinkingLevel.MINIMAL, ThinkingLevel.LOW -> 8192
                 ThinkingLevel.MEDIUM -> 32768
                 ThinkingLevel.HIGH -> minOf(maxTokens, 65536)
                 // [T-android-thinking-level-arch] XHIGH and above all take the
@@ -849,12 +889,11 @@ class AnthropicProvider(
          * lists "xhigh" but we standardize on "max" for cross-version compatibility.
          */
         fun thinkingEffort(level: ThinkingLevel): String = when (level) {
-            ThinkingLevel.OFF -> "low"  // unreached: caller checks isEnabled
-            ThinkingLevel.LOW -> "low"
+            ThinkingLevel.OFF, ThinkingLevel.MINIMAL, ThinkingLevel.LOW -> "low"
             ThinkingLevel.MEDIUM -> "medium"
             ThinkingLevel.HIGH -> "high"
             // [T-android-thinking-level-arch] Anthropic tops out at "max"; XHIGH
-            // and the new MAX/ULTRA tiers all collapse onto it.
+            // and MAX collapse onto it.
             ThinkingLevel.XHIGH,
             ThinkingLevel.MAX,
             ThinkingLevel.ULTRA -> "max"
@@ -869,7 +908,7 @@ class AnthropicProvider(
      * inspects fields like `thinking`. See OpenAIProvider.buildRequest
      * for the same pattern.
      */
-    private fun buildRequest(bodyStr: String, body: JSONObject): Request {
+    private fun buildRequest(bodyStr: String, body: JSONObject, customHeaders: Map<String, String>): Request {
         // T192: `basePath` may already end in `/v1` because
         // `ProviderInstance.effectiveBaseURL` appends `/v1` when
         // `appendV1Suffix=true` and the user-entered base doesn't end in `/v1`.
@@ -965,19 +1004,22 @@ class AnthropicProvider(
             builder.header("x-api-key", apiKey)
         }
 
-        // [T-provider-custom-user-agent] Applied last so a non-blank override
-        // wins over the OAuth claude-cli UA above. null/blank → fall back to
-        // the branded Minis UA on the regular apiKey path, but on the OAuth
-        // path keep the claude-cli/2.1.195 fingerprint set at line ~779 (the
-        // Anthropic OAuth backend pairs UA + X-Stainless-* and rejects calls
-        // whose UA doesn't match the registered client identity). T-android-
-        // default-ua: pass defaultUserAgent=null on OAuth, branded default
-        // everywhere else.
-        builder.applyUserAgentOverride(
-            customUserAgent,
-            defaultUserAgent = if (isOAuth) null else com.openminis.app.provider.MinisUserAgent.DEFAULT,
-        )
+        if (!isOAuth) {
+            builder.applyDefaultUserAgent()
+        }
+        for ((key, value) in customHeaders) {
+            builder.header(key, value)
+        }
         return builder.build()
+    }
+
+    private fun defaultRequestHeaders(body: JSONObject): LinkedHashMap<String, String> {
+        val request = buildRequest("", body, emptyMap())
+        return linkedMapOf<String, String>().apply {
+            request.headers.names().forEach { name ->
+                put(name, request.header(name).orEmpty())
+            }
+        }
     }
 
     private fun parseResponse(json: JSONObject): LLMResponse {

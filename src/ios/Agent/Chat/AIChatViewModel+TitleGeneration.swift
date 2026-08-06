@@ -110,7 +110,8 @@ extension AIChatViewModel {
                 logger.info("[TitleGen] Summary length: \(summary.count) chars, userTurns=\(userTurnCount)")
                 let (title, category) = try await Self.callSubModelForTitle(
                     conversationSummary: summary,
-                    subEntry: subEntry
+                    subEntry: subEntry,
+                    sessionId: sessionId
                 )
                 let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
@@ -245,7 +246,8 @@ extension AIChatViewModel {
 
         let (title, category) = try await callSubModelForTitle(
             conversationSummary: summary,
-            subEntry: subEntry
+            subEntry: subEntry,
+            sessionId: sessionId
         )
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
@@ -256,7 +258,8 @@ extension AIChatViewModel {
     /// Build a lightweight provider for the sub model and call it to generate a title and category.
     private static func callSubModelForTitle(
         conversationSummary: String,
-        subEntry: ModelEntry? = nil
+        subEntry: ModelEntry? = nil,
+        sessionId: String?
     ) async throws -> (String, String?) {
         guard let entry = subEntry else {
             throw NSError(domain: "TitleGen", code: -1, userInfo: [NSLocalizedDescriptionKey: "No sub model available"])
@@ -271,7 +274,7 @@ extension AIChatViewModel {
         // qwen3.6-plus (T-title-gen-disable-reasoning-ios). The agent
         // streaming surface uses `streamAgentMessage` which routes through
         // `injectThinkingParams` and emits `enable_thinking: false` /
-        // `reasoning_effort: "none"` / `thinking_budget: 0` per model
+        // provider should not receive an explicit client thinking-effort choice
         // family.
         let provider = await AIChatViewModel.makeAgentProvider(for: entry)
         logger.info("[TitleGen] Using provider: \(provider.name), model: \(entry.model.id), thinkingLevel=.off")
@@ -292,13 +295,20 @@ extension AIChatViewModel {
         """
 
         let messages = [AgentMessage(role: .user, parts: [.text(prompt)])]
-        let stream = try await provider.streamAgentMessage(
-            messages: messages,
-            systemPrompt: "You generate concise titles for conversations. You MUST respond with a single valid JSON object: {\"title\": \"...\", \"category\": \"...\"}. No other text.",
-            tools: [],
-            maxTokens: 1024,
-            thinkingLevel: .off
-        )
+        let stream = try await RequestCustomizationRuntime
+            .$sessionId.withValue(sessionId) {
+                try await RequestCustomizationRuntime
+                    .$usesConversationRequestControlState
+                    .withValue(false) {
+                        try await provider.streamAgentMessage(
+                            messages: messages,
+                            systemPrompt: "You generate concise titles for conversations. You MUST respond with a single valid JSON object: {\"title\": \"...\", \"category\": \"...\"}. No other text.",
+                            tools: [],
+                            maxTokens: 1024,
+                            thinkingLevel: .off
+                        )
+                    }
+            }
 
         var responseText = ""
         var stopReason: AgentStopReason?

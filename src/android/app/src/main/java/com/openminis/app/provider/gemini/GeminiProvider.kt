@@ -4,7 +4,7 @@ import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.applyDefaultUserAgent
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.LLMMediaAttachment
@@ -12,7 +12,9 @@ import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.RequestCustomization
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -35,8 +37,33 @@ class GeminiProvider(
     private val apiKey: String,
     override var model: LLMModel = LLMModel.gemini25Flash,
     private val basePath: String = "https://generativelanguage.googleapis.com/v1beta",
+    private val requestCustomization: RequestCustomization? = null,
 ) : LLMProvider {
     override val name = "Google"
+    override var thinkingDefinitionId: String? = null
+    override var requestSessionId: String?
+        get() = requestCustomization?.sessionId
+        set(value) {
+            requestCustomization?.sessionId = value
+        }
+    override var usesConversationRequestControlState: Boolean
+        get() = requestCustomization
+            ?.usesConversationRequestControlState
+            ?: false
+        set(value) {
+            requestCustomization
+                ?.usesConversationRequestControlState = value
+        }
+    override val requestCustomizationModelKey: String?
+        get() = requestCustomization?.modelEntry?.id
+    override fun resolvedThinkingDefinitionId(
+        requestedDefinitionId: String,
+    ): String? =
+        requestCustomization?.resolvedThinkingDefinitionId(
+            requestedDefinitionId,
+        ) ?: super.resolvedThinkingDefinitionId(
+            requestedDefinitionId,
+        )
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -57,15 +84,29 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
+        val customHeaders = defaultRequestHeaders()
+        requestCustomization?.let { customization ->
+            customization.thinkingDefinitionId =
+                thinkingDefinitionId
+                    ?: ThinkingLevelRegistry
+                        .definitionForLevelId(
+                            thinkingLevel.name.lowercase(),
+                            customization.context,
+                        )?.definitionId
+            customization.apply(body, customHeaders, apiKey)
+        }
         val url = "$basePath/models/${model.id}:generateContent?key=$apiKey"
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(url)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             // [T-android-default-ua] Brand the outbound UA so server logs
             // can trace the request back to the Minis build. Gemini has no
             // SDK-specific UA requirement, so the helper's default kicks in.
-            .applyUserAgentOverride(null)
-            .build()
+            .applyDefaultUserAgent()
+        for ((key, value) in customHeaders) {
+            requestBuilder.header(key, value)
+        }
+        val request = requestBuilder.build()
 
         val response = client.newCall(request).execute()
         val responseBody = response.body?.string() ?: ""
@@ -104,14 +145,28 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = callbackFlow {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
+        val customHeaders = defaultRequestHeaders()
+        requestCustomization?.let { customization ->
+            customization.thinkingDefinitionId =
+                thinkingDefinitionId
+                    ?: ThinkingLevelRegistry
+                        .definitionForLevelId(
+                            thinkingLevel.name.lowercase(),
+                            customization.context,
+                        )?.definitionId
+            customization.apply(body, customHeaders, apiKey)
+        }
         val url = "$basePath/models/${model.id}:streamGenerateContent?alt=sse&key=$apiKey"
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(url)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             // [T-android-default-ua] same intent as the non-streaming
             // branch above — brand outbound requests with Minis/<version>.
-            .applyUserAgentOverride(null)
-            .build()
+            .applyDefaultUserAgent()
+        for ((key, value) in customHeaders) {
+            requestBuilder.header(key, value)
+        }
+        val request = requestBuilder.build()
 
         val response = client.newCall(request).execute()
         if (!response.isSuccessful) {
@@ -172,6 +227,12 @@ class GeminiProvider(
         channel.close()
         awaitClose()
     }
+
+    private fun defaultRequestHeaders(): LinkedHashMap<String, String> =
+        linkedMapOf(
+            "Content-Type" to "application/json",
+            "User-Agent" to com.openminis.app.provider.MinisUserAgent.DEFAULT,
+        )
 
     private fun buildRequestBody(
         messages: List<LLMMessage>,
@@ -278,7 +339,7 @@ class GeminiProvider(
         }
 
         // Thinking configuration (model-specific)
-        buildThinkingConfig(thinkingLevel)?.let { thinkingConfig ->
+        if (requestCustomization?.disablesBuiltInThinkingInjection != true) buildThinkingConfig(thinkingLevel)?.let { thinkingConfig ->
             config.put("thinkingConfig", thinkingConfig)
         }
 
@@ -319,7 +380,7 @@ class GeminiProvider(
         return when {
             isGemini3 -> {
                 JSONObject().apply {
-                    if (level == ThinkingLevel.OFF) {
+                    if (level == ThinkingLevel.OFF || level == ThinkingLevel.MINIMAL) {
                         // 3.x Pro can't fully disable; use "minimal" for Flash, "low" for Pro
                         put("thinkingLevel", if (modelId.contains("flash")) "minimal" else "low")
                     } else {
@@ -327,6 +388,7 @@ class GeminiProvider(
                             ThinkingLevel.LOW -> "low"
                             ThinkingLevel.MEDIUM -> "medium"
                             ThinkingLevel.HIGH, ThinkingLevel.XHIGH -> "high"
+                            ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "high"
                             else -> "low"
                         })
                         put("includeThoughts", true)
@@ -337,7 +399,7 @@ class GeminiProvider(
                 JSONObject().apply {
                     put("thinkingBudget", when (level) {
                         ThinkingLevel.OFF -> 128      // minimum
-                        ThinkingLevel.LOW -> 2048
+                        ThinkingLevel.MINIMAL, ThinkingLevel.LOW -> 2048
                         ThinkingLevel.MEDIUM -> 8192
                         ThinkingLevel.HIGH -> 16384
                         // [T-android-thinking-level-arch] Gemini 2.5 Pro caps at
@@ -346,14 +408,14 @@ class GeminiProvider(
                         ThinkingLevel.MAX,
                         ThinkingLevel.ULTRA -> 32768
                     })
-                    if (level.isEnabled) put("includeThoughts", true)
+                    if (level != ThinkingLevel.OFF) put("includeThoughts", true)
                 }
             }
             is25Flash -> {
                 JSONObject().apply {
                     put("thinkingBudget", when (level) {
                         ThinkingLevel.OFF -> 0
-                        ThinkingLevel.LOW -> 1024
+                        ThinkingLevel.MINIMAL, ThinkingLevel.LOW -> 1024
                         ThinkingLevel.MEDIUM -> 4096
                         ThinkingLevel.HIGH -> 8192
                         // [T-android-thinking-level-arch] Gemini 2.5 Flash caps at
@@ -362,7 +424,7 @@ class GeminiProvider(
                         ThinkingLevel.MAX,
                         ThinkingLevel.ULTRA -> 16384
                     })
-                    if (level.isEnabled) put("includeThoughts", true)
+                    if (level != ThinkingLevel.OFF) put("includeThoughts", true)
                 }
             }
             else -> null

@@ -19,7 +19,7 @@ struct GroupsCollection: ConfigCollection {
     ///   "entries": ["<entry-uuid>", "<entry-uuid>"],   // or legacy "members"
     ///   "strategy": "fallback" | "loadBalance",
     ///   "fallback_strategy": "limited" | "always",
-    ///   "default_thinking_level": "off" | "low" | "medium" | "high" | "xhigh",
+    ///   "default_thinking_level": "auto" | "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra",
     ///   "context_limit_tokens": 64000
     /// }
     let addPayloadSchema: ConfigValueSchema = .json
@@ -67,9 +67,18 @@ struct GroupsCollection: ConfigCollection {
         if case .string(let s)? = dict["fallback_strategy"], let parsed = FallbackStrategy(rawValue: s) {
             fallbackStrategy = parsed
         }
-        var defaultThinking: ThinkingLevel? = nil
+        var defaultThinkingDefinitionId: String? = nil
         if case .string(let s)? = dict["default_thinking_level"], !s.isEmpty {
-            defaultThinking = ThinkingLevel.decoded(s)
+            guard let definition =
+                    ThinkingLevelRegistry.definition(
+                        forLevelId: s
+                    ) else {
+                throw ConfigError.invalidValue(
+                    "Unknown thinking level: \(s)"
+                )
+            }
+            defaultThinkingDefinitionId =
+                definition.definitionId
         }
         var contextLimit: Int? = nil
         if case .int(let i)? = dict["context_limit_tokens"], i > 0 {
@@ -78,7 +87,8 @@ struct GroupsCollection: ConfigCollection {
         let g = ModelGroup(
             name: name, memberEntryIds: members,
             strategy: strategy, fallbackStrategy: fallbackStrategy,
-            defaultThinkingLevel: defaultThinking,
+            defaultThinkingDefinitionId:
+                defaultThinkingDefinitionId,
             contextLimitTokens: contextLimit
         )
         ProviderConfigStore.shared.addGroup(g)
@@ -166,20 +176,44 @@ struct GroupsCollection: ConfigCollection {
         ClosureField(
             path: "groups.\(id).defaultThinkingLevel",
             displayName: "Default thinking level",
-            description: "Applied to new sessions bound to this group. Empty = off.",
-            valueSchema: .stringEnum(["", "off", "low", "medium", "high", "xhigh", "max", "ultra"]),
+            description: "Applied to new sessions bound to this group. Empty = no group override.",
+            valueSchema: .stringEnum(
+                [""] + ThinkingLevelRegistry.definitions.map(\.levelId)
+            ),
             risk: .normal, revertable: true,
             reader: { [self] in
                 guard let g = group(id) else { return .null }
-                return .string(g.defaultThinkingLevel?.rawValue ?? "")
+                guard let definitionId =
+                        g.defaultThinkingDefinitionId,
+                      let definition =
+                        ThinkingLevelRegistry.definition(
+                            forDefinitionId:
+                                definitionId
+                        ) else {
+                    return .string("")
+                }
+                return .string(definition.levelId)
             },
             writer: { [self] v in
                 guard case .string(let s) = v else { throw ConfigError.typeMismatch(expected: "string") }
+                let definition =
+                    s.isEmpty
+                    ? nil
+                    : ThinkingLevelRegistry.definition(
+                        forLevelId: s
+                    )
+                if !s.isEmpty, definition == nil {
+                    throw ConfigError.invalidValue(
+                        "Unknown thinking level: \(s)"
+                    )
+                }
                 try mutate(id) {
                     if s.isEmpty {
-                        $0.defaultThinkingLevel = nil
+                        $0.defaultThinkingDefinitionId =
+                            nil
                     } else {
-                        $0.defaultThinkingLevel = ThinkingLevel.decoded(s)
+                        $0.defaultThinkingDefinitionId =
+                            definition?.definitionId
                     }
                 }
             }

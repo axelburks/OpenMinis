@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -65,6 +66,7 @@ fun ProviderListScreen(
     val context = LocalContext.current
 
     var showMenu by remember { mutableStateOf(false) }
+    var showThinkingLevels by remember { mutableStateOf(false) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -261,8 +263,32 @@ fun ProviderListScreen(
                     Spacer(Modifier.width(16.dp))
                     Text(stringResource(R.string.provider_list_import_provider), style = MaterialTheme.typography.bodyLarge)
                 }
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            showMenu = false
+                            showThinkingLevels = true
+                        }
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        stringResource(R.string.thinking_levels_manage),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
             }
         }
+    }
+    if (showThinkingLevels) {
+        ThinkingLevelsManagerScreen(
+            providerRepository = providerRepository,
+            onDismiss = { showThinkingLevels = false },
+        )
     }
 }
 

@@ -8,7 +8,7 @@ enum GeminiModelsAPI {
 
     private static let defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
-    static func fetchModels(apiKey: String, customBaseURL: String? = nil, forceRefresh: Bool = false) async throws -> [LLMModel] {
+    static func fetchModels(apiKey: String, customBaseURL: String? = nil, forceRefresh: Bool = false, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         if !forceRefresh, let cached = GeminiModelsCache.load(credential: apiKey) {
             logger.info("Returning \(cached.count) cached models (API key)")
             return cached
@@ -25,13 +25,16 @@ enum GeminiModelsAPI {
 
         var request = URLRequest(url: components.url!)
         request.httpMethod = "GET"
+        for (key, value) in customHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         logger.info("Fetching Gemini models (API key auth)")
         let models = try await performFetch(request)
         GeminiModelsCache.save(models, credential: apiKey)
         return models
     }
 
-    static func fetchModels(oauthToken: String, customBaseURL: String? = nil, forceRefresh: Bool = false) async throws -> [LLMModel] {
+    static func fetchModels(oauthToken: String, customBaseURL: String? = nil, forceRefresh: Bool = false, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         if !forceRefresh, let cached = GeminiModelsCache.load(credential: oauthToken) {
             logger.info("Returning \(cached.count) cached models (OAuth)")
             return cached
@@ -46,6 +49,9 @@ enum GeminiModelsAPI {
         var request = URLRequest(url: URL(string: modelsURL)!)
         request.httpMethod = "GET"
         request.setValue("Bearer \(oauthToken)", forHTTPHeaderField: "Authorization")
+        for (key, value) in customHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         logger.info("Fetching Gemini models (OAuth auth)")
         #if DEBUG
         logger.debug("OAuth token prefix: \(String(oauthToken.prefix(20)))...")
@@ -66,10 +72,10 @@ enum GeminiModelsAPI {
     /// Cloud Code Assist has no listModels endpoint and the standard API returns 403 for
     /// this OAuth client (insufficient scopes), so we return the built-in model list directly.
     /// When a custom base URL is set, attempt a real fetch before falling back.
-    static func fetchModels(oauthToken: String, gcpProjectID: String, customBaseURL: String? = nil) async throws -> [LLMModel] {
+    static func fetchModels(oauthToken: String, gcpProjectID: String, customBaseURL: String? = nil, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         if let customBaseURL, !customBaseURL.isEmpty {
             logger.info("OAuth + Cloud Code: custom base URL set, attempting real fetch")
-            return try await fetchModels(oauthToken: oauthToken, customBaseURL: customBaseURL)
+            return try await fetchModels(oauthToken: oauthToken, customBaseURL: customBaseURL, customHeaders: customHeaders)
         }
         logger.info("Using built-in Gemini model list (OAuth + Cloud Code Assist)")
         return LLMModel.allGemini

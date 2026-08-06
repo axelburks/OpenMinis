@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
@@ -61,6 +62,8 @@ fun SectionTextField(
     trailingIcon: @Composable (() -> Unit)? = null,
     textStyle: TextStyle = MaterialTheme.typography.bodyLarge,
     fieldModifier: Modifier = Modifier,
+    inputNormalizer: ((String) -> String)? = null,
+    onFocusLost: ((String) -> Unit)? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val colors = OutlinedTextFieldDefaults.colors(
@@ -102,6 +105,7 @@ fun SectionTextField(
     var fieldValue by remember {
         mutableStateOf(TextFieldValue(value, TextRange(value.length)))
     }
+    var wasFocused by remember { mutableStateOf(false) }
     if (fieldValue.text != value) {
         // External value changed (parent assigned a fresh string).
         // Re-seed with cursor at end — matches the legacy String
@@ -116,14 +120,29 @@ fun SectionTextField(
         BasicTextField(
             value = fieldValue,
             onValueChange = { newValue ->
-                fieldValue = newValue
-                if (newValue.text != value) onValueChange(newValue.text)
+                val normalizedText =
+                    inputNormalizer?.invoke(newValue.text) ?: newValue.text
+                val normalizedValue = newValue.copy(
+                    text = normalizedText,
+                    selection = TextRange(
+                        newValue.selection.start.coerceAtMost(normalizedText.length),
+                        newValue.selection.end.coerceAtMost(normalizedText.length),
+                    ),
+                )
+                fieldValue = normalizedValue
+                if (normalizedText != value) onValueChange(normalizedText)
             },
             modifier = Modifier
                 .fillMaxWidth()
                 // [T-android-settings-ui-md3] #3 standard MD3 single-line text
                 // field height (56dp) so input rows match the toggle/value rows.
                 .heightIn(min = SectionDesign.TextFieldMinHeight)
+                .onFocusChanged { focusState ->
+                    if (wasFocused && !focusState.isFocused) {
+                        onFocusLost?.invoke(fieldValue.text)
+                    }
+                    wasFocused = focusState.isFocused
+                }
                 .then(fieldModifier),
             enabled = enabled,
             readOnly = readOnly,
@@ -140,7 +159,17 @@ fun SectionTextField(
                     value = fieldValue.text,
                     visualTransformation = visualTransformation,
                     innerTextField = innerTextField,
-                    placeholder = placeholder?.let { { Text(it) } },
+                    placeholder = placeholder?.let {
+                        {
+                            Text(
+                                text = it,
+                                style = mergedTextStyle,
+                                color = MaterialTheme.colorScheme
+                                    .onSurfaceVariant
+                                    .copy(alpha = 0.45f),
+                            )
+                        }
+                    },
                     label = null,
                     trailingIcon = trailingIcon,
                     singleLine = singleLine,

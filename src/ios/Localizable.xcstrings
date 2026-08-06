@@ -1,6 +1,230 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Custom Levels" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Custom Levels" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自定义档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "自訂檔位" } }
+      }
+    },
+    "body.reasoning.effort = \"high\"" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "body.reasoning.effort = \"high\"" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "body.reasoning.effort = \"high\"" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "body.reasoning.effort = \"high\"" } }
+      }
+    },
+    "body.web_search = true" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "body.web_search = true" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "body.web_search = true" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "body.web_search = true" } }
+      }
+    },
+    "Delete Thinking Level?" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delete Thinking Level?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "删除思考档位？" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "刪除思考檔位？" } }
+      }
+    },
+    "Edit Custom Level" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Edit Custom Level" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "编辑自定义档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "編輯自訂檔位" } }
+      }
+    },
+    "Header expressions must target one header name." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Header expressions must target one header name." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求头表达式必须指向一个请求头名称。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求標頭運算式必須指向一個請求標頭名稱。" } }
+      }
+    },
+    "Expression evaluation limit exceeded." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Expression evaluation limit exceeded." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "表达式求值超出限制。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "運算式求值超出限制。" } }
+      }
+    },
+    "Invalid expression syntax." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid expression syntax." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "表达式语法无效。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "運算式語法無效。" } }
+      }
+    },
+    "Invalid function arguments." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid function arguments." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "函数参数无效。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "函式參數無效。" } }
+      }
+    },
+    "Invalid request expression path." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid request expression path." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求表达式路径无效。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求運算式路徑無效。" } }
+      }
+    },
+    "Request control expressions must start with body. or headers." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Request control expressions must start with body. or headers." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求控制表达式必须以 body. 或 headers. 开头。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求控制運算式必須以 body. 或 headers. 開頭。" } }
+      }
+    },
+    "These request expressions are applied only when the toggle is on. Use body. or headers. on the left side." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "These request expressions are applied only when the toggle is on. Use body. or headers. on the left side." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仅在开关开启时应用这些请求表达式；左侧请使用 body. 或 headers.。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "僅在開關開啟時套用這些請求運算式；左側請使用 body. 或 headers.。" } }
+      }
+    },
+    "These request expressions are applied when this option is selected. Use body. or headers. on the left side." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "These request expressions are applied when this option is selected. Use body. or headers. on the left side." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择此选项时应用这些请求表达式；左侧请使用 body. 或 headers.。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "選擇此選項時套用這些請求運算式；左側請使用 body. 或 headers.。" } }
+      }
+    },
+    "Thinking level deletion reference warning format" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This thinking level is used by %d settings. Deleting it keeps those references, which will automatically fall back to Off until the same definition is restored." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此思考档位正被 %d 处设置引用。删除后会保留这些引用，并自动回退到“关闭”，直到相同定义恢复。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "此思考檔位正被 %d 處設定引用。刪除後會保留這些引用，並自動回退到「關閉」，直到相同定義恢復。" } }
+      }
+    },
+    "Drag the handle to set rank. Swipe left to delete a custom level. Built-in levels cannot be deleted." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Drag the handle to set rank. Swipe left to delete a custom level. Built-in levels cannot be deleted." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拖动右侧把手设置档位顺序。左滑可删除自定义档位；内置档位不能删除。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "拖動右側把手設定檔位順序。向左滑可刪除自訂檔位；內建檔位不能刪除。" } }
+      }
+    },
+    "Expression error on line %d: %@" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Expression error on line %1$d: %2$@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "第 %1$d 行表达式错误：%2$@" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "第 %1$d 行運算式錯誤：%2$@" } }
+      }
+    },
+    "Icons" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Icons" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "图标" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "圖示" } }
+      }
+    },
+    "Level IDs may contain only lowercase letters, numbers, and underscores." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Level IDs may contain only lowercase letters, numbers, and underscores." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "档位 ID 只能包含小写英文字母、数字和下划线。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "檔位 ID 只能包含小寫英文字母、數字和底線。" } }
+      }
+    },
+    "Nested templates are not supported." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nested templates are not supported." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不支持嵌套模板。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "不支援巢狀範本。" } }
+      }
+    },
+    "No matching icons" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No matching icons" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "没有匹配的图标" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "沒有符合的圖示" } }
+      }
+    },
+    "reasoning.effort = \"high\"" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "reasoning.effort = \"high\"" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "reasoning.effort = \"high\"" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "reasoning.effort = \"high\"" } }
+      }
+    },
+    "Search Icons" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Search Icons" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "搜索图标" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "搜尋圖示" } }
+      }
+    },
+    "temperature = 0.7" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "temperature = 0.7" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "temperature = 0.7" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "temperature = 0.7" } }
+      }
+    },
+    "These body expressions are applied only when the toggle is on." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "These body expressions are applied only when the toggle is on." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仅在开关开启时应用这些请求体表达式。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "僅在開關開啟時套用這些請求體運算式。" } }
+      }
+    },
+    "These body expressions are applied when this option is selected." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "These body expressions are applied when this option is selected." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择此选项时应用这些请求体表达式。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "選擇此選項時套用這些請求體運算式。" } }
+      }
+    },
+    "tools = append(body.tools, {type: \"web_search\"})" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "tools = append(body.tools, {type: \"web_search\"})" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "tools = append(body.tools, {type: \"web_search\"})" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "tools = append(body.tools, {type: \"web_search\"})" } }
+      }
+    },
+    "web_search = true" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "web_search = true" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "web_search = true" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "web_search = true" } }
+      }
+    },
+    "Unexpected template closing delimiter." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unexpected template closing delimiter." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "出现了多余的模板结束符。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "出現了多餘的範本結束符。" } }
+      }
+    },
+    "Unknown template variable or function." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unknown template variable or function." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未知的模板变量或函数。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "未知的範本變數或函式。" } }
+      }
+    },
+    "Unsupported function or unmatched parentheses." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unsupported function or unmatched parentheses." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "函数不受支持或括号不匹配。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "函式不受支援或括號不匹配。" } }
+      }
+    },
+    "Unterminated template." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unterminated template." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模板缺少结束符。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "範本缺少結束符。" } }
+      }
+    },
+    "user-agent = \"Minix/1.0\"" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "user-agent = \"Minix/1.0\"" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "user-agent = \"Minix/1.0\"" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "user-agent = \"Minix/1.0\"" } }
+      }
+    },
     "" : {
 
     },
@@ -96,6 +320,561 @@
             "value" : "· 新写入"
           }
         }
+      }
+    },
+    "Add Custom Level" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Custom Level" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加自定义档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增自訂檔位" } }
+      }
+    },
+    "Add Custom Option Group" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Custom Option Group" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加自定义组选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增自訂群組選項" } }
+      }
+    },
+    "Add Custom Toggle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Custom Toggle" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加自定义开关" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增自訂開關" } }
+      }
+    },
+    "Add Option" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Option" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增選項" } }
+      }
+    },
+    "Add Request Control" : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Anfragesteuerung hinzufügen" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Request Control" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Ajouter un contrôle de requête" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "リクエスト制御を追加" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "요청 제어 추가" } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Добавить управление запросом" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加请求控制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增請求控制" } }
+      }
+    },
+    "Add Thinking Budget Control" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Thinking Budget Control" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加思考预算控制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增思考預算控制" } }
+      }
+    },
+    "Add Thinking Level" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Thinking Level" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加思考档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "新增思考檔位" } }
+      }
+    },
+    "Built In" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Built In" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内置" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "內建" } }
+      }
+    },
+    "Configure custom request headers, request body expressions, and request controls." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Configure custom request headers, request body expressions, and request controls." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配置自定义请求头、请求体表达式和请求控制。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "設定自訂請求標頭、請求體運算式和請求控制。" } }
+      }
+    },
+    "Configure provider-level custom request headers." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Configure provider-level custom request headers." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配置服务商级自定义请求头。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "設定服務商層級自訂請求標頭。" } }
+      }
+    },
+    "Copy From Another Model" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy From Another Model" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "从其他模型复制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "從其他模型複製" } }
+      }
+    },
+    "Copy From Model" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy From Model" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "从模型复制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "從模型複製" } }
+      }
+    },
+    "Custom Options" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Custom Options" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自定义选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "自訂選項" } }
+      }
+    },
+    "Custom Request Body" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Custom Request Body" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自定义请求体" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "自訂請求體" } }
+      }
+    },
+    "Custom Request Headers" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Custom Request Headers" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自定义请求头" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "自訂請求標頭" } }
+      }
+    },
+    "Custom Toggle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Custom Toggle" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自定义开关" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "自訂開關" } }
+      }
+    },
+    "Discard" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "丢弃" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "捨棄" } }
+      }
+    },
+    "Display Name" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Display Name" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示名称" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "顯示名稱" } }
+      }
+    },
+    "Drag custom levels to set their rank. They are ordered after built-in levels." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Drag custom levels to set their rank. They are ordered after built-in levels." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拖动自定义档位来设置顺序。它们会排在内置档位之后。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "拖曳自訂檔位來設定順序。它們會排在內建檔位之後。" } }
+      }
+    },
+    "Drag levels to set their rank. Built-in levels can be reordered but not deleted." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Drag levels to set their rank. Built-in levels can be reordered but not deleted." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拖动档位来设置顺序。内置档位可以排序，但不能删除。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "拖曳檔位來設定順序。內建檔位可以排序，但不能刪除。" } }
+      }
+    },
+    "Expression Help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Expression Help" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "表达式帮助" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "運算式說明" } }
+      }
+    },
+    "Level ID" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Level ID" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "档位 ID" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "檔位 ID" } }
+      }
+    },
+    "High Value Color" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "High Value Color" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "高值颜色" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "高值顏色" } }
+      }
+    },
+    "Low Value Color" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Low Value Color" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "低值颜色" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "低值顏色" } }
+      }
+    },
+    "Manage Thinking Levels" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Manage Thinking Levels" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "管理思考档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "管理思考檔位" } }
+      }
+    },
+    "Minimal" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Minimal" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "最小" } }
+      }
+    },
+    "Icon" : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Symbol" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Icon" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Icône" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "アイコン" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "아이콘" } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Значок" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "图标" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "圖示" } }
+      }
+    },
+    "Model Details" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Model Details" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模型详情" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "模型詳情" } }
+      }
+    },
+    "No options" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No options" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "没有选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "沒有選項" } }
+      }
+    },
+    "No other model has request customization." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No other model has request customization." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "没有其他模型配置了请求配置。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "沒有其他模型設定了請求配置。" } }
+      }
+    },
+    "No request controls" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No request controls" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "没有请求控制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "沒有請求控制" } }
+      }
+    },
+    "No request controls are configured for this model." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No request controls are configured for this model." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前模型没有配置请求控制。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "目前模型沒有設定請求控制。" } }
+      }
+    },
+    "Objects merge recursively; scalar values and arrays replace. Use array functions to add, remove, or update elements." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Objects merge recursively; scalar values and arrays replace. Use array functions to add, remove, or update elements." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对象会递归合并；标量和数组会覆盖。增删或修改数组元素时请使用数组函数。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "物件會遞迴合併；純量和陣列會覆蓋。新增、刪除或修改陣列元素時請使用陣列函式。" } }
+      }
+    },
+    "One expression per line. Same-name headers replace defaults." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "One expression per line. Same-name headers replace defaults." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每行一个表达式。同名请求头会覆盖默认值。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "每行一個運算式。同名請求標頭會覆蓋預設值。" } }
+      }
+    },
+    "Option" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Option" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "選項" } }
+      }
+    },
+    "Options" : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Optionen" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Options" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Options" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "オプション" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "옵션" } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Параметры" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "選項" } }
+      }
+    },
+    "Option Group" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Option Group" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "组选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "群組選項" } }
+      }
+    },
+    "Payload Expressions" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Payload Expressions" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求表达式" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求運算式" } }
+      }
+    },
+    "Payload When On" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Payload When On" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开启时的表达式" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "開啟時的運算式" } }
+      }
+    },
+    "Request Control" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Request Control" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求控制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求控制" } }
+      }
+    },
+    "Request Controls" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Request Controls" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求控制" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求控制" } }
+      }
+    },
+    "Request Customization" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Request Customization" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求配置" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "請求配置" } }
+      }
+    },
+    "Request Expression Help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Expression Help" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "表达式帮助" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "運算式說明" } }
+      }
+    },
+    "Invalid array function arguments." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid array function arguments." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数组函数参数无效。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "陣列函式參數無效。" } }
+      }
+    },
+    "Invalid thinking level ID." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid thinking level ID." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考档位 ID 格式无效。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考檔位 ID 格式無效。" } }
+      }
+    },
+    "This thinking level ID already exists." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This thinking level ID already exists." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "该思考档位 ID 已存在。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "該思考檔位 ID 已存在。" } }
+      }
+    },
+    "remove(...) requires an array as its first argument." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "remove(...) requires an array as its first argument." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "remove(...) 的第一个参数必须是数组。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "remove(...) 的第一個參數必須是陣列。" } }
+      }
+    },
+    "Request Expression Value and Array Help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "VALUE TYPES\nWrite numbers without quotes to keep them numeric:\ntemperature = 0.7\nmax_tokens = 4096\nQuoted values such as \"0.7\" are strings.\n\nARRAY EXAMPLES\nAppend one object:\ntools = append(body.tools, {type: \"web_search\"})\nAppend an array as one nested element:\nitems = append(body.items, [1, 2])\nCombine and flatten arrays:\nitems = concat(body.items, [1, 2])\nUpdate every object matching a partial-object condition:\ntools = update(body.tools, {type: \"function\"}, {a: 2, b: {mode: \"strict\"}})\nRemove matching values or objects:\ntags = remove(body.tags, [\"old\", \"unused\"])\ntools = remove(body.tools, {type: \"web_search\"})\nInsert or remove by zero-based index:\ntools = insert(body.tools, 1, {type: \"new\"})\ntools = remove_at(body.tools, 1)\ntools = remove_at(body.tools, -1)" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "值类型\n数字不加引号即可保持数字类型：\ntemperature = 0.7\nmax_tokens = 4096\n像 \"0.7\" 这样加引号的值是字符串。\n\n数组示例\n追加一个对象：\ntools = append(body.tools, {type: \"web_search\"})\n把一个数组作为嵌套数组元素追加：\nitems = append(body.items, [1, 2])\n合并数组并展开一层：\nitems = concat(body.items, [1, 2])\n按对象字段子集条件更新所有匹配项：\ntools = update(body.tools, {type: \"function\"}, {a: 2, b: {mode: \"strict\"}})\n删除匹配的值或对象：\ntags = remove(body.tags, [\"old\", \"unused\"])\ntools = remove(body.tools, {type: \"web_search\"})\n按从 0 开始的索引插入或删除：\ntools = insert(body.tools, 1, {type: \"new\"})\ntools = remove_at(body.tools, 1)\ntools = remove_at(body.tools, -1)" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "值類型\n數字不加引號即可保持數字類型：\ntemperature = 0.7\nmax_tokens = 4096\n像 \"0.7\" 這樣加引號的值是字串。\n\n陣列範例\n附加一個物件：\ntools = append(body.tools, {type: \"web_search\"})\n把一個陣列作為巢狀陣列元素附加：\nitems = append(body.items, [1, 2])\n合併陣列並展開一層：\nitems = concat(body.items, [1, 2])\n按物件欄位子集條件更新所有相符項目：\ntools = update(body.tools, {type: \"function\"}, {a: 2, b: {mode: \"strict\"}})\n刪除相符的值或物件：\ntags = remove(body.tags, [\"old\", \"unused\"])\ntools = remove(body.tools, {type: \"web_search\"})\n按從 0 開始的索引插入或刪除：\ntools = insert(body.tools, 1, {type: \"new\"})\ntools = remove_at(body.tools, 1)\ntools = remove_at(body.tools, -1)" } }
+      }
+    },
+    "Request Expression Help Body" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "SYNTAX\nOne expression per line: key = value\nValues may be strings, numbers, true/false, null, objects, or arrays. Quote strings when they could be mistaken for a variable or function.\n\nCOMMON HEADER EXAMPLES\nUser-Agent = \"Minix/1.0\"\nAuthorization = \"Bearer {{ provider.apiKey }}\"\nX-Session-ID = \"{{ session.id }}\"\nOpenAI-Beta = \"responses=v1\"\nHeader names and header references are case-insensitive. A same-name header replaces the current value.\n\nCOMMON BODY EXAMPLES\ntemperature = 0.7\nmax_tokens = 4096\nreasoning = {effort: \"high\", summary: \"auto\"}\nmetadata.session_id = \"{{ session.id }}\"\ntools = append(body.tools, {type: \"web_search\"})\n\nVARIABLES\nprovider.id, provider.label, provider.type, provider.credentialType, provider.apiKey, provider.baseURL\nmodel.id, model.displayName, model.provider\nsession.id\nheaders.<name>, body.<path>\n\nPATHS AND TEMPLATES\nUse dot paths or quoted brackets for names containing spaces, dots, or punctuation:\nheaders.Authorization\nheaders[\"X Custom Header\"]\nbody.reasoning.summary\nbody[\"field.with.dots\"]\nUse {{ variable }} inside a string. If any referenced value is missing, the entire line is skipped.\n\nMERGE RULES\nObjects merge recursively. Scalars and arrays replace the existing value. Body null remains JSON null; delete() removes the target field. An explicit \"\" remains an empty string.\n\nFUNCTIONS\nappend(array, value1, ...): appends every value as one element. An array value remains a nested array.\nconcat(array1, array2, ...): combines arrays and expands each argument by one level.\nremove(array, match1, ...): removes an item when any match applies (OR). A single object match requires all of its supplied fields (AND).\nupdate(array, condition, patch): recursively merges patch into every matching object; delete() in a patch removes a field.\ninsert(array, index, value): inserts one element at a zero-based index. Negative indexes count from the end.\nremove_at(array, index): removes the element at an index. Negative indexes count from the end; -1 removes the final element.\nnow(): current ISO 8601 time. Use as {{ now() }}.\nuuid(): a new UUID. Use as {{ uuid() }}.\nupper(path) / lower(path): changes referenced text case.\njson(path): serializes a referenced object or array as JSON text.\n\nTHINKING EXAMPLES\nthinking = {type: \"enabled\", reasoning_effort: \"medium\"}\nreasoning = {effort: \"high\", summary: \"auto\"}\nThinking Off uses the provider-specific disabled, minimum, or omitted-field behavior unless a custom request control replaces it." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "语法\n每行一个表达式：key = value\n值可以是字符串、数字、true/false、null、对象或数组。可能被误认为变量或函数的字符串请加引号。\n\n常用请求头示例\nUser-Agent = \"Minix/1.0\"\nAuthorization = \"Bearer {{ provider.apiKey }}\"\nX-Session-ID = \"{{ session.id }}\"\nOpenAI-Beta = \"responses=v1\"\n请求头名称及其引用不区分大小写；同名请求头会覆盖当前值。\n\n常用请求体示例\ntemperature = 0.7\nmax_tokens = 4096\nreasoning = {effort: \"high\", summary: \"auto\"}\nmetadata.session_id = \"{{ session.id }}\"\ntools = append(body.tools, {type: \"web_search\"})\n\n可用变量\nprovider.id、provider.label、provider.type、provider.credentialType、provider.apiKey、provider.baseURL\nmodel.id、model.displayName、model.provider\nsession.id\nheaders.<名称>、body.<路径>\n\n路径与模板\n字段名包含空格、点号或标点时，可使用点路径或带引号的方括号：\nheaders.Authorization\nheaders[\"X Custom Header\"]\nbody.reasoning.summary\nbody[\"field.with.dots\"]\n字符串中使用 {{ 变量 }}。任意引用值缺失时，会跳过整行表达式。\n\n合并规则\n对象递归合并；标量和数组覆盖现有值。请求体中的 null 保留为 JSON 空值；delete() 删除目标字段；显式 \"\" 保留空字符串。\n\n支持的函数\nappend(array, value1, ...)：把后续每个参数作为一个元素追加；数组参数会保留为嵌套数组。\nconcat(array1, array2, ...)：合并多个数组，每个参数展开一层。\nremove(array, match1, ...)：任一 match 命中即删除（OR）；单个对象 match 内的字段必须全部匹配（AND）。\nupdate(array, condition, patch)：把 patch 递归合并到所有匹配对象；patch 中的 delete() 会删除字段。\ninsert(array, index, value)：在从 0 开始的索引位置插入一个元素；负数索引从末尾计算。\nremove_at(array, index)：删除指定索引的元素；负数索引从末尾计算，-1 删除最后一个元素。\nnow()：当前 ISO 8601 时间，用法为 {{ now() }}。\nuuid()：生成新的 UUID，用法为 {{ uuid() }}。\nupper(path) / lower(path)：转换引用文本的大小写。\njson(path)：把引用的对象或数组序列化成 JSON 文本。\n\n思考控制示例\nthinking = {type: \"enabled\", reasoning_effort: \"medium\"}\nreasoning = {effort: \"high\", summary: \"auto\"}\n思考强度选择“关闭”时，由服务商映射为关闭、最低档或省略字段；自定义请求控制可替代此行为。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "語法\n每行一個運算式：key = value\n值可以是字串、數字、true/false、null、物件或陣列。可能被誤認為變數或函式的字串請加引號。\n\n常用請求標頭範例\nUser-Agent = \"Minix/1.0\"\nAuthorization = \"Bearer {{ provider.apiKey }}\"\nX-Session-ID = \"{{ session.id }}\"\nOpenAI-Beta = \"responses=v1\"\n請求標頭名稱及其引用不區分大小寫；同名請求標頭會覆蓋目前值。\n\n常用請求體範例\ntemperature = 0.7\nmax_tokens = 4096\nreasoning = {effort: \"high\", summary: \"auto\"}\nmetadata.session_id = \"{{ session.id }}\"\ntools = append(body.tools, {type: \"web_search\"})\n\n可用變數\nprovider.id、provider.label、provider.type、provider.credentialType、provider.apiKey、provider.baseURL\nmodel.id、model.displayName、model.provider\nsession.id\nheaders.<名稱>、body.<路徑>\n\n路徑與範本\n欄位名稱包含空格、點號或標點時，可使用點路徑或帶引號的方括號：\nheaders.Authorization\nheaders[\"X Custom Header\"]\nbody.reasoning.summary\nbody[\"field.with.dots\"]\n字串中使用 {{ 變數 }}。任意引用值缺失時，會跳過整行運算式。\n\n合併規則\n物件遞迴合併；純量和陣列覆蓋現有值。請求體中的 null 保留為 JSON 空值；delete() 刪除目標欄位；明確的 \"\" 保留空字串。\n\n支援的函式\nappend(array, value1, ...)：把後續每個參數作為一個元素附加；陣列參數會保留為巢狀陣列。\nconcat(array1, array2, ...)：合併多個陣列，每個參數展開一層。\nremove(array, match1, ...)：任一 match 命中即刪除（OR）；單個物件 match 內的欄位必須全部相符（AND）。\nupdate(array, condition, patch)：把 patch 遞迴合併到所有相符物件；patch 中的 delete() 會刪除欄位。\ninsert(array, index, value)：在從 0 開始的索引位置插入一個元素；負數索引從末尾計算。\nremove_at(array, index)：刪除指定索引的元素；負數索引從末尾計算，-1 刪除最後一個元素。\nnow()：目前 ISO 8601 時間，用法為 {{ now() }}。\nuuid()：產生新的 UUID，用法為 {{ uuid() }}。\nupper(path) / lower(path)：轉換引用文字的大小寫。\njson(path)：把引用的物件或陣列序列化成 JSON 文字。\n\n思考控制範例\nthinking = {type: \"enabled\", reasoning_effort: \"medium\"}\nreasoning = {effort: \"high\", summary: \"auto\"}\n思考強度選擇「關閉」時，由服務商對應為關閉、最低檔或省略欄位；自訂請求控制可取代此行為。" } }
+      }
+    },
+    "Save your model request customization before closing?" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save your model request customization before closing?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭前要保存模型请求配置吗？" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "關閉前要儲存模型請求配置嗎？" } }
+      }
+    },
+    "Save your provider request customization before leaving?" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save your provider request customization before leaving?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "离开前要保存服务商请求配置吗？" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "離開前要儲存服務商請求配置嗎？" } }
+      }
+    },
+    "Save your thinking level changes before leaving?" : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Änderungen an den Denkstufen vor dem Verlassen speichern?" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save your thinking level changes before leaving?" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Enregistrer les modifications des niveaux de réflexion avant de quitter ?" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "終了前に思考レベルの変更を保存しますか？" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "나가기 전에 사고 단계 변경 사항을 저장할까요?" } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Сохранить изменения уровней рассуждения перед выходом?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "离开前要保存思考档位修改吗？" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "離開前要儲存思考檔位修改嗎？" } }
+      }
+    },
+    "Slider" : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Schieberegler" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Slider" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Curseur" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "スライダー" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "슬라이더" } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Ползунок" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "滑块" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "滑桿" } }
+      }
+    },
+    "Slider Colors" : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Reglerfarben" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Slider Colors" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Couleurs du curseur" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "スライダーの色" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "슬라이더 색상" } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Цвета ползунка" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "滑块颜色" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "滑桿顏色" } }
+      }
+    },
+    "This symbol is unavailable on this system. A compatible icon will be used instead." : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Dieses Symbol ist auf diesem System nicht verfügbar. Stattdessen wird ein kompatibles Symbol verwendet." } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This symbol is unavailable on this system. A compatible icon will be used instead." } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Ce symbole n’est pas disponible sur ce système. Une icône compatible sera utilisée à la place." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "このシステムでは使用できないシンボルです。互換性のあるアイコンを代わりに使用します。" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "이 시스템에서 사용할 수 없는 심볼입니다. 대신 호환 아이콘을 사용합니다." } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Этот символ недоступен в данной системе. Вместо него будет использован совместимый значок." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前系统不支持此 Symbol，将改用兼容图标。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "目前系統不支援此 Symbol，將改用相容圖示。" } }
+      }
+    },
+    "The colors between the low and high values blend smoothly." : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Die Farben zwischen niedrigem und hohem Wert gehen weich ineinander über." } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The colors between the low and high values blend smoothly." } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Les couleurs entre les valeurs basse et haute se fondent progressivement." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "低い値と高い値の間は滑らかにグラデーション表示されます。" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "낮은 값과 높은 값 사이의 색상이 부드럽게 전환됩니다." } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Цвета между низким и высоким значениями плавно переходят друг в друга." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "低值与高值之间的颜色会平滑过渡。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "低值與高值之間的顏色會平滑過渡。" } }
+      }
+    },
+    "Thinking Intensity options are sorted by the app-level thinking level rank. Custom option groups keep your manual order." : {
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Optionen zur Denkintensität werden nach der appweiten Rangfolge sortiert. Benutzerdefinierte Optionsgruppen behalten ihre manuelle Reihenfolge." } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Thinking Intensity options are sorted by the app-level thinking level rank. Custom option groups keep your manual order." } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Les options d’intensité de réflexion suivent l’ordre global de l’app. Les groupes personnalisés conservent leur ordre manuel." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "思考強度の選択肢はアプリ全体の思考レベル順に並びます。カスタム選択肢グループは手動順を維持します。" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "사고 강도 옵션은 앱 전체 사고 단계 순서로 정렬됩니다. 사용자 지정 옵션 그룹은 수동 순서를 유지합니다." } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Варианты интенсивности рассуждения сортируются по общему порядку приложения. Пользовательские группы сохраняют ручной порядок." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考强度选项按 App 级思考档位顺序排列；自定义组选项保留手动排序。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考強度選項依 App 層級思考檔位順序排列；自訂群組選項保留手動排序。" } }
+      }
+    },
+    "Thinking Budget" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Thinking Budget" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考预算" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考預算" } }
+      }
+    },
+    "Thinking Budget options are sorted by the app-level thinking level rank. Custom option groups keep your manual order." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Thinking Budget options are sorted by the app-level thinking level rank. Custom option groups keep your manual order." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考预算选项按 App 级思考档位顺序排列；自定义组选项保留手动排序。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考預算選項依 App 層級思考檔位順序排列；自訂群組選項保留手動排序。" } }
+      }
+    },
+    "Thinking Level" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Thinking Level" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考檔位" } }
+      }
+    },
+    "Thinking Levels" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Thinking Levels" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考档位" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考檔位" } }
+      }
+    },
+    "Thinking options are sorted by the app-level thinking level order. Change the order in Manage Thinking Levels." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Thinking options are sorted by the app-level thinking level order. Change the order in Manage Thinking Levels." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "思考选项按 App 级思考档位顺序排序，可在“管理思考档位”里调整。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "思考選項依 App 層級思考檔位順序排序，可在「管理思考檔位」中調整。" } }
+      }
+    },
+    "Unsaved Changes" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unsaved Changes" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未保存的修改" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "未儲存的修改" } }
+      }
+    },
+    "Untitled Control" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Untitled Control" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未命名控制项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "未命名控制項" } }
+      }
+    },
+    " · slider" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : " · slider" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : " · 滑块" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : " · 滑桿" } }
+      }
+    },
+    "%@ · %lld options%@" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$lld options%3$@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$lld 个选项%3$@" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$lld 個選項%3$@" } }
+      }
+    },
+    "%lld headers · %lld body expressions · %lld controls" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%1$lld headers · %2$lld body expressions · %3$lld controls" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%1$lld 个请求头 · %2$lld 条请求体表达式 · %3$lld 个控制项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "%1$lld 個請求標頭 · %2$lld 條請求體運算式 · %3$lld 個控制項" } }
+      }
+    },
+    "%lld headers · %lld body expressions" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%1$lld headers · %2$lld body expressions" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%1$lld 个请求头 · %2$lld 条请求体表达式" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "%1$lld 個請求標頭 · %2$lld 條請求體運算式" } }
+      }
+    },
+    "Configure provider-level custom request headers and request body expressions. Model-level customization is applied after provider-level customization." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Configure provider-level custom request headers and request body expressions. Model-level customization is applied after provider-level customization." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配置服务商级自定义请求头和请求体表达式。模型级配置会在服务商级配置之后应用。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "設定服務商層級自訂請求標頭和請求體運算式。模型層級配置會在服務商層級配置之後套用。" } }
+      }
+    },
+    "Custom option groups use this manual order." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Custom option groups use this manual order." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自定义组选项使用这里的手动顺序。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "自訂群組選項使用這裡的手動順序。" } }
+      }
+    },
+    "Default On" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Default On" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认开启" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "預設開啟" } }
+      }
+    },
+    "Default Option" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Default Option" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认选项" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "預設選項" } }
+      }
+    },
+    "Toggle · %lld expressions" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Toggle · %lld expressions" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开关 · %lld 条表达式" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "translated", "value" : "開關 · %lld 條運算式" } }
       }
     },
     "\"%@\" already has a value. Replace it with \"%@\"?" : {
@@ -28691,12 +29470,6 @@
             "value" : "Высокий"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "高"
-          }
-        },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
@@ -35762,12 +36535,6 @@
             "value" : "Низкий"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "低"
-          }
-        },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
@@ -36331,12 +37098,6 @@
             "value" : "Макс."
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最大"
-          }
-        },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
@@ -36715,12 +37476,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Сред."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "中"
           }
         },
         "zh-Hant" : {
@@ -44271,12 +45026,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Выкл."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "关闭"
           }
         },
         "zh-Hant" : {
@@ -70802,12 +71551,6 @@
             "value" : "Ультра"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "极限"
-          }
-        },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
@@ -75908,12 +76651,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Макс.+"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "极高"
           }
         },
         "zh-Hant" : {

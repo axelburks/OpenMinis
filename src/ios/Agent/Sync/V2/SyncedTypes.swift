@@ -392,7 +392,7 @@ struct SyncedProviderInstanceV3: Syncable {
     var createdAt: Date
     var updatedAt: Date
     var extrasJson: String?              // forward-compat envelope
-    var customUserAgent: String?         // per-provider outbound UA override; nil = default
+    var requestCustomizationJson: String?
     /// [T-ios-azure-openai] 0/1 — Azure OpenAI mode (api-key auth + Azure URL).
     /// Older records / older builds lack this CloudKit field; it decodes to 0
     /// (off), so a peer that never heard of Azure simply treats the instance as
@@ -422,7 +422,7 @@ struct SyncedProviderInstanceV3: Syncable {
                 F.date("createdAt",                \SyncedProviderInstanceV3.createdAt),
                 F.date("updatedAt",                \SyncedProviderInstanceV3.updatedAt),
                 F.optionalString("extrasJson",     \SyncedProviderInstanceV3.extrasJson),
-                F.optionalString("customUserAgent", \SyncedProviderInstanceV3.customUserAgent),
+                F.optionalString("requestCustomizationJson", \SyncedProviderInstanceV3.requestCustomizationJson),
                 F.int("azureMode",                 \SyncedProviderInstanceV3.azureMode),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedProviderInstanceV3.updatedAt),
@@ -485,7 +485,7 @@ struct SyncedProviderModelGroupV3: Syncable {
     var name: String
     var strategy: String                 // RoutingStrategy.rawValue
     var fallbackStrategy: String         // FallbackStrategy.rawValue
-    var defaultThinkingLevel: String?    // ThinkingLevel.rawValue
+    var defaultThinkingLevel: String?    // App-level semantic level ID
     var contextLimitTokens: Int?
     var contextLimitRemembered: Int?     // = ModelGroup.lastContextLimitTokens
     var memberEntryIdsJson: String       // JSON array, ordered
@@ -518,6 +518,40 @@ struct SyncedProviderModelGroupV3: Syncable {
                 F.optionalString("removedMembersJson", \SyncedProviderModelGroupV3.removedMembersJson),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedProviderModelGroupV3.updatedAt),
+            version: 1
+        )
+    }()
+}
+
+// MARK: - SyncedThinkingLevelDefinitionsV3
+
+struct SyncedThinkingLevelDefinitionsV3: Syncable {
+    var id: String = "thinking-level-definitions"
+    var definitionsJson: String
+    var updatedAt: Date
+
+    static let syncMetadata:
+        SyncTypeMetadata<SyncedThinkingLevelDefinitionsV3> = {
+        typealias F = FieldDescriptor<
+            SyncedThinkingLevelDefinitionsV3
+        >
+        return SyncTypeMetadata<SyncedThinkingLevelDefinitionsV3>(
+            recordType: "ThinkingLevelDefinitionsV3",
+            idKeyPath: \SyncedThinkingLevelDefinitionsV3.id,
+            scope: .global,
+            fields: [
+                F.string(
+                    "definitionsJson",
+                    \SyncedThinkingLevelDefinitionsV3.definitionsJson
+                ),
+                F.date(
+                    "updatedAt",
+                    \SyncedThinkingLevelDefinitionsV3.updatedAt
+                ),
+            ],
+            conflictPolicy: .lastWriteWinsByField(
+                \SyncedThinkingLevelDefinitionsV3.updatedAt
+            ),
             version: 1
         )
     }()
@@ -738,6 +772,7 @@ enum SyncedTypesBootstrap {
         r.register(SyncedProviderInstanceV3.self)
         r.register(SyncedProviderModelEntryV3.self)
         r.register(SyncedProviderModelGroupV3.self)
+        r.register(SyncedThinkingLevelDefinitionsV3.self)
         r.register(SyncedEnvVars.self)   // legacy whole-file, inbound only
         r.register(SyncedEnvVar.self)    // per-variable, current schema
         r.register(SyncedDevice.self)

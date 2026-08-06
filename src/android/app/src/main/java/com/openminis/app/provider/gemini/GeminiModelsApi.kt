@@ -4,7 +4,7 @@ import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.ProviderModelsCache
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.applyDefaultUserAgent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -38,6 +38,7 @@ object GeminiModelsApi {
         cloudCodeFallback: Boolean = false,
         context: Context? = null,
         forceRefresh: Boolean = false,
+        customHeaders: Map<String, String> = emptyMap(),
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         if (cloudCodeFallback) return@withContext LLMModel.allGemini
 
@@ -55,7 +56,10 @@ object GeminiModelsApi {
         }
 
         // [T-android-default-ua] brand outbound /v1beta/models request.
-        builder.applyUserAgentOverride(null)
+        builder.applyDefaultUserAgent()
+        for ((key, value) in customHeaders) {
+            builder.header(key, value)
+        }
         val response = client.newCall(builder.build()).execute()
         val body = response.body?.string() ?: return@withContext LLMModel.allGemini
 

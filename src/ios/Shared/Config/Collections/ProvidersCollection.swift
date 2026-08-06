@@ -40,7 +40,7 @@ struct ProvidersCollection: ConfigCollection {
             label(for: id),
             enabled(for: id),
             customBaseURL(for: id),
-            customUserAgent(for: id),
+            customRequestHeaders(for: id),
             appendV1Suffix(for: id),
             imageEndpointMode(for: id),
             // [T-minis-config-provider-add] API key is now WRITABLE (literal or
@@ -279,30 +279,24 @@ struct ProvidersCollection: ConfigCollection {
         )
     }
 
-    private func customUserAgent(for id: String) -> ConfigField {
+    private func customRequestHeaders(for id: String) -> ConfigField {
         ClosureField(
-            path: "providers.\(id).customUserAgent",
-            displayName: "Custom User-Agent",
-            description: "Override the outbound User-Agent header. Empty string = use default.",
-            valueSchema: .string(maxLength: 256),
+            path: "providers.\(id).customRequestHeaders",
+            displayName: "Custom Request Headers",
+            description: "One header expression per line, e.g. Authorization = Bearer {{ provider.apiKey }}.",
+            valueSchema: .string(maxLength: 4096),
             risk: .normal, revertable: true,
             reader: { [self] in
                 guard let inst = instance(id) else { return .null }
-                return .string(inst.customUserAgent ?? "")
+                return .string(inst.customRequestHeaders.joined(separator: "\n"))
             },
             writer: { [self] v in
                 guard case .string(let s) = v else { throw ConfigError.typeMismatch(expected: "string") }
-                // [T-ua-block-oauth-provider] Custom UA only applies to third-party
-                // API-key providers. OAuth providers (Anthropic/Codex) use their own
-                // CLI-gated authentication UA; overriding it can break the OAuth
-                // handshake or be rejected upstream. Reject any write (including the
-                // empty-string clear) for non-apiKey instances; reads stay unguarded.
-                guard let inst = instance(id) else { throw ConfigError.invalidValue("Provider not found") }
-                guard inst.credentialType == .apiKey else {
-                    throw ConfigError.invalidValue("Custom User-Agent is only supported for third-party API-key providers. OAuth providers (Anthropic/Codex) use their own authentication UA and cannot be overridden.")
-                }
                 try mutate(id) {
-                    $0.customUserAgent = s.isEmpty ? nil : s
+                    $0.customRequestHeaders = s
+                        .split(whereSeparator: \.isNewline)
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
                 }
             }
         )

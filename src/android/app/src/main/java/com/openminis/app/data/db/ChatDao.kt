@@ -175,10 +175,17 @@ interface ChatDao {
     suspend fun updateMemoryEnabled(id: String, enabled: Int, updatedAt: Long = System.currentTimeMillis())
 
     // Session: thinking_override (T239) — null clears the explicit choice and
-    // falls back to the current model/group default; non-null is a
-    // ThinkingLevel.name string ("OFF"/"LOW"/"MEDIUM"/"HIGH"/"XHIGH").
+    // falls back to the current model/group default; non-null is an immutable
+    // ThinkingLevelDefinition.definitionId.
     @Query("UPDATE sessions SET thinking_override = :value, updated_at = :updatedAt WHERE id = :id")
     suspend fun updateThinkingOverride(id: String, value: String?, updatedAt: Long = System.currentTimeMillis())
+
+    @Query(
+        "SELECT COUNT(*) FROM sessions WHERE thinking_override = :definitionId",
+    )
+    suspend fun countThinkingDefinitionReferences(
+        definitionId: String,
+    ): Int
 
     // Session: pinned_at
     @Query("UPDATE sessions SET pinned_at = :pinnedAt, updated_at = :updatedAt WHERE id = :id")

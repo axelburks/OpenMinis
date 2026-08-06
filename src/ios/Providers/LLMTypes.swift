@@ -743,6 +743,7 @@ struct SessionModelBinding: Codable, Hashable {
 /// Thinking intensity level.
 enum ThinkingLevel: String, Codable, Hashable, CaseIterable, Comparable {
     case off
+    case minimal
     case low
     case medium
     case high
@@ -757,6 +758,7 @@ enum ThinkingLevel: String, Codable, Hashable, CaseIterable, Comparable {
     var displayName: String {
         switch self {
         case .off: return String(localized: "Off")
+        case .minimal: return String(localized: "Minimal")
         case .low: return String(localized: "Low")
         case .medium: return String(localized: "Med")
         case .high: return String(localized: "High")
@@ -768,8 +770,18 @@ enum ThinkingLevel: String, Codable, Hashable, CaseIterable, Comparable {
 
     var isEnabled: Bool { self != .off }
 
-    static func decoded(_ raw: String) -> ThinkingLevel {
-        ThinkingLevel(rawValue: raw) ?? .xhigh
+    static func builtInLevel(id: String) -> ThinkingLevel? {
+        allCases.first { $0.rawValue == id }
+    }
+
+    static func availableLevels(
+        model: LLMModel
+    ) -> [ThinkingLevel] {
+        guard model.supportsReasoning != false else { return [] }
+        let maxLevel = model.catalogMaxThinkingLevel
+        return allCases.filter { level in
+            level == .off || level <= maxLevel
+        }
     }
 }
 
@@ -787,32 +799,37 @@ extension LLMModel {
 
 /// Per-session inference settings (thinking toggle, etc.).
 struct SessionInferenceConfig: Codable, Hashable {
-    var thinkingLevel: ThinkingLevel = .off
+    var thinkingDefinitionId: String =
+        ThinkingLevelRegistry.offDefinitionId
 
-    /// Convenience — true when thinking is enabled at any level.
-    var thinkingEnabled: Bool { thinkingLevel.isEnabled }
-
-    // Backward-compatible decode: handle both old `thinkingEnabled: Bool` and new `thinkingLevel` key.
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let raw = try container.decodeIfPresent(String.self, forKey: .thinkingLevel) {
-            thinkingLevel = ThinkingLevel.decoded(raw)
-        } else if let enabled = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) {
-            thinkingLevel = enabled ? .medium : .off
-        } else {
-            thinkingLevel = .off
+    var thinkingLevel: ThinkingLevel {
+        get {
+            ThinkingLevelRegistry.nativeLevel(
+                forDefinitionId:
+                    thinkingDefinitionId
+            )
+        }
+        set {
+            thinkingDefinitionId =
+                ThinkingLevelRegistry.definition(
+                    forLevelId: newValue.rawValue
+                )?.definitionId
+                ?? ThinkingLevelRegistry
+                    .offDefinitionId
         }
     }
 
-    init() { thinkingLevel = .off }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(thinkingLevel, forKey: .thinkingLevel)
+    /// True unless the client explicitly selects the semantic Off level.
+    var thinkingEnabled: Bool {
+        thinkingLevel.isEnabled
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case thinkingLevel, thinkingEnabled
+    init(
+        thinkingDefinitionId: String =
+            ThinkingLevelRegistry.offDefinitionId
+    ) {
+        self.thinkingDefinitionId =
+            thinkingDefinitionId
     }
 }
 

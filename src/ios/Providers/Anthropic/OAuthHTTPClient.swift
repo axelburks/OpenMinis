@@ -10,6 +10,93 @@ import os.log
 // into streamMessage. They are the same request. [diag-0800 Q2]
 private let logger = AppLogger(category: "AnthropicStreamTransport")
 
+final class AnthropicRequestCustomizationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var customization: RequestCustomization?
+    private var apiKey: String?
+
+    init(apiKey: String? = nil) {
+        self.apiKey = apiKey
+    }
+
+    func setCustomization(_ customization: RequestCustomization?) {
+        lock.lock()
+        self.customization = customization
+        lock.unlock()
+    }
+
+    func setAPIKey(_ apiKey: String?) {
+        lock.lock()
+        self.apiKey = apiKey
+        lock.unlock()
+    }
+
+    func registerRequest(id: String) -> String? {
+        lock.lock()
+        let customization = customization
+        let apiKey = apiKey
+        lock.unlock()
+        guard let customization else { return nil }
+        return RequestBodyPatcher.registerRequestCustomization(
+            customization,
+            apiKey: apiKey,
+            thinkingDefinitionId:
+                RequestCustomizationRuntime
+                    .thinkingDefinitionId,
+            sessionId: RequestCustomizationRuntime.sessionId,
+            usesConversationRequestControlState:
+                RequestCustomizationRuntime
+                    .usesConversationRequestControlState,
+            id: id
+        )
+    }
+}
+
+/// Reuses URLSession-backed adapters without sharing request customization
+/// state before the URLProtocol interceptor consumes it. Streaming leases can
+/// be reused after response headers arrive because customization has already
+/// been removed from the pending registry at that point.
+final class AnthropicHTTPClientPool: @unchecked Sendable {
+    struct Lease {
+        let id: String
+        let client: URLSessionHTTPClientAdapter
+    }
+
+    private let lock = NSLock()
+    private var available: [Lease] = []
+    private let makeClient:
+        @Sendable (String) -> URLSessionHTTPClientAdapter
+
+    init(
+        makeClient:
+            @escaping @Sendable (String)
+                -> URLSessionHTTPClientAdapter
+    ) {
+        self.makeClient = makeClient
+    }
+
+    func acquire() -> Lease {
+        lock.lock()
+        if let lease = available.popLast() {
+            lock.unlock()
+            return lease
+        }
+        lock.unlock()
+
+        let id = UUID().uuidString
+        return Lease(
+            id: id,
+            client: makeClient(id)
+        )
+    }
+
+    func release(_ lease: Lease) {
+        lock.lock()
+        available.append(lease)
+        lock.unlock()
+    }
+}
+
 /// Replaces `x-api-key` with `Authorization: Bearer` via a custom URLProtocol.
 ///
 /// Since `HTTPRequest` properties are module-internal in SwiftAnthropic,
@@ -19,23 +106,38 @@ private let logger = AppLogger(category: "AnthropicStreamTransport")
 /// auth headers before it hits the network.
 final class OAuthHTTPClient: HTTPClient {
 
-    private let underlying: URLSessionHTTPClientAdapter
     private let registryId: String
+    private let customizationBox: AnthropicRequestCustomizationBox
+    private let clientPool: AnthropicHTTPClientPool
 
-    init(tokenProvider: @escaping @Sendable () async throws -> String) {
+    init(
+        tokenProvider: @escaping @Sendable () async throws -> String,
+        customizationBox: AnthropicRequestCustomizationBox
+    ) {
         let box = TokenBox()
         box.set(tokenProvider)
         let rid = UUID().uuidString
         self.registryId = rid
+        self.customizationBox = customizationBox
+        self.clientPool = AnthropicHTTPClientPool { requestId in
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 600
+            config.protocolClasses = [OAuthURLProtocol.self]
+            var headers =
+                config.httpAdditionalHeaders ?? [:]
+            headers["X-Minis-OAuth-UUID"] = rid
+            headers[
+                RequestBodyPatcher
+                    .customizationRequestHeader
+            ] = requestId
+            config.httpAdditionalHeaders = headers
+            return URLSessionHTTPClientAdapter(
+                urlSession: URLSession(
+                    configuration: config
+                )
+            )
+        }
         TokenBoxRegistry.shared.register(id: rid, box: box)
-
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 600  // 10 min — SSE streams can be idle during large tool generation
-        config.protocolClasses = [OAuthURLProtocol.self]
-        config.httpAdditionalHeaders = (config.httpAdditionalHeaders ?? [:]).merging(
-            ["X-Minis-OAuth-UUID": rid]) { _, new in new }
-        let session = URLSession(configuration: config)
-        self.underlying = URLSessionHTTPClientAdapter(urlSession: session)
     }
 
     deinit {
@@ -43,11 +145,29 @@ final class OAuthHTTPClient: HTTPClient {
     }
 
     func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-        try await underlying.data(for: request)
+        let lease = clientPool.acquire()
+        let requestId =
+            customizationBox.registerRequest(
+                id: lease.id
+            )
+        defer {
+            RequestBodyPatcher.discardRequestCustomization(id: requestId)
+            clientPool.release(lease)
+        }
+        return try await lease.client.data(for: request)
     }
 
     func bytes(for request: HTTPRequest) async throws -> (HTTPByteStream, HTTPResponse) {
-        try await underlying.bytes(for: request)
+        let lease = clientPool.acquire()
+        let requestId =
+            customizationBox.registerRequest(
+                id: lease.id
+            )
+        defer {
+            RequestBodyPatcher.discardRequestCustomization(id: requestId)
+            clientPool.release(lease)
+        }
+        return try await lease.client.bytes(for: request)
     }
 }
 
@@ -611,6 +731,7 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         // Inject thinking config (budget_tokens + beta header) when enabled
         RequestBodyPatcher.injectThinkingConfig(into: mutable)
         RequestBodyPatcher.injectThinkingBlocksForCompatProxy(into: mutable)
+        let customHeaderOverrides = RequestBodyPatcher.applyRequestCustomization(into: mutable)
         #if DEBUG
         AgentRequestTrace.shared.step("urlprotocol.afterPatchers", detail: "httpBody=\(mutable.httpBody?.count ?? -1)")
         #endif
@@ -641,6 +762,9 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
                 return
             case .success(let token):
                 mutable.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                for (name, value) in customHeaderOverrides {
+                    mutable.setValue(value, forHTTPHeaderField: name)
+                }
                 #if DEBUG
                 logger.info("[URLProtocol] Set Bearer token (prefix: \(token.prefix(16))...)")
                 #else
@@ -815,6 +939,130 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
 /// Injects `eager_input_streaming: true` into each tool definition in the request body.
 /// This enables fine-grained tool streaming (GA feature, no beta header required).
 enum RequestBodyPatcher {
+    private struct PendingRequestCustomization {
+        let customization: RequestCustomization
+        let apiKey: String?
+        let thinkingDefinitionId: String?
+        let sessionId: String?
+        let usesConversationRequestControlState: Bool
+    }
+
+    static let customizationRequestHeader =
+        "X-Minis-Request-Customization-UUID"
+    private static let customizationLock = NSLock()
+    private static var pendingRequestCustomizations:
+        [String: PendingRequestCustomization] = [:]
+
+    static func registerRequestCustomization(
+        _ customization: RequestCustomization,
+        apiKey: String?,
+        thinkingDefinitionId: String?,
+        sessionId: String? = nil,
+        usesConversationRequestControlState: Bool = false,
+        id requestedID: String? = nil
+    ) -> String {
+        let id = requestedID ?? UUID().uuidString
+        customizationLock.lock()
+        pendingRequestCustomizations[id] = PendingRequestCustomization(
+            customization: customization,
+            apiKey: apiKey,
+            thinkingDefinitionId:
+                thinkingDefinitionId,
+            sessionId: sessionId,
+            usesConversationRequestControlState:
+                usesConversationRequestControlState
+        )
+        customizationLock.unlock()
+        return id
+    }
+
+    static func discardRequestCustomization(id: String?) {
+        guard let id else { return }
+        customizationLock.lock()
+        pendingRequestCustomizations.removeValue(forKey: id)
+        customizationLock.unlock()
+    }
+
+    private static func takeRequestCustomization(
+        id: String
+    ) -> PendingRequestCustomization? {
+        customizationLock.lock()
+        defer { customizationLock.unlock() }
+        return pendingRequestCustomizations.removeValue(forKey: id)
+    }
+
+    @discardableResult
+    static func applyRequestCustomization(
+        into request: NSMutableURLRequest
+    ) -> [String: String] {
+        guard let requestId = request.value(
+            forHTTPHeaderField: customizationRequestHeader
+        ) else {
+            return [:]
+        }
+        request.setValue(nil, forHTTPHeaderField: customizationRequestHeader)
+        guard let bodyData = request.httpBody,
+              var body = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            discardRequestCustomization(id: requestId)
+            return [:]
+        }
+        guard let pending = takeRequestCustomization(id: requestId) else {
+            return [:]
+        }
+
+        let originalHeaders = request.allHTTPHeaderFields ?? [:]
+        var headers = originalHeaders
+        RequestCustomizationRuntime.$sessionId.withValue(
+            pending.sessionId
+        ) {
+            RequestCustomizationRuntime
+                .$thinkingDefinitionId.withValue(
+                pending.thinkingDefinitionId
+            ) {
+                RequestCustomizationRuntime
+                    .$usesConversationRequestControlState
+                    .withValue(
+                        pending
+                            .usesConversationRequestControlState
+                    ) {
+                        pending.customization.apply(
+                            to: &body,
+                            headers: &headers,
+                            apiKey: pending.apiKey
+                        )
+                    }
+            }
+        }
+
+        guard let encoded = try? JSONSerialization.data(
+            withJSONObject: body,
+            options: [.sortedKeys]
+        ) else {
+            return [:]
+        }
+        request.httpBody = encoded
+
+        var overrides: [String: String] = [:]
+        for (name, value) in headers {
+            let previous = originalHeaders.first {
+                $0.key.caseInsensitiveCompare(name) == .orderedSame
+            }?.value
+            if previous != value {
+                overrides[name] = value
+            }
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        // Header patching is set-only: a key the customization deleted just
+        // vanishes from `headers`, so clear it explicitly or the pre-existing
+        // default survives. Deleted keys are absent from `overrides`, so the
+        // URLProtocol token-fetch re-application loop won't re-add them.
+        let survivingKeys = Set(headers.keys.map { $0.lowercased() })
+        for name in originalHeaders.keys where !survivingKeys.contains(name.lowercased()) {
+            request.setValue(nil, forHTTPHeaderField: name)
+        }
+        return overrides
+    }
+
     /// If the request uses httpBodyStream instead of httpBody, read the stream
     /// and assign the result to httpBody so subsequent patchers can access it.
     static func materializeBodyStream(_ request: NSMutableURLRequest) {
@@ -1324,6 +1572,7 @@ private final class EagerStreamingURLProtocol: URLProtocol, URLSessionDataDelega
         RequestBodyPatcher.injectCacheTTL(into: mutable)
         RequestBodyPatcher.injectThinkingConfig(into: mutable)
         RequestBodyPatcher.injectThinkingBlocksForCompatProxy(into: mutable)
+        RequestBodyPatcher.applyRequestCustomization(into: mutable)
 
         // Remove stale Content-Length — URLSession will recalculate from httpBody
         mutable.setValue(nil, forHTTPHeaderField: "Content-Length")
@@ -1419,56 +1668,120 @@ private final class EagerStreamingURLProtocol: URLProtocol, URLSessionDataDelega
 /// HTTPClient wrapper that injects `eager_input_streaming` into tool definitions
 /// for the API key authentication path.
 final class EagerStreamingHTTPClient: HTTPClient {
-    private let underlying: URLSessionHTTPClientAdapter
+    private let customizationBox: AnthropicRequestCustomizationBox
+    private let clientPool: AnthropicHTTPClientPool
 
-    /// - Parameter customUserAgent: when non-nil, overrides the default URLSession
-    ///   `User-Agent` on every request through `httpAdditionalHeaders` (proxies that
-    ///   gate on client UA). The SDK never sets User-Agent itself, so this takes effect.
-    init(customUserAgent: String? = nil) {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 600  // 10 min — SSE streams can be idle during large tool generation
-        config.protocolClasses = [EagerStreamingURLProtocol.self]
-        if let ua = customUserAgent {
-            config.httpAdditionalHeaders = (config.httpAdditionalHeaders ?? [:]).merging(
-                ["User-Agent": ua]) { _, new in new }
+    init(
+        customizationBox: AnthropicRequestCustomizationBox
+    ) {
+        self.customizationBox = customizationBox
+        self.clientPool = AnthropicHTTPClientPool { requestId in
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 600
+            config.protocolClasses = [
+                EagerStreamingURLProtocol.self
+            ]
+            var headers =
+                config.httpAdditionalHeaders ?? [:]
+            headers["User-Agent"] =
+                MinisUserAgent.default
+            headers[
+                RequestBodyPatcher
+                    .customizationRequestHeader
+            ] = requestId
+            config.httpAdditionalHeaders = headers
+            return URLSessionHTTPClientAdapter(
+                urlSession: URLSession(
+                    configuration: config
+                )
+            )
         }
-        let session = URLSession(configuration: config)
-        self.underlying = URLSessionHTTPClientAdapter(urlSession: session)
     }
 
     func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-        try await underlying.data(for: request)
+        let lease = clientPool.acquire()
+        let requestId =
+            customizationBox.registerRequest(
+                id: lease.id
+            )
+        defer {
+            RequestBodyPatcher.discardRequestCustomization(id: requestId)
+            clientPool.release(lease)
+        }
+        return try await lease.client.data(for: request)
     }
 
     func bytes(for request: HTTPRequest) async throws -> (HTTPByteStream, HTTPResponse) {
-        try await underlying.bytes(for: request)
+        let lease = clientPool.acquire()
+        let requestId =
+            customizationBox.registerRequest(
+                id: lease.id
+            )
+        defer {
+            RequestBodyPatcher.discardRequestCustomization(id: requestId)
+            clientPool.release(lease)
+        }
+        return try await lease.client.bytes(for: request)
     }
 }
 
 /// HTTPClient that sends both `x-api-key` and `Authorization: Bearer` headers simultaneously.
 /// Used for manual OAuth tokens on Anthropic-compatible proxies that may expect either header.
 final class DualAuthHTTPClient: HTTPClient {
-    private let underlying: URLSessionHTTPClientAdapter
+    private let customizationBox: AnthropicRequestCustomizationBox
+    private let clientPool: AnthropicHTTPClientPool
 
-    /// - Parameter customUserAgent: see `EagerStreamingHTTPClient.init`.
-    init(customUserAgent: String? = nil) {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 600
-        config.protocolClasses = [DualAuthURLProtocol.self]
-        if let ua = customUserAgent {
-            config.httpAdditionalHeaders = (config.httpAdditionalHeaders ?? [:]).merging(
-                ["User-Agent": ua]) { _, new in new }
+    init(
+        customizationBox: AnthropicRequestCustomizationBox
+    ) {
+        self.customizationBox = customizationBox
+        self.clientPool = AnthropicHTTPClientPool { requestId in
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 600
+            config.protocolClasses = [
+                DualAuthURLProtocol.self
+            ]
+            var headers =
+                config.httpAdditionalHeaders ?? [:]
+            headers["User-Agent"] =
+                MinisUserAgent.default
+            headers[
+                RequestBodyPatcher
+                    .customizationRequestHeader
+            ] = requestId
+            config.httpAdditionalHeaders = headers
+            return URLSessionHTTPClientAdapter(
+                urlSession: URLSession(
+                    configuration: config
+                )
+            )
         }
-        let session = URLSession(configuration: config)
-        self.underlying = URLSessionHTTPClientAdapter(urlSession: session)
     }
 
     func data(for request: HTTPRequest) async throws -> (Data, HTTPResponse) {
-        try await underlying.data(for: request)
+        let lease = clientPool.acquire()
+        let requestId =
+            customizationBox.registerRequest(
+                id: lease.id
+            )
+        defer {
+            RequestBodyPatcher.discardRequestCustomization(id: requestId)
+            clientPool.release(lease)
+        }
+        return try await lease.client.data(for: request)
     }
 
     func bytes(for request: HTTPRequest) async throws -> (HTTPByteStream, HTTPResponse) {
-        try await underlying.bytes(for: request)
+        let lease = clientPool.acquire()
+        let requestId =
+            customizationBox.registerRequest(
+                id: lease.id
+            )
+        defer {
+            RequestBodyPatcher.discardRequestCustomization(id: requestId)
+            clientPool.release(lease)
+        }
+        return try await lease.client.bytes(for: request)
     }
 }
 
@@ -1514,6 +1827,7 @@ private final class DualAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         RequestBodyPatcher.injectCacheTTL(into: mutable)
         RequestBodyPatcher.injectThinkingConfig(into: mutable)
         RequestBodyPatcher.injectThinkingBlocksForCompatProxy(into: mutable)
+        RequestBodyPatcher.applyRequestCustomization(into: mutable)
         mutable.setValue(nil, forHTTPHeaderField: "Content-Length")
 
         #if DEBUG

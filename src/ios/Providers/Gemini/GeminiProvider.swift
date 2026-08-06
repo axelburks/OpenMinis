@@ -35,6 +35,7 @@ final class GeminiProvider: LLMProvider {
     /// Extra generation config fields to merge into `generationConfig` (e.g. aspect ratio, resolution).
     /// Set by callers like ModelUseOffloadBridge before calling sendMessage.
     var extraGenerationConfig: [String: Any]?
+    var requestCustomization: RequestCustomization?
 
 
     /// Stable session ID for Cloud Code Assist (persists for the lifetime of this provider instance).
@@ -181,8 +182,12 @@ final class GeminiProvider: LLMProvider {
             "maxOutputTokens": maxTokens,
             "temperature": 0.7,
         ]
-        let thinkCfg = thinkingLevel.isEnabled ? elevatedThinkingConfig(level: thinkingLevel) : minimalThinkingConfig()
-        if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        if requestCustomization?.disablesBuiltInThinkingInjection != true {
+            let thinkCfg = thinkingLevel.isEnabled
+                ? elevatedThinkingConfig(level: thinkingLevel)
+                : minimalThinkingConfig()
+            if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        }
         body["generationConfig"] = genConfig
 
         if !tools.isEmpty {
@@ -330,7 +335,7 @@ final class GeminiProvider: LLMProvider {
 
         if id.contains("gemini-3") {
             let geminiLevel: String = switch level {
-            case .off: "minimal"
+            case .off, .minimal: "minimal"
             case .low: "low"
             case .medium: "medium"
             case .high, .xhigh, .max, .ultra: "high"
@@ -341,7 +346,7 @@ final class GeminiProvider: LLMProvider {
         if id.contains("2.5-pro") {
             let budget: Int = switch level {
             case .off: 128
-            case .low: 2048
+            case .minimal, .low: 2048
             case .medium: 8192
             case .high: 16384
             case .xhigh, .max, .ultra: 32768
@@ -352,7 +357,7 @@ final class GeminiProvider: LLMProvider {
         if id.contains("2.5-flash") && !id.contains("lite") {
             let budget: Int = switch level {
             case .off: 0
-            case .low: 1024
+            case .minimal, .low: 1024
             case .medium: 4096
             case .high: 8192
             case .xhigh, .max, .ultra: 16384
@@ -366,7 +371,7 @@ final class GeminiProvider: LLMProvider {
         // 2.5 Pro variants with non-standard IDs), so use 128 as the floor.
         let budget: Int = switch level {
         case .off: 128
-        case .low: 1024
+        case .minimal, .low: 1024
         case .medium: 4096
         case .high: 8192
         case .xhigh, .max, .ultra: 16384
@@ -412,9 +417,11 @@ final class GeminiProvider: LLMProvider {
         if let temp = temperature {
             config["temperature"] = temp
         }
-        let thinkCfg = self.minimalThinkingConfig()
-        if !thinkCfg.isEmpty {
-            config["thinkingConfig"] = thinkCfg
+        if requestCustomization?.disablesBuiltInThinkingInjection != true {
+            let thinkCfg = self.minimalThinkingConfig()
+            if !thinkCfg.isEmpty {
+                config["thinkingConfig"] = thinkCfg
+            }
         }
 
         // Set responseModalities based on model capabilities
@@ -439,7 +446,7 @@ final class GeminiProvider: LLMProvider {
 
     private func buildRequest(path: String, body: [String: Any]) async throws -> URLRequest {
         let urlString: String
-        let finalBody: [String: Any]
+        var finalBody: [String: Any]
 
         if useCloudCode {
             // Cloud Code Assist endpoint — `<base>:<method>` (Google method syntax,
@@ -479,6 +486,27 @@ final class GeminiProvider: LLMProvider {
             // URLSession would send its build-number default. Use the app default
             // (Minis/<marketing>) instead. Never overrides the Cloud Code UA above.
             request.setValue(MinisUserAgent.default, forHTTPHeaderField: "User-Agent")
+        }
+
+        let originalHeaders = request.allHTTPHeaderFields ?? [:]
+        var headers = originalHeaders
+        let apiKey: String?
+        switch authMode {
+        case .apiKey(let key):
+            apiKey = key
+        case .oauth:
+            apiKey = headers["Authorization"]?.replacingOccurrences(of: "Bearer ", with: "")
+        }
+        requestCustomization?.apply(to: &finalBody, headers: &headers, apiKey: apiKey)
+        // URLRequest header patching is set-only: a key the customization
+        // deleted just vanishes from the dict, so we must explicitly clear it
+        // with setValue(nil,...) or the pre-existing default header survives.
+        let survivingKeys = Set(headers.keys.map { $0.lowercased() })
+        for key in originalHeaders.keys where !survivingKeys.contains(key.lowercased()) {
+            request.setValue(nil, forHTTPHeaderField: key)
+        }
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
         }
 
         // sortedKeys: stable byte-level prefix so server-side prompt caches

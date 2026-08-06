@@ -4,7 +4,7 @@ import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.normalizeModalities
 import com.openminis.app.provider.ModelsDevApi
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.applyDefaultUserAgent
 import com.openminis.app.provider.ProviderModelsCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,20 +32,24 @@ object OpenRouterModelsApi {
         apiKey: String,
         context: Context? = null,
         forceRefresh: Boolean = false,
+        customHeaders: Map<String, String> = emptyMap(),
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         val cacheKey = apiKey
         if (context != null && !forceRefresh) {
             cache.load(context, cacheKey)?.let { return@withContext it }
         }
 
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url("https://openrouter.ai/api/v1/models")
             .header("Authorization", "Bearer $apiKey")
             .header("HTTP-Referer", "https://github.com/OpenMinis/OpenMinis")
             .header("X-Title", "Minis App")
             // [T-android-default-ua] brand outbound /api/v1/models request.
-            .applyUserAgentOverride(null)
-            .build()
+            .applyDefaultUserAgent()
+        for ((key, value) in customHeaders) {
+            requestBuilder.header(key, value)
+        }
+        val request = requestBuilder.build()
 
         val response = client.newCall(request).execute()
         val body = response.body?.string() ?: return@withContext emptyList()

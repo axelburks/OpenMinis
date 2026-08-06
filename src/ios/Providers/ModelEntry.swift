@@ -26,20 +26,26 @@ struct ModelOverrides: Codable, Hashable, Sendable {
     /// the field every refresh — which is what made the user's manual
     /// Thinking toggle revert).
     var supportsReasoning: Bool?
-    var maxThinkingLevel: ThinkingLevel?
+    var customRequestHeaders: [String]?
+    var customRequestBody: [String]?
+    var requestBodyControls: [RequestBodyControl]?
 
     init(displayName: String? = nil,
          maxOutputTokens: Int? = nil,
          modalityOverride: ModelModality? = nil,
          contextWindow: Int? = nil,
          supportsReasoning: Bool? = nil,
-         maxThinkingLevel: ThinkingLevel? = nil) {
+         customRequestHeaders: [String]? = nil,
+         customRequestBody: [String]? = nil,
+         requestBodyControls: [RequestBodyControl]? = nil) {
         self.displayName = displayName
         self.maxOutputTokens = maxOutputTokens
         self.modalityOverride = modalityOverride
         self.contextWindow = contextWindow
         self.supportsReasoning = supportsReasoning
-        self.maxThinkingLevel = maxThinkingLevel
+        self.customRequestHeaders = customRequestHeaders
+        self.customRequestBody = customRequestBody
+        self.requestBodyControls = requestBodyControls
     }
 
     /// True when the user has not set any override.
@@ -49,11 +55,14 @@ struct ModelOverrides: Codable, Hashable, Sendable {
             && modalityOverride == nil
             && contextWindow == nil
             && supportsReasoning == nil
-            && maxThinkingLevel == nil
+            && (customRequestHeaders?.isEmpty ?? true)
+            && (customRequestBody?.isEmpty ?? true)
+            && (requestBodyControls?.isEmpty ?? true)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case displayName, maxOutputTokens, modalityOverride, contextWindow, supportsReasoning, maxThinkingLevel
+        case displayName, maxOutputTokens, modalityOverride, contextWindow, supportsReasoning
+        case customRequestHeaders, customRequestBody, requestBodyControls
     }
 
     init(from decoder: Decoder) throws {
@@ -63,11 +72,9 @@ struct ModelOverrides: Codable, Hashable, Sendable {
         self.modalityOverride = try container.decodeIfPresent(ModelModality.self, forKey: .modalityOverride)
         self.contextWindow = try container.decodeIfPresent(Int.self, forKey: .contextWindow)
         self.supportsReasoning = try container.decodeIfPresent(Bool.self, forKey: .supportsReasoning)
-        if let raw = try container.decodeIfPresent(String.self, forKey: .maxThinkingLevel) {
-            self.maxThinkingLevel = ThinkingLevel.decoded(raw)
-        } else {
-            self.maxThinkingLevel = nil
-        }
+        self.customRequestHeaders = try container.decodeIfPresent([String].self, forKey: .customRequestHeaders)
+        self.customRequestBody = try container.decodeIfPresent([String].self, forKey: .customRequestBody)
+        self.requestBodyControls = try container.decodeIfPresent([RequestBodyControl].self, forKey: .requestBodyControls)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -77,7 +84,15 @@ struct ModelOverrides: Codable, Hashable, Sendable {
         try container.encodeIfPresent(modalityOverride, forKey: .modalityOverride)
         try container.encodeIfPresent(contextWindow, forKey: .contextWindow)
         try container.encodeIfPresent(supportsReasoning, forKey: .supportsReasoning)
-        try container.encodeIfPresent(maxThinkingLevel?.rawValue, forKey: .maxThinkingLevel)
+        if let customRequestHeaders, !customRequestHeaders.isEmpty {
+            try container.encode(customRequestHeaders, forKey: .customRequestHeaders)
+        }
+        if let customRequestBody, !customRequestBody.isEmpty {
+            try container.encode(customRequestBody, forKey: .customRequestBody)
+        }
+        if let requestBodyControls, !requestBodyControls.isEmpty {
+            try container.encode(requestBodyControls, forKey: .requestBodyControls)
+        }
     }
 }
 
@@ -213,11 +228,5 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         hasher.combine(isCustom)
         hasher.combine(isHidden)
         hasher.combine(userModifiedAt)
-    }
-}
-
-extension ModelEntry {
-    var effectiveMaxThinkingLevel: ThinkingLevel {
-        overrides.maxThinkingLevel ?? model.catalogMaxThinkingLevel
     }
 }

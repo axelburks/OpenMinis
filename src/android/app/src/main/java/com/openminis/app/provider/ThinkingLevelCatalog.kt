@@ -1,7 +1,6 @@
 package com.openminis.app.provider
 
 import com.openminis.app.data.model.LLMModel
-import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ThinkingLevel
 
 /**
@@ -17,10 +16,7 @@ object ThinkingLevelCatalog {
     private data class Rule(val match: (String) -> Boolean, val max: ThinkingLevel)
 
     private val rules: List<Rule> = listOf(
-        // GPT-5.6 family: sol / terra / luna all reach MAX. ULTRA is a
-        // client-side "Max + orchestration" concept, never a wire effort — the
-        // effort layer maps both MAX and ULTRA to "max". Keep in lockstep with
-        // iOS ThinkingLevelCatalog.swift.
+        // GPT-5.6 tops out at Max. Ultra is not a supported Codex effort.
         Rule({ it.startsWith("gpt-5.6-sol") || it.startsWith("gpt-5.6-terra") }, ThinkingLevel.MAX),
         Rule({ it.startsWith("gpt-5.6-luna") }, ThinkingLevel.MAX),
         Rule({ it.startsWith("gpt-5.5") }, ThinkingLevel.XHIGH),
@@ -60,8 +56,7 @@ object ThinkingLevelCatalog {
 
 /**
  * [T-android-thinking-level-arch] "How high can this model's thinking go?"
- * resolved through the built-in tiers only (no user override — see
- * [ModelEntry.effectiveMaxThinkingLevel] for that):
+ * resolved through the built-in tiers:
  *   1. supportsReasoning == false → OFF (checked BEFORE catalog rules so a
  *      broadened family rule can't lift a non-reasoning member's ceiling).
  *   2. ThinkingLevelCatalog rule.
@@ -79,12 +74,3 @@ val LLMModel.catalogMaxThinkingLevel: ThinkingLevel
         if (supportsReasoning == false) return ThinkingLevel.OFF
         return ThinkingLevelCatalog.declaredMaxLevel(id) ?: ThinkingLevel.XHIGH
     }
-
-/**
- * [T-android-thinking-level-arch] The four-level resolution the rest of the app
- * consults: the user's manual override on the entry (highest priority) wins over
- * the catalog/default. `entry.model` already folds ModelOverrides into the base
- * model, so read the ceiling off the resolved model there.
- */
-val ModelEntry.effectiveMaxThinkingLevel: ThinkingLevel
-    get() = overrides.maxThinkingLevel ?: model.catalogMaxThinkingLevel

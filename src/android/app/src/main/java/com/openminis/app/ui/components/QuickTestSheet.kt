@@ -506,7 +506,7 @@ private suspend fun performTest(
     }
 
     val provider = runCatching {
-        ProviderFactory.create(instance, apiKey, entry.model, context)
+        ProviderFactory.create(instance, apiKey, entry.model, context, entry)
     }.getOrElse { return@withContext failure(it.message ?: "Couldn't create provider.") }
 
     when (kind) {

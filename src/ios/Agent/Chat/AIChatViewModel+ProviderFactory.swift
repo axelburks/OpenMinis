@@ -25,21 +25,21 @@ extension AIChatViewModel {
         }
         switch instance.providerType {
         case .anthropic:
-            return AnthropicAgentProvider(provider: LLMProviderFactory.makeAnthropicProvider(instance: instance, model: entry.model))
+            return AnthropicAgentProvider(provider: LLMProviderFactory.makeAnthropicProvider(instance: instance, model: entry.model, entry: entry))
         case .gemini:
-            return GeminiAgentProvider(provider: await LLMProviderFactory.makeGeminiProvider(instance: instance, model: entry.model))
+            return GeminiAgentProvider(provider: await LLMProviderFactory.makeGeminiProvider(instance: instance, model: entry.model, entry: entry))
         case .openAI:
-            return OpenAIAgentProvider(provider: LLMProviderFactory.makeOpenAIProvider(instance: instance, model: entry.model))
+            return OpenAIAgentProvider(provider: LLMProviderFactory.makeOpenAIProvider(instance: instance, entry: entry))
         case .antigravity:
-            return AntigravityAgentProvider(provider: await LLMProviderFactory.makeAntigravityProvider(instance: instance, model: entry.model))
+            return AntigravityAgentProvider(provider: await LLMProviderFactory.makeAntigravityProvider(instance: instance, model: entry.model, entry: entry))
         case .openRouter:
-            return OpenAIAgentProvider(provider: LLMProviderFactory.makeOpenRouterProvider(instance: instance, model: entry.model))
+            return OpenAIAgentProvider(provider: LLMProviderFactory.makeOpenRouterProvider(instance: instance, entry: entry))
         case .openAIResponses:
-            return OpenAIAgentProvider(provider: LLMProviderFactory.makeOpenAIResponsesProvider(instance: instance, model: entry.model))
+            return OpenAIAgentProvider(provider: LLMProviderFactory.makeOpenAIResponsesProvider(instance: instance, entry: entry))
         case .xAI:
-            return OpenAIAgentProvider(provider: LLMProviderFactory.makeXAIProvider(instance: instance, model: entry.model))
+            return OpenAIAgentProvider(provider: LLMProviderFactory.makeXAIProvider(instance: instance, entry: entry))
         case .kimiCode:
-            return OpenAIAgentProvider(provider: LLMProviderFactory.makeKimiProvider(instance: instance, model: entry.model))
+            return OpenAIAgentProvider(provider: LLMProviderFactory.makeKimiProvider(instance: instance, entry: entry))
         case .unsupported:
             logger.error("\(instance.providerType) has no agent provider; returning placeholder")
             return AnthropicAgentProvider(provider: AnthropicProvider(apiKey: "", model: entry.model))
@@ -54,7 +54,7 @@ extension AIChatViewModel {
         guard let instance = store.instance(for: entry.providerInstanceId),
               instance.providerType == .anthropic else { return nil }
         RequestBodyPatcher.setExtendedCacheTTL(self.enhancedCacheEnabled)
-        return AnthropicAgentProvider(provider: LLMProviderFactory.makeAnthropicProvider(instance: instance, model: entry.model))
+        return AnthropicAgentProvider(provider: LLMProviderFactory.makeAnthropicProvider(instance: instance, model: entry.model, entry: entry))
     }
 
 
@@ -66,39 +66,47 @@ extension AIChatViewModel {
         }
         let customBase = instance.effectiveCustomBaseURL
         let appendV1 = instance.appendV1Suffix
-        // Custom UA only for custom-base OpenAI/Anthropic-compat (proxy/relay) instances;
-        // OAuth-login paths keep their required client UA (nil here). Mirrors LLMProviderFactory.
-        let ua = instance.supportsCustomUserAgent ? instance.effectiveCustomUserAgent : nil
         switch instance.providerType {
         case .anthropic:
+            let provider: AnthropicProvider
             switch instance.credentialType {
             case .apiKey:
                 guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                     throw LLMProviderError.noCredentials
                 }
-                return AnthropicProvider(apiKey: key, model: entry.model, basePath: customBase, appendV1Suffix: appendV1, customUserAgent: ua)
+                provider = AnthropicProvider(apiKey: key, model: entry.model, basePath: customBase, appendV1Suffix: appendV1)
             case .oauth:
                 if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
-                    return AnthropicProvider(manualToken: manualToken, model: entry.model, basePath: customBase, appendV1Suffix: appendV1, customUserAgent: ua)
+                    provider = AnthropicProvider(manualToken: manualToken, model: entry.model, basePath: customBase, appendV1Suffix: appendV1)
+                } else {
+                    let iid = instance.id
+                    provider = AnthropicProvider(
+                        oauthTokenProvider: { try await ClaudeOAuthManager.shared.validAccessToken(instanceId: iid) },
+                        model: entry.model,
+                        basePath: customBase,
+                        appendV1Suffix: appendV1
+                    )
                 }
-                let iid = instance.id
-                return AnthropicProvider(
-                    oauthTokenProvider: { try await ClaudeOAuthManager.shared.validAccessToken(instanceId: iid) },
-                    model: entry.model,
-                    basePath: customBase,
-                    appendV1Suffix: appendV1
-                )
             }
+            return LLMProviderFactory.applyRequestCustomization(
+                provider,
+                instance: instance,
+                entry: entry
+            )
         case .gemini:
             switch instance.credentialType {
             case .apiKey:
                 guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                     throw LLMProviderError.noCredentials
                 }
-                return GeminiProvider(apiKey: key, model: entry.model, customBasePath: customBase)
+                let provider = GeminiProvider(apiKey: key, model: entry.model, customBasePath: customBase)
+                provider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
+                return provider
             case .oauth:
                 if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
-                    return GeminiProvider(apiKey: manualToken, model: entry.model, customBasePath: customBase)
+                    let provider = GeminiProvider(apiKey: manualToken, model: entry.model, customBasePath: customBase)
+                    provider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
+                    return provider
                 }
                 let iid = instance.id
                 let provider = GeminiProvider(
@@ -107,6 +115,7 @@ extension AIChatViewModel {
                     customBasePath: customBase
                 )
                 provider.gcpProjectID = GeminiOAuthManager.shared.gcpProjectID(instanceId: iid)
+                provider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
                 return provider
             }
         case .openAI:
@@ -120,12 +129,12 @@ extension AIChatViewModel {
                 }
                 let provider = OpenAIProvider(apiKey: key, model: entry.model, customBaseURL: customBase, appendV1Suffix: appendV1)
                 if isMistral { provider.useOpenRouterCompat = true; provider.isMistral = true }
-                return LLMProviderFactory.applyCustomUserAgent(provider, instance: instance)
+                return LLMProviderFactory.applyRequestCustomization(provider, instance: instance, entry: entry)
             case .oauth:
                 if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
                     let provider = OpenAIProvider(apiKey: manualToken, model: entry.model, customBaseURL: customBase, appendV1Suffix: appendV1)
                     if isMistral { provider.useOpenRouterCompat = true; provider.isMistral = true }
-                    return LLMProviderFactory.applyCustomUserAgent(provider, instance: instance)
+                    return LLMProviderFactory.applyRequestCustomization(provider, instance: instance, entry: entry)
                 }
                 let iid = instance.id
                 let provider = OpenAIProvider(
@@ -133,6 +142,7 @@ extension AIChatViewModel {
                     model: entry.model
                 )
                 provider.codexAccountId = CodexOAuthManager.shared.accountId(instanceId: iid)
+                provider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
                 return provider
             }
         case .antigravity:
@@ -163,7 +173,7 @@ extension AIChatViewModel {
                 "X-Title": "Minis App",
             ]
             orProvider.useOpenRouterCompat = true
-            return LLMProviderFactory.applyCustomUserAgent(orProvider, instance: instance)
+            return LLMProviderFactory.applyRequestCustomization(orProvider, instance: instance, entry: entry)
         case .openAIResponses:
             // Mirror the apiKey + OAuth branch logic in
             // LLMProviderFactory.makeOpenAIResponsesProvider so an OpenAI2
@@ -178,12 +188,12 @@ extension AIChatViewModel {
                 }
                 let respProvider = OpenAIProvider(apiKey: key, model: entry.model, customBaseURL: customBase, appendV1Suffix: appendV1)
                 respProvider.forceResponsesAPI = true
-                return LLMProviderFactory.applyCustomUserAgent(respProvider, instance: instance)
+                return LLMProviderFactory.applyRequestCustomization(respProvider, instance: instance, entry: entry)
             case .oauth:
                 if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
                     let respProvider = OpenAIProvider(apiKey: manualToken, model: entry.model, customBaseURL: customBase, appendV1Suffix: appendV1)
                     respProvider.forceResponsesAPI = true
-                    return LLMProviderFactory.applyCustomUserAgent(respProvider, instance: instance)
+                    return LLMProviderFactory.applyRequestCustomization(respProvider, instance: instance, entry: entry)
                 }
                 let iid = instance.id
                 let respProvider = OpenAIProvider(
@@ -194,6 +204,7 @@ extension AIChatViewModel {
                 respProvider.appendV1Suffix = appendV1
                 respProvider.forceResponsesAPI = true
                 respProvider.codexAccountId = CodexOAuthManager.shared.accountId(instanceId: iid)
+                respProvider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
                 return respProvider
             }
         case .xAI:
@@ -204,10 +215,10 @@ extension AIChatViewModel {
                 guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                     throw LLMProviderError.noCredentials
                 }
-                return LLMProviderFactory.applyCustomUserAgent(OpenAIProvider(apiKey: key, model: entry.model, customBaseURL: xaiBase, appendV1Suffix: xaiAppendV1), instance: instance)
+                return LLMProviderFactory.applyRequestCustomization(OpenAIProvider(apiKey: key, model: entry.model, customBaseURL: xaiBase, appendV1Suffix: xaiAppendV1), instance: instance, entry: entry)
             case .oauth:
                 if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
-                    return LLMProviderFactory.applyCustomUserAgent(OpenAIProvider(apiKey: manualToken, model: entry.model, customBaseURL: xaiBase, appendV1Suffix: xaiAppendV1), instance: instance)
+                    return LLMProviderFactory.applyRequestCustomization(OpenAIProvider(apiKey: manualToken, model: entry.model, customBaseURL: xaiBase, appendV1Suffix: xaiAppendV1), instance: instance, entry: entry)
                 }
                 let iid = instance.id
                 let provider = OpenAIProvider(
@@ -216,6 +227,7 @@ extension AIChatViewModel {
                 )
                 provider.customBaseURL = xaiBase
                 provider.appendV1Suffix = xaiAppendV1
+                provider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
                 return provider
             }
         case .kimiCode:
@@ -226,7 +238,7 @@ extension AIChatViewModel {
                 guard let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) else {
                     throw LLMProviderError.noCredentials
                 }
-                return LLMProviderFactory.applyCustomUserAgent(OpenAIProvider(apiKey: key, model: entry.model, customBaseURL: kimiBase, appendV1Suffix: kimiAppendV1), instance: instance)
+                return LLMProviderFactory.applyRequestCustomization(OpenAIProvider(apiKey: key, model: entry.model, customBaseURL: kimiBase, appendV1Suffix: kimiAppendV1), instance: instance, entry: entry)
             case .oauth:
                 let iid = instance.id
                 let provider = OpenAIProvider(
@@ -235,6 +247,7 @@ extension AIChatViewModel {
                 )
                 provider.customBaseURL = kimiBase
                 provider.appendV1Suffix = kimiAppendV1
+                provider.requestCustomization = RequestCustomization(provider: instance, modelEntry: entry)
                 return provider
             }
         case .unsupported:

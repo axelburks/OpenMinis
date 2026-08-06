@@ -159,6 +159,8 @@ struct ConversationContext: Sendable, Equatable {
     var rareTermsDigest: String? = nil
     /// Budgeted per-message excerpts, oldest→newest, already role-labeled.
     var recentExcerpts: [String] = []
+    /// Existing chat session used only by request expressions.
+    var sessionId: String? = nil
 
     var isEmpty: Bool {
         (lastUserMessage?.isEmpty ?? true) && (lastAgentReply?.isEmpty ?? true)

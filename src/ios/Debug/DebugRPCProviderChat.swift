@@ -404,14 +404,18 @@ enum DebugRPCProvider {
         let validMembers = memberIds.filter { store.entry(for: $0) != nil }
         let strategy = parseRoutingStrategy(params["strategy"]) ?? .fallback
         let fallbackStrategy = parseFallbackStrategy(params["fallbackStrategy"]) ?? .limited
-        let thinking = parseThinkingLevel(params["defaultThinkingLevel"])
+        let thinkingDefinitionId =
+            parseThinkingDefinitionId(
+                params["defaultThinkingLevel"]
+            )
         let ctxLimit = params["contextLimitTokens"] as? Int
         let group = ModelGroup(
             name: name,
             memberEntryIds: validMembers,
             strategy: strategy,
             fallbackStrategy: fallbackStrategy,
-            defaultThinkingLevel: thinking,
+            defaultThinkingDefinitionId:
+                thinkingDefinitionId,
             contextLimitTokens: ctxLimit
         )
         store.addGroup(group)
@@ -435,7 +439,10 @@ enum DebugRPCProvider {
         if let s = parseRoutingStrategy(params["strategy"]) { group.strategy = s }
         if let fs = parseFallbackStrategy(params["fallbackStrategy"]) { group.fallbackStrategy = fs }
         if params.keys.contains("defaultThinkingLevel") {
-            group.defaultThinkingLevel = parseThinkingLevel(params["defaultThinkingLevel"])
+            group.defaultThinkingDefinitionId =
+                parseThinkingDefinitionId(
+                    params["defaultThinkingLevel"]
+                )
         }
         if params.keys.contains("contextLimitTokens") {
             group.contextLimitTokens = params["contextLimitTokens"] as? Int
@@ -510,7 +517,14 @@ enum DebugRPCProvider {
             "memberEntryIds": group.memberEntryIds,
             "isDefault": store.config.defaultPrimaryGroupId == group.id,
             "inAgentLoop": store.config.agentLoopGroupIds.contains(group.id),
-            "defaultThinkingLevel": group.defaultThinkingLevel?.rawValue ?? NSNull(),
+            "defaultThinkingLevel":
+                group.defaultThinkingDefinitionId
+                    .flatMap {
+                        ThinkingLevelRegistry
+                            .definition(
+                                forDefinitionId: $0
+                            )?.levelId
+                    } ?? NSNull(),
             "contextLimitTokens": group.contextLimitTokens ?? NSNull(),
         ]
         if includeMembers {
@@ -537,9 +551,13 @@ enum DebugRPCProvider {
         guard let s = raw as? String else { return nil }
         return FallbackStrategy(rawValue: s)
     }
-    private static func parseThinkingLevel(_ raw: Any?) -> ThinkingLevel? {
-        guard let s = raw as? String else { return nil }
-        return ThinkingLevel(rawValue: s)
+    private static func parseThinkingDefinitionId(
+        _ raw: Any?
+    ) -> String? {
+        guard let raw = raw as? String else { return nil }
+        return ThinkingLevelRegistry.definition(
+            forLevelId: raw
+        )?.definitionId
     }
 
     static func modelsRefresh(params: [String: Any]) async throws -> [String: Any] {
@@ -729,7 +747,14 @@ enum DebugRPCChat {
                 "strategy": group.strategy.rawValue,
                 "isDefault": group.id == store.config.defaultPrimaryGroupId,
                 "memberEntryIds": group.memberEntryIds,
-                "defaultThinkingLevel": group.defaultThinkingLevel?.rawValue ?? NSNull(),
+                "defaultThinkingLevel":
+                    group.defaultThinkingDefinitionId
+                        .flatMap {
+                            ThinkingLevelRegistry
+                                .definition(
+                                    forDefinitionId: $0
+                                )?.levelId
+                        } ?? NSNull(),
             ]
         }
         return [
@@ -778,7 +803,12 @@ enum DebugRPCChat {
             "updatedAt": iso8601(session.updatedAt),
         ]
         if let cfg = ProviderConfigStore.shared.inferenceConfig(for: id) {
-            dict["thinkingLevel"] = cfg.thinkingLevel.rawValue
+            dict["thinkingLevel"] =
+                ThinkingLevelRegistry.definition(
+                    forDefinitionId:
+                        cfg.thinkingDefinitionId
+                )?.levelId
+                ?? ThinkingLevel.off.rawValue
         }
         return dict
     }
@@ -915,11 +945,13 @@ enum DebugRPCChat {
 
         // Optional thinking-level override for this turn.
         if let levelRaw = params["thinkingLevel"] as? String,
-           let level = ThinkingLevel(rawValue: levelRaw),
-           let sid = vm.sessionId {
-            var cfg = store.inferenceConfig(for: sid) ?? SessionInferenceConfig()
-            cfg.thinkingLevel = level
-            store.setInferenceConfig(cfg, for: sid)
+           let definition =
+            ThinkingLevelRegistry.definition(
+                forLevelId: levelRaw
+            ) {
+            vm.setThinkingDefinitionId(
+                definition.definitionId
+            )
         }
 
         vm.inputText = prompt

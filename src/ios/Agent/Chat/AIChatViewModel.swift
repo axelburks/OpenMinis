@@ -926,54 +926,21 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         }
 
         // Fallback: if user already set pending thinking, honor it
-        return (pendingThinkingLevel ?? .off) != .off
+        return (
+            pendingThinkingDefinitionId
+                ?? ThinkingLevelRegistry.offDefinitionId
+        ) != ThinkingLevelRegistry.offDefinitionId
     }
 
     var availableThinkingLevels: [ThinkingLevel] {
-        let maxLevel: ThinkingLevel
-        if let entry = resolveCurrentEntry() {
-            maxLevel = entry.effectiveMaxThinkingLevel
-        } else {
-            maxLevel = .xhigh
-        }
-        return ThinkingLevel.allCases.filter { $0 != .off && $0 <= maxLevel }
+        guard let entry = resolveCurrentEntry() else { return [.off, .low, .medium, .high, .xhigh] }
+        return ThinkingLevel.availableLevels(model: entry.model)
     }
 
-    /// Whether a model entry should expose the thinking toggle.
-    ///
-    /// Base rule (tri-state, unchanged): `supportsReasoning ?? true` — `true`
-    /// and unknown (`nil`) both allow the toggle, only an explicit `false`
-    /// hides it.
-    ///
-    /// OpenAI-compatible providers additionally OVERRIDE an explicit `false`:
-    /// their backend usually accepts thinking params even when models.dev
-    /// tagged the model non-reasoning, so we let the user opt in. Two groups:
-    ///   - `.openAI` / `.openAIResponses` ONLY when they have a `customBaseURL`
-    ///     (Ollama / LM Studio / DashScope / self-hosted gateways). Official
-    ///     OpenAI (no custom base) keeps the strict `?? true` rule so a model
-    ///     genuinely marked `false` there still hides the toggle.
-    ///   - `.openRouter` / `.xAI` always — these are inherently third-party /
-    ///     aggregator OpenAI-compatible backends (no official-vs-custom split;
-    ///     their `customBaseURL` is nil because they use a fixed built-in base),
-    ///     and their thinking injection (`reasoning.effort` / OpenAIProvider
-    ///     path) is model-id driven, not gated on `supportsReasoning`.
-    /// All other provider types (anthropic, gemini, …) keep the strict rule,
-    /// so a model genuinely marked `false` there still hides the toggle.
-    static func entryAllowsReasoning(_ entry: ModelEntry, store: ProviderConfigStore) -> Bool {
-        if entry.model.supportsReasoning != false {
-            return true  // true or nil → allowed
-        }
-        // Explicit false: allow for OpenAI-compatible providers.
-        guard let instance = store.instance(for: entry.providerInstanceId) else { return false }
-        switch instance.providerType {
-        case .openAI, .openAIResponses:
-            // Custom/local base only — never official OpenAI.
-            return instance.customBaseURL?.isEmpty == false
-        case .openRouter, .xAI, .kimiCode:
-            return true
-        case .anthropic, .gemini, .antigravity, .unsupported:
-            return false
-        }
+    /// Unknown capability remains permissive. An explicit value, including a
+    /// user override from model details, is authoritative for every provider.
+    static func entryAllowsReasoning(_ entry: ModelEntry, store _: ProviderConfigStore) -> Bool {
+        entry.model.supportsReasoning != false
     }
 
     private func checkBindingSupportsReasoning(_ binding: SessionModelBinding, store: ProviderConfigStore) -> Bool {
@@ -5742,72 +5709,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
     /// In-memory thinking level for sessions not yet persisted (no sessionId yet).
     /// nil = user hasn't explicitly set one; fall back to the default group's level.
-    private var pendingThinkingLevel: ThinkingLevel?
-
-    /// Set thinking level — persists if session exists, otherwise holds in memory.
-    func setThinkingLevel(_ level: ThinkingLevel) {
-        let maxLevel = resolveCurrentEntry()?.effectiveMaxThinkingLevel ?? .xhigh
-        let clamped = level == .off ? level : min(level, maxLevel)
-        if let sid = sessionId {
-            var cfg = ProviderConfigStore.shared.inferenceConfig(for: sid) ?? SessionInferenceConfig()
-            cfg.thinkingLevel = clamped
-            ProviderConfigStore.shared.setInferenceConfig(cfg, for: sid)
-        } else {
-            pendingThinkingLevel = clamped
-        }
-        if !transitionSuspended { objectWillChange.send() }
-    }
-
-    /// Default thinking level inherited from the active default primary group, or .off.
-    private var defaultGroupThinkingLevel: ThinkingLevel {
-        let store = ProviderConfigStore.shared
-        guard let groupId = store.defaultPrimaryGroupId,
-              let group = store.group(for: groupId) else { return .off }
-        return group.defaultThinkingLevel ?? .off
-    }
-
-    /// Current thinking level for this session.
-    ///
-    /// [T-ios-stale-thinking-level-display] The stored value can exceed the
-    /// active model's current ceiling — e.g. a session/group config persisted
-    /// `.ultra` (or `.max`) while a model's `effectiveMaxThinkingLevel` was higher,
-    /// then the catalog cap was tightened (sol/terra .ultra→.max, etc.). The write
-    /// path (`setThinkingLevel`) clamps, but a value persisted under a looser cap
-    /// is never rewritten, so a raw read would surface a level the model no longer
-    /// supports — the "is thinking…" pill would show "Ultra/极限" when the user's
-    /// effective (and wire-sent) level is really "Max". Clamp on read so the
-    /// displayed level always matches what will actually be requested (the request
-    /// path re-clamps per-model too — AgentProvider: min(level, catalogMax)).
-    var currentThinkingLevel: ThinkingLevel {
-        let stored: ThinkingLevel = {
-            if let sid = sessionId, let cfg = ProviderConfigStore.shared.inferenceConfig(for: sid) {
-                return cfg.thinkingLevel
-            }
-            return pendingThinkingLevel ?? defaultGroupThinkingLevel
-        }()
-        guard stored.isEnabled else { return stored }
-        let maxLevel = resolveCurrentEntry()?.effectiveMaxThinkingLevel ?? .xhigh
-        return min(stored, maxLevel)
-    }
-
-    /// Flush pending thinking level to the store once sessionId is available.
-    /// Returns `true` if a user-chosen level was written, so the caller can
-    /// keep the group-default seeding (createInitialBinding) from clobbering it.
-    ///
-    /// [T-first-msg-thinking-level-clobber] Note the `pending != .off` guard:
-    /// `.off` is indistinguishable from "unset" in SessionInferenceConfig, so a
-    /// user who explicitly picks Off before the first send still inherits the
-    /// group default. That pre-existing limitation is unchanged here — this fix
-    /// only stops a real (enabled) override from being overwritten.
-    @discardableResult
-    func flushPendingThinkingLevel() -> Bool {
-        guard let pending = pendingThinkingLevel, pending != .off, let sid = sessionId else { return false }
-        var cfg = ProviderConfigStore.shared.inferenceConfig(for: sid) ?? SessionInferenceConfig()
-        cfg.thinkingLevel = pending
-        ProviderConfigStore.shared.setInferenceConfig(cfg, for: sid)
-        pendingThinkingLevel = nil
-        return true
-    }
+    var pendingThinkingDefinitionId: String?
 
     /// Append an ephemeral system info message (not sent to LLM).
     func appendSystemInfo(_ text: String, icon: String) {
@@ -5827,4 +5729,3 @@ enum LLMProviderError: LocalizedError {
         }
     }
 }
-

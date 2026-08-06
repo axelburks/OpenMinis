@@ -56,6 +56,7 @@ struct SessionModelPicker: View {
             onSelectGroup: { group in handleGroupTap(group) },
             onSelectInGroup: { entry, group in handleEntryTap(entry, inGroup: group) }
         ))
+        .accessibilityIdentifier("sessionModelPicker")
         .alert(
             String(localized: "This model may not work as an Agent"),
             isPresented: Binding(
@@ -134,9 +135,11 @@ struct SessionModelPicker: View {
                 subModelSource: existing?.subModelSource
             )
             store.setBinding(binding, for: sid)
-            if let thinkLevel = group.defaultThinkingLevel {
+            if let definitionId =
+                    group.defaultThinkingDefinitionId {
                 var cfg = store.inferenceConfig(for: sid) ?? SessionInferenceConfig()
-                cfg.thinkingLevel = thinkLevel
+                cfg.thinkingDefinitionId =
+                    definitionId
                 store.setInferenceConfig(cfg, for: sid)
             }
             NotificationCenter.default.post(
@@ -145,6 +148,10 @@ struct SessionModelPicker: View {
                 userInfo: ["groupId": group.id, "sessionId": sid]
             )
             if let entry = store.entry(for: resolvedEntryId) {
+                activateRuntime(
+                    for: entry,
+                    sessionId: sid
+                )
                 await ChatStore.shared.updateSessionModelId(sid, modelId: entry.model.id)
             }
             dismiss()
@@ -167,11 +174,18 @@ struct SessionModelPicker: View {
                 subModelSource: existing?.subModelSource
             )
             store.setBinding(binding, for: sid)
-            if let group, let thinkLevel = group.defaultThinkingLevel {
+            if let group,
+               let definitionId =
+                group.defaultThinkingDefinitionId {
                 var cfg = store.inferenceConfig(for: sid) ?? SessionInferenceConfig()
-                cfg.thinkingLevel = thinkLevel
+                cfg.thinkingDefinitionId =
+                    definitionId
                 store.setInferenceConfig(cfg, for: sid)
             }
+            activateRuntime(
+                for: entry,
+                sessionId: sid
+            )
             var info: [String: Any] = ["sessionId": sid]
             if let group { info["groupId"] = group.id }
             NotificationCenter.default.post(
@@ -182,6 +196,31 @@ struct SessionModelPicker: View {
             await ChatStore.shared.updateSessionModelId(sid, modelId: entry.model.id)
             dismiss()
         }
+    }
+
+    private func activateRuntime(
+        for entry: ModelEntry,
+        sessionId: String
+    ) {
+        RequestBodyControlRuntimeStore.activateModel(
+            forSessionKey: sessionId,
+            modelKey: entry.id
+        )
+        var config =
+            store.inferenceConfig(for: sessionId)
+            ?? SessionInferenceConfig()
+        let resolvedDefinitionId =
+            AIChatViewModel.resolvedThinkingDefinitionId(
+                config.thinkingDefinitionId,
+                forModelEntry: entry
+            )
+        guard config.thinkingDefinitionId
+                != resolvedDefinitionId else {
+            return
+        }
+        config.thinkingDefinitionId =
+            resolvedDefinitionId
+        store.setInferenceConfig(config, for: sessionId)
     }
 }
 

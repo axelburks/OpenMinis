@@ -57,19 +57,27 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
         // rewrite, reasoning traces would only add latency (and on some providers cause
         // an empty text body with finish_reason=tool_calls; see the TitleGen comment).
         let messages = [AgentMessage(role: .user, parts: [.text(prompt)])]
-        let stream = try await provider.streamAgentMessage(
-            messages: messages,
-            systemPrompt: Self.systemPrompt,
-            tools: [],
-            // Output is at most the transcript re-emitted, so budget off its
-            // length: floor 512 (a 256 floor once got fully eaten by adaptive
-            // thinking_tokens before the explicit-disable fix landed — keep
-            // headroom), target 1.2× the input chars, ceiling = the model
-            // entry's own max-output limit (group override included).
-            maxTokens: Self.correctionMaxTokens(transcriptChars: transcript.count,
-                                                modelCap: resolved.entry.model.maxOutputTokens),
-            thinkingLevel: .off
-        )
+        let stream = try await RequestCustomizationRuntime
+            .$sessionId.withValue(context.sessionId) {
+                try await RequestCustomizationRuntime
+                    .$usesConversationRequestControlState
+                    .withValue(false) {
+                        try await provider.streamAgentMessage(
+                            messages: messages,
+                            systemPrompt: Self.systemPrompt,
+                            tools: [],
+                            // Output is at most the transcript re-emitted,
+                            // so budget off its length.
+                            maxTokens: Self.correctionMaxTokens(
+                                transcriptChars: transcript.count,
+                                modelCap:
+                                    resolved.entry.model
+                                        .maxOutputTokens
+                            ),
+                            thinkingLevel: .off
+                        )
+                    }
+            }
 
         var responseText = ""
         for try await event in stream {

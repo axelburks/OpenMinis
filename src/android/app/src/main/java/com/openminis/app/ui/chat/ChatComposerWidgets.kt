@@ -969,10 +969,8 @@ internal fun FloatingToolStatusBar(
 @Composable
 internal fun ThinkingLevelPicker(
     current: ThinkingLevel,
-    // [T-android-thinking-level-arch] Levels the CURRENT model actually supports
-    // (OFF + everything up to its effectiveMaxThinkingLevel). Passed in so the
-    // picker only ever offers reachable tiers; the row scrolls horizontally so
-    // the extra GPT-5.6 tiers (MAX/ULTRA) don't overflow a narrow composer.
+    // Levels resolved from the current model's built-in catalog or exact
+    // custom thinking-control options.
     availableLevels: List<ThinkingLevel>,
     onSelect: (ThinkingLevel) -> Unit,
 ) {
@@ -1020,10 +1018,7 @@ internal fun ThinkingLevelPicker(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .background(bg)
-                    // [T-android-thinking-level-arch] Tapping the already-
-                    // highlighted capsule toggles thinking OFF (covers both exact
-                    // and clamped highlight); otherwise selects the tapped level.
-                    .clickable { onSelect(if (isHighlighted) ThinkingLevel.OFF else level) }
+                    .clickable { onSelect(level) }
                     .padding(horizontal = 6.dp, vertical = 4.dp),
             ) {
                 Text(

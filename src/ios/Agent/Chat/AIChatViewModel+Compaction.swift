@@ -1006,12 +1006,24 @@ extension AIChatViewModel {
         framed as "what was discussed / what was done", NOT as an ongoing goal or todo list.
         """
 
-        let stream = try await provider.streamMessage(
-            messages: [LLMMessage(role: .user, content: compactUserMessage)],
-            systemPrompt: systemPrompt,
-            maxTokens: maxOutputTokens,
-            temperature: nil   // let provider/model use its default
-        )
+        let stream = try await RequestCustomizationRuntime
+            .$sessionId.withValue(sessionId) {
+                try await RequestCustomizationRuntime
+                    .$usesConversationRequestControlState
+                    .withValue(false) {
+                        try await provider.streamMessage(
+                            messages: [
+                                LLMMessage(
+                                    role: .user,
+                                    content: compactUserMessage
+                                )
+                            ],
+                            systemPrompt: systemPrompt,
+                            maxTokens: maxOutputTokens,
+                            temperature: nil
+                        )
+                    }
+            }
 
         var responseText = ""
         var didTag = false

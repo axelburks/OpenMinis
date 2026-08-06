@@ -83,16 +83,9 @@ actor ProviderConfigDB {
         }
         sqlite3_finalize(stmt)
 
-        // [T-provider-custom-user-agent-persist] Idempotent column backstops MUST
-        // run on EVERY open, BEFORE the version-gated early return below. The
-        // `custom_user_agent` column was added WITHOUT a schemaVersion bump, so a
-        // DB already at the current user_version (the common case for existing
-        // installs) would hit the early return and never gain the column — then
-        // the SELECT/INSERT that reference it fail to prepare, loadAllInstanceRows
-        // returns [], and EVERY provider silently disappears. Running the ensure
-        // here repairs any DB regardless of user_version. (The group-tombstone
-        // backstop also belongs here for the same reason; kept idempotent.)
-        Self.ensureInstanceCustomUAColumn(db: db)
+        // Late-column backstops run before the version gate because these
+        // columns were added without changing this pre-existing DB's version.
+        Self.ensureInstanceLateColumns(db: db)
         Self.ensureGroupTombstoneColumns(db: db)
 
         if current >= schemaVersion {
@@ -122,7 +115,7 @@ actor ProviderConfigDB {
                     append_v1_suffix         INTEGER NOT NULL DEFAULT 1,
                     image_endpoint_mode      TEXT,
                     image_endpoint_resolved  TEXT,
-                    custom_user_agent        TEXT,
+                    request_customization_json TEXT,
                     azure_mode               INTEGER NOT NULL DEFAULT 0,
                     is_enabled               INTEGER NOT NULL DEFAULT 1,
                     sort_order               INTEGER NOT NULL DEFAULT 0,
@@ -164,7 +157,9 @@ actor ProviderConfigDB {
                     member_entry_ids_json    TEXT NOT NULL,
                     sort_order               INTEGER NOT NULL DEFAULT 0,
                     updated_at               REAL NOT NULL,
-                    extras_json              TEXT
+                    extras_json              TEXT,
+                    removed_members_json     TEXT NOT NULL DEFAULT '{}',
+                    added_members_json       TEXT NOT NULL DEFAULT '{}'
                 )
             """)
 
@@ -233,15 +228,9 @@ actor ProviderConfigDB {
         // repeated here. See the note there.
     }
 
-    /// Add `custom_user_agent` to provider_instances if absent. Idempotent —
-    /// safe to call on every DB open. The column was introduced after the
-    /// original v1 schema, so any DB created by an earlier build lacks it; a
-    /// SELECT/INSERT that references the missing column would otherwise fail to
-    /// prepare and silently drop the per-provider custom UA (it round-trips
-    /// only through in-memory + JSON mirror, so it looked set until a cold
-    /// start reloaded from this DB and read it back as nil → "UA reverts to
-    /// default after a while"). [T-provider-custom-user-agent-persist]
-    private static func ensureInstanceCustomUAColumn(db: OpaquePointer) {
+    /// Add late provider-instance columns if absent. Idempotent —
+    /// safe to call on every DB open.
+    private static func ensureInstanceLateColumns(db: OpaquePointer) {
         var existing = Set<String>()
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, "PRAGMA table_info(provider_instances)", -1, &stmt, nil) == SQLITE_OK {
@@ -254,9 +243,9 @@ actor ProviderConfigDB {
         // CREATE TABLE runs — which already includes the column). Skip the ALTER
         // so we don't log a spurious "no such table" error; nothing to repair.
         guard !existing.isEmpty else { return }
-        if !existing.contains("custom_user_agent") {
-            exec(db: db, "ALTER TABLE provider_instances ADD COLUMN custom_user_agent TEXT")
-            logger.info("[v3] schema repair: added missing column custom_user_agent")
+        if !existing.contains("request_customization_json") {
+            exec(db: db, "ALTER TABLE provider_instances ADD COLUMN request_customization_json TEXT")
+            logger.info("[v3] schema repair: added missing column request_customization_json")
         }
         // [T-ios-azure-openai] Same idempotent backstop for the azure_mode column
         // (added after v1 schema, no schemaVersion bump). Without it, a DB at the
@@ -280,6 +269,9 @@ actor ProviderConfigDB {
             }
         }
         sqlite3_finalize(stmt)
+        // A brand-new database reaches this repair before the v1 CREATE TABLE.
+        // The CREATE statement already includes both columns.
+        guard !existing.isEmpty else { return }
         if !existing.contains("removed_members_json") {
             exec(db: db, "ALTER TABLE provider_model_groups ADD COLUMN removed_members_json TEXT NOT NULL DEFAULT '{}'")
             logger.info("[v3] schema repair: added missing column removed_members_json")
@@ -357,7 +349,7 @@ actor ProviderConfigDB {
                    append_v1_suffix, image_endpoint_mode, image_endpoint_resolved,
                    is_enabled, sort_order, secret_blob, secret_kind,
                    secret_updated_at, created_at, updated_at, extras_json,
-                   custom_user_agent, azure_mode
+                   request_customization_json, azure_mode
             FROM provider_instances
             ORDER BY sort_order ASC, created_at ASC
         """
@@ -381,7 +373,7 @@ actor ProviderConfigDB {
                 "created_at": sqlite3_column_double(stmt, 13),
                 "updated_at": sqlite3_column_double(stmt, 14),
                 "extras_json": Self.optText(stmt, 15) as Any,
-                "custom_user_agent": Self.optText(stmt, 16) as Any,
+                "request_customization_json": Self.optText(stmt, 16) as Any,
                 "azure_mode": sqlite3_column_int(stmt, 17) != 0,
             ])
         }
@@ -562,7 +554,7 @@ actor ProviderConfigDB {
                 createdAt: inst.createdAt.timeIntervalSince1970,
                 updatedAt: now,
                 extrasJson: nil,
-                customUserAgent: inst.customUserAgent,
+                requestCustomizationJson: Self.encodeProviderRequestCustomization(headers: inst.customRequestHeaders, body: inst.customRequestBody),
                 azureMode: inst.azureMode
             )
         }
@@ -608,7 +600,8 @@ actor ProviderConfigDB {
                 name: group.name,
                 strategy: group.strategy.rawValue,
                 fallbackStrategy: group.fallbackStrategy.rawValue,
-                defaultThinkingLevel: group.defaultThinkingLevel?.rawValue,
+                defaultThinkingLevel:
+                    group.defaultThinkingDefinitionId,
                 contextLimitTokens: group.contextLimitTokens,
                 contextLimitRemembered: group.lastContextLimitTokens,
                 memberEntryIdsJson: memberJSON,
@@ -710,6 +703,7 @@ actor ProviderConfigDB {
                 }
                 return nil
             }()
+            let requestCustomization = Self.decodeProviderRequestCustomization(row["request_customization_json"] as? String)
             let inst = ProviderInstance(
                 id: id,
                 label: label,
@@ -721,7 +715,8 @@ actor ProviderConfigDB {
                 appendV1Suffix: (row["append_v1_suffix"] as? Bool) ?? true,
                 imageEndpointMode: imageMode,
                 imageEndpointResolved: imageResolved,
-                customUserAgent: row["custom_user_agent"] as? String,
+                customRequestHeaders: requestCustomization?.headers ?? [],
+                customRequestBody: requestCustomization?.body ?? [],
                 azureMode: (row["azure_mode"] as? Bool) ?? false,
                 unknownProviderTypeRaw: unknownTypeRaw
             )
@@ -778,19 +773,14 @@ actor ProviderConfigDB {
                   let memberJSON = row["member_entry_ids_json"] as? String,
                   let memberData = memberJSON.data(using: .utf8),
                   let memberIds = try? decoder.decode([String].self, from: memberData) else { continue }
-            let thinkingLevel: ThinkingLevel? = {
-                if let s = row["default_thinking_level"] as? String {
-                    return ThinkingLevel.decoded(s)
-                }
-                return nil
-            }()
             let group = ModelGroup(
                 id: id,
                 name: name,
                 memberEntryIds: memberIds,
                 strategy: strategy,
                 fallbackStrategy: fb,
-                defaultThinkingLevel: thinkingLevel,
+                defaultThinkingDefinitionId:
+                    row["default_thinking_level"] as? String,
                 contextLimitTokens: row["context_limit_tokens"] as? Int,
                 lastContextLimitTokens: row["context_limit_remembered"] as? Int,
                 addedMembers: Self.decodeMemberTimestamps(row["added_members_json"] as? String),
@@ -864,7 +854,7 @@ actor ProviderConfigDB {
         isEnabled: Bool, sortOrder: Int,
         secretBlob: String?, secretKind: String?, secretUpdatedAt: Double?,
         createdAt: Double, updatedAt: Double, extrasJson: String?,
-        customUserAgent: String?,
+        requestCustomizationJson: String?,
         azureMode: Bool = false
     ) -> Bool {
         guard let db else { return false }
@@ -890,7 +880,7 @@ actor ProviderConfigDB {
             isEnabled: isEnabled, sortOrder: sortOrder,
             secretBlob: secretBlob, secretKind: secretKind, secretUpdatedAt: secretUpdatedAt,
             createdAt: createdAt, updatedAt: updatedAt, extrasJson: extrasJson,
-            customUserAgent: customUserAgent,
+            requestCustomizationJson: requestCustomizationJson,
             azureMode: azureMode
         )
         return true
@@ -1165,7 +1155,7 @@ actor ProviderConfigDB {
         isEnabled: Bool, sortOrder: Int,
         secretBlob: String?, secretKind: String?, secretUpdatedAt: Double?,
         createdAt: Double, updatedAt: Double, extrasJson: String?,
-        customUserAgent: String?,
+        requestCustomizationJson: String?,
         azureMode: Bool = false
     ) {
         guard let db else { return }
@@ -1174,7 +1164,7 @@ actor ProviderConfigDB {
             (id, label, provider_type, credential_type, custom_base_url,
              append_v1_suffix, image_endpoint_mode, image_endpoint_resolved,
              is_enabled, sort_order, secret_blob, secret_kind, secret_updated_at,
-             created_at, updated_at, extras_json, custom_user_agent, azure_mode)
+             created_at, updated_at, extras_json, request_customization_json, azure_mode)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         var stmt: OpaquePointer?
@@ -1196,7 +1186,7 @@ actor ProviderConfigDB {
         sqlite3_bind_double(stmt, 14, createdAt)
         sqlite3_bind_double(stmt, 15, updatedAt)
         Self.bindOpt(stmt, 16, extrasJson)
-        Self.bindOpt(stmt, 17, customUserAgent)
+        Self.bindOpt(stmt, 17, requestCustomizationJson)
         sqlite3_bind_int(stmt, 18, azureMode ? 1 : 0)
         sqlite3_step(stmt)
     }
@@ -1395,6 +1385,25 @@ actor ProviderConfigDB {
     private static func jsonString<T: Encodable>(_ value: T) throws -> String {
         let data = try JSONEncoder().encode(value)
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private struct ProviderRequestCustomizationJSON: Codable {
+        var headers: [String]
+        var body: [String]
+    }
+
+    private static func encodeProviderRequestCustomization(headers: [String], body: [String]) -> String? {
+        guard !headers.isEmpty || !body.isEmpty else { return nil }
+        let value = ProviderRequestCustomizationJSON(headers: headers, body: body)
+        return try? jsonString(value)
+    }
+
+    private static func decodeProviderRequestCustomization(_ json: String?) -> ProviderRequestCustomizationJSON? {
+        guard let json,
+              let data = json.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(ProviderRequestCustomizationJSON.self, from: data)
     }
 
     /// Convenience: counts across the four sync-domain tables. Helpful for

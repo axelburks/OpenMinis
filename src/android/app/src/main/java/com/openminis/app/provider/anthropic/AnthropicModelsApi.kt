@@ -3,7 +3,7 @@ package com.openminis.app.provider.anthropic
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.provider.ModelsDevApi
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.applyDefaultUserAgent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -32,9 +32,7 @@ object AnthropicModelsApi {
         isOAuth: Boolean = false,
         context: Context? = null,
         forceRefresh: Boolean = false,
-        // [T-provider-custom-user-agent] Per-provider UA override; null/blank
-        // keeps the default UA. Threaded from ProviderRepository.refreshModels.
-        customUserAgent: String? = null,
+        customHeaders: Map<String, String> = emptyMap(),
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         // Cache key: base URL included so the same API key across proxies doesn't
         // share cached model lists (vLLM vs api.anthropic.com can differ).
@@ -76,8 +74,7 @@ object AnthropicModelsApi {
             val requestBuilder = Request.Builder()
                 .url(url)
                 .header("anthropic-version", "2023-06-01")
-                // [T-provider-custom-user-agent] models-list UA override.
-                .applyUserAgentOverride(customUserAgent)
+                .applyDefaultUserAgent()
 
             if (isOAuth) {
                 // OAuth: Bearer token + required beta header (mirrors iOS fetchModels(oauthToken:))
@@ -89,6 +86,9 @@ object AnthropicModelsApi {
             } else {
                 // Standard Anthropic API key
                 requestBuilder.header("x-api-key", apiKey)
+            }
+            for ((key, value) in customHeaders) {
+                requestBuilder.header(key, value)
             }
 
             val request = requestBuilder.build()

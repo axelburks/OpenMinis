@@ -116,12 +116,11 @@ actor VoiceCorrectionDB {
     ///   2. versioned structural migrations — only when `current < schemaVersion`.
     ///   3. stamp `user_version`.
     ///
-    /// Step 1 must precede the version gate. ProviderConfigDB learned this the hard
-    /// way: `custom_user_agent` was added without bumping schemaVersion, so every
-    /// already-current DB hit the early return, never gained the column, and the
-    /// statements referencing it failed to prepare — silently wiping every provider
-    /// from the UI. Running additive column repairs unconditionally makes a DB
-    /// self-repairing regardless of what its `user_version` claims.
+    /// Step 1 must precede the version gate. A prior provider-schema change added
+    /// a column without bumping schemaVersion, so already-current databases never
+    /// gained it and subsequent statements failed to prepare. Running additive
+    /// column repairs unconditionally makes a DB self-repairing regardless of what
+    /// its `user_version` claims.
     private static func runMigrations(db: OpaquePointer) throws {
         let started = Date()
 
@@ -156,7 +155,7 @@ actor VoiceCorrectionDB {
             // NOTE: `archived_at` (design §13.3) is part of the v1 CREATE TABLE *and*
             // of ensureIdempotentColumns. Both, deliberately: the CREATE covers fresh
             // installs, the ensure covers any DB created by a pre-archived_at build.
-            // This is exactly the belt-and-braces the custom_user_agent incident calls for.
+            // This mirrors the defensive repair used after that provider-schema incident.
             exec(db: db, """
                 CREATE TABLE IF NOT EXISTS confusion_dictionary (
                     id                      TEXT PRIMARY KEY,

@@ -97,6 +97,15 @@ enum ChatStoreSyncHydrators {
             merger: { record in await mergeProviderModelGroupV3(record: record) },
             deletionApplier: { id in await deleteProviderModelGroupV3(id: id) }
         )
+        h.register(
+            recordType: "ThinkingLevelDefinitionsV3",
+            builder: { id in
+                await buildThinkingLevelDefinitionsV3(id: id)
+            },
+            merger: { record in
+                await mergeThinkingLevelDefinitionsV3(record: record)
+            }
+        )
         // Legacy whole-file env-vars record. New devices NEVER emit it
         // (builder returns nil — caller treats nil as "this builder
         // chose not to push" and drops the dirty row). The merger is
@@ -1174,7 +1183,7 @@ enum ChatStoreSyncHydrators {
             createdAt: Date(timeIntervalSince1970: (row["created_at"] as? Double) ?? 0),
             updatedAt: Date(timeIntervalSince1970: (row["updated_at"] as? Double) ?? 0),
             extrasJson: row["extras_json"] as? String,
-            customUserAgent: row["custom_user_agent"] as? String,
+            requestCustomizationJson: row["request_customization_json"] as? String,
             azureMode: ((row["azure_mode"] as? Bool) ?? false) ? 1 : 0
         )
         return SyncableTypeRegistry.shared
@@ -1208,7 +1217,7 @@ enum ChatStoreSyncHydrators {
         let createdAt = (dateField(record, "createdAt") ?? Date()).timeIntervalSince1970
         let updatedAt = (dateField(record, "updatedAt") ?? Date()).timeIntervalSince1970
         let extrasJson = optionalStringField(record, "extrasJson")
-        let customUserAgent = optionalStringField(record, "customUserAgent")
+        let requestCustomizationJson = optionalStringField(record, "requestCustomizationJson")
         // [T-ios-azure-openai] Absent on records from older builds → 0 (off), so
         // a peer that predates Azure simply sees a normal OpenAI/Responses instance.
         let azureMode = (intField(record, "azureMode") ?? 0) != 0
@@ -1231,7 +1240,7 @@ enum ChatStoreSyncHydrators {
             isEnabled: isEnabled, sortOrder: sortOrder,
             secretBlob: secretBlob, secretKind: secretKind, secretUpdatedAt: secretUpdatedAt,
             createdAt: createdAt, updatedAt: updatedAt, extrasJson: extrasJson,
-            customUserAgent: customUserAgent,
+            requestCustomizationJson: requestCustomizationJson,
             azureMode: azureMode
         )
         if applied {
@@ -1509,6 +1518,53 @@ enum ChatStoreSyncHydrators {
         await db.deleteGroupRow(id: id)
         logger.info("[v3] deleted ProviderModelGroupV3 \(id.prefix(8))")
         await refreshStoreFromDB()
+    }
+
+    private static func buildThinkingLevelDefinitionsV3(
+        id: String
+    ) async -> PortableRecord? {
+        guard id == "thinking-level-definitions",
+              let data = try? JSONEncoder().encode(
+                  ThinkingLevelRegistry.definitions
+              ),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let synced = SyncedThinkingLevelDefinitionsV3(
+            definitionsJson: json,
+            updatedAt: ThinkingLevelRegistry.updatedAt
+        )
+        return SyncableTypeRegistry.shared
+            .metadata(for: "ThinkingLevelDefinitionsV3")?
+            .buildPortable(synced)
+    }
+
+    @MainActor
+    private static func mergeThinkingLevelDefinitionsV3(
+        record: PortableRecord
+    ) async {
+        guard let json = stringField(record, "definitionsJson"),
+              let data = json.data(using: .utf8),
+              let definitions = try? JSONDecoder().decode(
+                  [ThinkingLevelDefinition].self,
+                  from: data
+              ) else {
+            logger.warning(
+                "[v3] invalid ThinkingLevelDefinitionsV3 payload"
+            )
+            return
+        }
+        let remoteUpdatedAt =
+            dateField(record, "updatedAt") ?? record.updatedAt
+        guard remoteUpdatedAt > ThinkingLevelRegistry.updatedAt else {
+            return
+        }
+        ThinkingLevelRegistry.saveDefinitions(
+            definitions,
+            updatedAt: remoteUpdatedAt,
+            markSyncDirty: false
+        )
+        ProviderConfigStore.shared.objectWillChange.send()
     }
 
     /// After any V3 inbound mutation, re-hydrate the

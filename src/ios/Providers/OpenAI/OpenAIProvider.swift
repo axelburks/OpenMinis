@@ -68,6 +68,7 @@ final class OpenAIProvider: LLMProvider {
     var appendV1Suffix: Bool
     /// Extra HTTP headers to include in every request (e.g. OpenRouter attribution).
     var extraHeaders: [String: String] = [:]
+    var requestCustomization: RequestCustomization?
 
     /// [T-model-use-image-passthrough GH#62] Arbitrary extra fields merged into the
     /// /images/generations JSON body, so `minis-model-use` can pass provider-specific
@@ -126,30 +127,6 @@ final class OpenAIProvider: LLMProvider {
     var isDashScope: Bool {
         guard let base = customBaseURL?.lowercased() else { return false }
         return base.contains("dashscope")
-    }
-
-    /// [T-unified-reasoning-effort] Whether this endpoint applies OpenAI's
-    /// `reasoning_effort` (Chat) / `reasoning.effort` (Responses) uniformly to
-    /// EVERY model it hosts — including third-party families (GLM / Kimi /
-    /// DeepSeek / MiniMax) that, when hit at their vendor-native endpoint, would
-    /// instead use a `thinking:{}` object or self-reason with no toggle.
-    ///
-    /// Two known such gateways:
-    ///   • Volcengine Ark (`ark.` / `volces` in the base URL) — the platform
-    ///     re-exposes doubao/deepseek/glm/kimi through a single OpenAI-compatible
-    ///     surface where thinking is controlled ONLY by `reasoning_effort`
-    ///     (min tier `minimal`); the vendor-native `thinking:{}` shape is not
-    ///     honored, so a GLM/DeepSeek id must NOT take its native branch here.
-    ///   • Azure OpenAI (`isAzure`) — reasoning is `reasoning_effort` for every
-    ///     model surfaced through the deployment.
-    ///
-    /// Gated tightly so official direct endpoints (DeepSeek/GLM/Kimi native,
-    /// which DO want their own thinking shape) are never mis-routed: it requires
-    /// an explicit Ark base-URL match or the Azure flag, and nothing else.
-    var usesUnifiedReasoningEffort: Bool {
-        if isAzure { return true }
-        guard let base = customBaseURL?.lowercased() else { return false }
-        return base.contains("volces") || base.contains("ark.")
     }
 
     var isOAuth: Bool {
@@ -473,6 +450,7 @@ final class OpenAIProvider: LLMProvider {
     ) async throws -> (AsyncThrowingStream<String, Error>, Int) {
         let url: URL
         var request: URLRequest
+        var requestBody = body
 
         let isCodexOAuth = isResponsesAPI && !forceResponsesAPI && isOAuth && customBaseURL == nil
 
@@ -525,7 +503,13 @@ final class OpenAIProvider: LLMProvider {
         // JSON, letting DeepSeek's prefix-based disk cache match from the 0th token.
         // Without this, Swift's dictionary iteration order randomizes top-level /
         // nested key order across calls and the cache misses on every request.
-        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        let token = try await getToken()
+        applyRequestCustomization(
+            to: &requestBody,
+            request: &request,
+            apiKey: token
+        )
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody, options: [.sortedKeys])
 
         #if DEBUG
         // Capture the actual on-wire body bytes for debug.llmRequests, so parity
@@ -542,7 +526,7 @@ final class OpenAIProvider: LLMProvider {
             method: "POST",
             headers: maskedHeaders
         )
-        logOutgoingRequest(url: url, headers: request.allHTTPHeaderFields, body: body)
+        logOutgoingRequest(url: url, headers: request.allHTTPHeaderFields, body: requestBody)
         #endif
 
         let (byteStream, response) = try await streamingSession.bytes(for: request)
@@ -664,6 +648,7 @@ final class OpenAIProvider: LLMProvider {
             body["model"] = model.id
         }
 
+        applyRequestCustomization(to: &body, request: &request, apiKey: token)
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
         #if DEBUG
@@ -745,7 +730,7 @@ final class OpenAIProvider: LLMProvider {
         // output defaults and truncate. This builder covers the offload /
         // non-agent callers (title generation, model-use bridge, …), which
         // received maxTokens but never wrote it into the body. Codex OAuth is
-        // excluded — its body shape is part of the codex_cli fingerprint.
+        // excluded because its private backend owns the output limit.
         if maxTokens > 0, !isCodexOAuth {
             body["max_output_tokens"] = maxTokens
         }
@@ -772,13 +757,13 @@ final class OpenAIProvider: LLMProvider {
             body["tool_choice"] = "auto"
         }
         // [T-model-use-chat-passthrough GH#72] Same verbatim merge as the
-        // chat-completions builder. Skipped for Codex OAuth — its body shape
-        // is part of the client fingerprint and must stay untouched.
-        if !chatExtraBody.isEmpty && !isCodexOAuth {
+        // chat-completions builder. Codex accepts extra Responses fields.
+        if !chatExtraBody.isEmpty {
             for (k, v) in chatExtraBody { body[k] = v }
             body["model"] = model.id
         }
 
+        applyRequestCustomization(to: &body, request: &request, apiKey: token)
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
         #if DEBUG
@@ -789,6 +774,23 @@ final class OpenAIProvider: LLMProvider {
     }
 
     // MARK: - Debug Logging
+
+    private func applyRequestCustomization(to body: inout [String: Any], request: inout URLRequest, apiKey: String?) {
+        guard let requestCustomization else { return }
+        let originalHeaders = request.allHTTPHeaderFields ?? [:]
+        var headers = originalHeaders
+        requestCustomization.apply(to: &body, headers: &headers, apiKey: apiKey)
+        // URLRequest header patching is set-only: a key the customization
+        // deleted just vanishes from the dict, so we must explicitly clear it
+        // with setValue(nil,...) or the pre-existing default header survives.
+        let survivingKeys = Set(headers.keys.map { $0.lowercased() })
+        for key in originalHeaders.keys where !survivingKeys.contains(key.lowercased()) {
+            request.setValue(nil, forHTTPHeaderField: key)
+        }
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+    }
 
     #if DEBUG
     private func logOutgoingRequest(url: URL, headers: [String: String]?, body: [String: Any]) {
@@ -1113,20 +1115,31 @@ final class OpenAIProvider: LLMProvider {
         let token = try await getToken()
         applyKeyAuth(&request, token: token)
         for (k, v) in extraHeaders { request.setValue(v, forHTTPHeaderField: k) }
-        // User headers LAST — replace semantics over all defaults.
+
+        var effectiveBody = bodyObject ?? [:]
+        applyRequestCustomization(
+            to: &effectiveBody,
+            request: &request,
+            apiKey: token
+        )
+        // Per-call passthrough headers remain the final explicit override.
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
 
-        if let bodyObject, method.uppercased() != "GET" {
-            request.httpBody = try JSONSerialization.data(withJSONObject: bodyObject, options: [.sortedKeys])
+        if method.uppercased() != "GET",
+           bodyObject != nil || !effectiveBody.isEmpty {
+            request.httpBody = try JSONSerialization.data(
+                withJSONObject: effectiveBody,
+                options: [.sortedKeys]
+            )
         }
 
         // [T-log-noise-privacy 2026-07-18] Log without query/fragment — custom
         // endpoints can carry credentials in the query string.
         let logURL = url.absoluteString.split(separator: "?", maxSplits: 1).first.map(String.init) ?? url.absoluteString
-        logger.info("[ModelUseRoute] route=raw-passthrough method=\(method) url=\(logURL) bodyKeys=[\((bodyObject ?? [:]).keys.sorted().joined(separator: ","))] headerOverrides=[\(headers.keys.sorted().joined(separator: ","))]")
+        logger.info("[ModelUseRoute] route=raw-passthrough method=\(method) url=\(logURL) bodyKeys=[\(effectiveBody.keys.sorted().joined(separator: ","))] headerOverrides=[\(headers.keys.sorted().joined(separator: ","))]")
         #if DEBUG
-        if let bodyObject {
-            logOutgoingRequest(url: url, headers: request.allHTTPHeaderFields, body: bodyObject)
+        if request.httpBody != nil {
+            logOutgoingRequest(url: url, headers: request.allHTTPHeaderFields, body: effectiveBody)
             if let onWire = request.httpBody, let s = String(data: onWire, encoding: .utf8) {
                 LastAPIRequestBody.shared.set(s, provider: "OpenAI")
             }
@@ -1205,19 +1218,26 @@ final class OpenAIProvider: LLMProvider {
         // [T-model-use-image-passthrough GH#62] Merge user-supplied passthrough
         // fields. User keys WIN over our defaults (e.g. they can override prompt/
         // size or add Seedream's `image`/`watermark`), but `model` is force-kept
-        // to the resolved model id afterward so a stray override can't misroute.
+        // to the resolved model id before persisted request customization runs.
         for (k, v) in imageExtraBody { body[k] = v }
         body["model"] = model.id
-        // If the user explicitly set response_format, respect it and don't run
-        // the b64_json probe/retry below.
-        let userSetResponseFormat = imageExtraBody["response_format"] != nil
+        let hasPassthroughResponseFormat =
+            imageExtraBody["response_format"] != nil
+        if !hasPassthroughResponseFormat {
+            body["response_format"] = "b64_json"
+        }
+        applyRequestCustomization(
+            to: &body,
+            request: &request,
+            apiKey: token
+        )
 
         // Try b64_json first; if the provider rejects it, retry without response_format
-        var triedWithoutFormat = userSetResponseFormat
+        let usesAutomaticB64JSON =
+            !hasPassthroughResponseFormat
+                && body["response_format"] as? String == "b64_json"
+        var triedWithoutFormat = !usesAutomaticB64JSON
         while true {
-            if !triedWithoutFormat {
-                body["response_format"] = "b64_json"
-            }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
             #if DEBUG

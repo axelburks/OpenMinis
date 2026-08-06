@@ -83,6 +83,7 @@ object RareContentScorer {
 data class ConversationContext(
     val rareTermsDigest: String? = null,
     val recentExcerpts: List<String> = emptyList(),
+    val sessionId: String? = null,
 ) {
     val isEmpty: Boolean get() = rareTermsDigest.isNullOrEmpty() && recentExcerpts.isEmpty()
 

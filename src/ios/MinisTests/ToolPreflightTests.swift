@@ -1,5 +1,7 @@
 import XCTest
 
+@testable import Minis
+
 /// [T-preflight-empty-string-allowed] preflightValidateToolCall must
 /// distinguish "field absent / JSON null" (block) from "field present with a
 /// legitimately empty string" (allow, per-tool whitelist — file_edit's schema

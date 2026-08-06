@@ -31,11 +31,10 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
     /// Persisted cache of which endpoint actually worked under `.auto`. Cleared whenever
     /// the user changes `customBaseURL`/`appendV1Suffix` so we re-probe the new endpoint.
     var imageEndpointResolved: ImageEndpointMode?
-    /// Optional custom `User-Agent` header for outbound requests. nil/empty = use the
-    /// Minis default UA. Set for proxy/relay endpoints that gate on client UA (only
-    /// allow e.g. Claude Code). Applied to chat/models/responses requests of API-key
-    /// and manual-token providers; OAuth providers keep their required client UA.
-    var customUserAgent: String?
+    /// Provider-level outbound request header expressions. Same-name headers replace defaults.
+    var customRequestHeaders: [String]
+    /// Provider-level outbound request body expressions. Applied before model-level body expressions.
+    var customRequestBody: [String]
     /// [T-ios-azure-openai] Azure OpenAI mode. When true, OpenAIProvider auths
     /// with the `api-key:` header (not `Authorization: Bearer`) and treats the
     /// custom base URL as an Azure endpoint (the user pastes the full Azure URL
@@ -59,7 +58,8 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         appendV1Suffix: Bool = true,
         imageEndpointMode: ImageEndpointMode = .auto,
         imageEndpointResolved: ImageEndpointMode? = nil,
-        customUserAgent: String? = nil,
+        customRequestHeaders: [String] = [],
+        customRequestBody: [String] = [],
         azureMode: Bool = false,
         unknownProviderTypeRaw: String? = nil
     ) {
@@ -73,7 +73,8 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         self.appendV1Suffix = appendV1Suffix
         self.imageEndpointMode = imageEndpointMode
         self.imageEndpointResolved = imageEndpointResolved
-        self.customUserAgent = customUserAgent
+        self.customRequestHeaders = customRequestHeaders
+        self.customRequestBody = customRequestBody
         self.azureMode = azureMode
         self.unknownProviderTypeRaw = unknownProviderTypeRaw
     }
@@ -82,7 +83,7 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, label, providerType, credentialType, isEnabled, createdAt, customBaseURL, appendV1Suffix
-        case imageEndpointMode, imageEndpointResolved, customUserAgent, azureMode
+        case imageEndpointMode, imageEndpointResolved, customRequestHeaders, customRequestBody, azureMode
     }
 
     init(from decoder: Decoder) throws {
@@ -103,8 +104,8 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         // Both new fields tolerate absence (old data) and unknown values (forward compat).
         imageEndpointMode = (try? c.decodeIfPresent(ImageEndpointMode.self, forKey: .imageEndpointMode)) ?? .auto
         imageEndpointResolved = try? c.decodeIfPresent(ImageEndpointMode.self, forKey: .imageEndpointResolved)
-        // Additive + optional: old data without this key decodes to nil (default UA).
-        customUserAgent = try c.decodeIfPresent(String.self, forKey: .customUserAgent)
+        customRequestHeaders = try c.decodeIfPresent([String].self, forKey: .customRequestHeaders) ?? []
+        customRequestBody = try c.decodeIfPresent([String].self, forKey: .customRequestBody) ?? []
         // [T-ios-azure-openai] Additive + optional: old data → false (off), so
         // existing OpenAI/Responses instances keep their exact prior behavior.
         azureMode = (try? c.decodeIfPresent(Bool.self, forKey: .azureMode)) ?? false
@@ -124,24 +125,26 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         try c.encode(appendV1Suffix, forKey: .appendV1Suffix)
         try c.encode(imageEndpointMode, forKey: .imageEndpointMode)
         try c.encodeIfPresent(imageEndpointResolved, forKey: .imageEndpointResolved)
-        try c.encodeIfPresent(customUserAgent, forKey: .customUserAgent)
+        if !customRequestHeaders.isEmpty {
+            try c.encode(customRequestHeaders, forKey: .customRequestHeaders)
+        }
+        if !customRequestBody.isEmpty {
+            try c.encode(customRequestBody, forKey: .customRequestBody)
+        }
         // [T-ios-azure-openai] Only encode when on, so off-instances serialize
         // byte-identically to before this field existed (no diff/churn, no LWW noise).
         if azureMode { try c.encode(azureMode, forKey: .azureMode) }
     }
 
-    /// Returns customUserAgent if non-nil and non-empty (trimmed), otherwise nil.
-    /// Use this everywhere the effective UA is needed — empty string means "default UA".
-    var effectiveCustomUserAgent: String? {
-        guard let ua = customUserAgent?.trimmingCharacters(in: .whitespacesAndNewlines), !ua.isEmpty else { return nil }
-        return ua
+    var effectiveCustomRequestHeaders: [String] {
+        customRequestHeaders.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
-    /// Whether this instance should expose / inject a custom User-Agent.
-    /// Only OpenAI-compatible or Anthropic-compatible endpoints reached through a
-    /// custom base URL (proxy/relay) — official direct connections (no customBaseURL)
-    /// and native Gemini/Antigravity are excluded.
-    var supportsCustomUserAgent: Bool {
+    var effectiveCustomRequestBody: [String] {
+        customRequestBody.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    var supportsCustomRequestHeaders: Bool {
         guard effectiveCustomBaseURL != nil else { return false }
         switch providerType {
         case .openAI, .openAIResponses, .openRouter, .xAI, .kimiCode, .anthropic:

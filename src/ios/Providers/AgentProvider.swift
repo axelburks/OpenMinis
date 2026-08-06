@@ -180,9 +180,9 @@ protocol AgentProvider {
     /// Default max output tokens for this provider.
     var defaultMaxTokens: Int { get }
 
-    /// Provider-specific streaming implementation. Receives a thinking level
-    /// that has already been clamped to the model's effective max by the
-    /// protocol extension — implementations should NOT re-clamp.
+    /// Provider-specific streaming implementation. The caller has already
+    /// resolved the level against either the built-in catalog or the model's
+    /// custom thinking-control options.
     func streamAgentMessageClamped(
         messages: [AgentMessage],
         systemPrompt: String?,
@@ -200,10 +200,10 @@ extension AgentProvider {
         maxTokens: Int,
         thinkingLevel: ThinkingLevel
     ) async throws -> AsyncThrowingStream<AgentStreamEvent, Error> {
-        let clamped = min(thinkingLevel, model.catalogMaxThinkingLevel)
         return try await streamAgentMessageClamped(
             messages: messages, systemPrompt: systemPrompt,
-            tools: tools, maxTokens: maxTokens, thinkingLevel: clamped
+            tools: tools, maxTokens: maxTokens,
+            thinkingLevel: thinkingLevel
         )
     }
 
@@ -217,4 +217,3 @@ extension AgentProvider {
         try await streamAgentMessage(messages: messages, systemPrompt: systemPrompt, tools: tools, maxTokens: maxTokens, thinkingLevel: .off)
     }
 }
-

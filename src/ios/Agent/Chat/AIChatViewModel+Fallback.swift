@@ -20,6 +20,7 @@ extension AIChatViewModel {
     ) async throws -> AsyncThrowingStream<AgentStreamEvent, Error> {
         var lastError: Error?
         var currentProvider = initialProvider
+        var currentEntryId = resolveCurrentEntry()?.id
         for attempt in 0...Self.retryDelays.count {
             if attempt > 0 {
                 let delay = Self.retryDelays[attempt - 1]
@@ -40,29 +41,54 @@ extension AIChatViewModel {
                 // Re-read current model binding — user may have switched models during countdown
                 if let entry = resolveCurrentEntry() {
                     let newProvider = await makeAgentProvider(for: entry)
-                    if newProvider.model.id != currentProvider.model.id {
-                        logger.info("🔄 Retry: model changed during countdown \(currentProvider.model.id) → \(newProvider.model.id)")
+                    if entry.id != currentEntryId {
+                        logger.info("🔄 Retry: model entry changed during countdown \(currentEntryId ?? "nil") → \(entry.id)")
                         currentProvider = newProvider
+                        currentEntryId = entry.id
                     }
                 }
             }
             do {
-                var thinkLvl = sessionId.flatMap { ProviderConfigStore.shared.inferenceConfig(for: $0)?.thinkingLevel } ?? .off
+                let storedDefinitionId = sessionId.flatMap {
+                    ProviderConfigStore.shared.inferenceConfig(for: $0)?
+                        .thinkingDefinitionId
+                } ?? currentThinkingDefinitionId
                 // [T-fallback-thinking-preclamp] Clamp to the CURRENT entry's
                 // effective max BEFORE building the request — the session's
                 // persisted level may exceed what this (possibly re-resolved)
                 // model accepts, and the protocol-extension clamp only knows
                 // the catalog max, not the entry-level override.
-                if let entry = resolveCurrentEntry() {
-                    thinkLvl = min(thinkLvl, entry.effectiveMaxThinkingLevel)
-                }
-                let stream = try await currentProvider.streamAgentMessage(
-                    messages: messages,
-                    systemPrompt: systemPrompt,
-                    tools: tools,
-                    maxTokens: maxTokens,
-                    thinkingLevel: thinkLvl
+                let entry = resolveCurrentEntry()
+                let thinkingDefinitionId =
+                    clampedThinkingDefinitionId(
+                    storedDefinitionId,
+                    for: entry
                 )
+                let thinkLvl = ThinkingLevelRegistry.nativeLevel(
+                    forDefinitionId:
+                        thinkingDefinitionId
+                )
+                let stream = try await RequestCustomizationRuntime.$sessionId.withValue(sessionId) {
+                    try await RequestCustomizationRuntime
+                        .$usesConversationRequestControlState
+                        .withValue(true) {
+                            try await RequestCustomizationRuntime
+                                .$thinkingDefinitionId
+                                .withValue(
+                                    thinkingDefinitionId
+                                ) {
+                                    try await currentProvider
+                                        .streamAgentMessage(
+                                            messages: messages,
+                                            systemPrompt:
+                                                systemPrompt,
+                                            tools: tools,
+                                            maxTokens: maxTokens,
+                                            thinkingLevel: thinkLvl
+                                        )
+                                }
+                        }
+                }
                 self.autoRetryAttempt = 0
                 return stream
             } catch let error as LLMError where error.isRetryable {
@@ -122,25 +148,50 @@ extension AIChatViewModel {
                 // distinguish fallbackable errors from network errors.
                 let currentModel = currentEntryId.flatMap { ProviderConfigStore.shared.entry(for: $0)?.model } ?? model
                 let maxTok = dynamicMaxTokens(provider: currentProvider, model: currentModel, lastContextTokens: lastContextTokens)
-                var thinkLvl = sessionId.flatMap { ProviderConfigStore.shared.inferenceConfig(for: $0)?.thinkingLevel } ?? .off
+                let storedDefinitionId = sessionId.flatMap {
+                    ProviderConfigStore.shared.inferenceConfig(for: $0)?
+                        .thinkingDefinitionId
+                } ?? currentThinkingDefinitionId
                 // [T-fallback-thinking-preclamp] When falling back (e.g. a
                 // Responses-API primary at xhigh → a Chat-API seed model that
                 // tops out at high), the session's persisted level was passed
                 // through unclamped and 400'd ("Invalid reasoning_effort:
-                // xhigh"): the existing effectiveMaxThinkingLevel clamp below
-                // runs only AFTER a successful request, to update the
-                // persisted config. Clamp for THIS request up front; the
-                // post-success write-back stays so the next turn starts right.
-                if let eid = currentEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
-                    thinkLvl = min(thinkLvl, entry.effectiveMaxThinkingLevel)
+                // xhigh"). Resolve against this entry's available definition
+                // IDs before sending; custom thinking controls intentionally
+                // supply their exact option set.
+                let currentEntry = currentEntryId.flatMap {
+                    ProviderConfigStore.shared.entry(for: $0)
                 }
-                let stream = try await currentProvider.streamAgentMessage(
-                    messages: messages,
-                    systemPrompt: currentSystemPrompt,
-                    tools: tools,
-                    maxTokens: maxTok,
-                    thinkingLevel: thinkLvl
+                let thinkingDefinitionId =
+                    clampedThinkingDefinitionId(
+                    storedDefinitionId,
+                    for: currentEntry
                 )
+                let thinkLvl = ThinkingLevelRegistry.nativeLevel(
+                    forDefinitionId:
+                        thinkingDefinitionId
+                )
+                let stream = try await RequestCustomizationRuntime.$sessionId.withValue(sessionId) {
+                    try await RequestCustomizationRuntime
+                        .$usesConversationRequestControlState
+                        .withValue(true) {
+                            try await RequestCustomizationRuntime
+                                .$thinkingDefinitionId
+                                .withValue(
+                                    thinkingDefinitionId
+                                ) {
+                                    try await currentProvider
+                                        .streamAgentMessage(
+                                            messages: messages,
+                                            systemPrompt:
+                                                currentSystemPrompt,
+                                            tools: tools,
+                                            maxTokens: maxTok,
+                                            thinkingLevel: thinkLvl
+                                        )
+                                }
+                        }
+                }
                 // Success — update binding if we fell back to a different entry
                 let prevEntryId = activeEntryId
                 if currentEntryId != activeEntryId, let currentEntryId,
@@ -155,14 +206,6 @@ extension AIChatViewModel {
                     ProviderConfigStore.shared.setBinding(binding, for: sid)
                     if let entry = ProviderConfigStore.shared.entry(for: currentEntryId) {
                         Task { await ChatStore.shared.updateSessionModelId(sid, modelId: entry.model.id) }
-                    }
-                    if let newEntry = ProviderConfigStore.shared.entry(for: currentEntryId) {
-                        let maxLevel = newEntry.effectiveMaxThinkingLevel
-                        if var cfg = ProviderConfigStore.shared.inferenceConfig(for: sid),
-                           cfg.thinkingLevel > maxLevel {
-                            cfg.thinkingLevel = maxLevel
-                            ProviderConfigStore.shared.setInferenceConfig(cfg, for: sid)
-                        }
                     }
                     logger.info("🔀ROUTE binding updated to entry \(currentEntryId)")
                 } else {
@@ -414,7 +457,19 @@ extension AIChatViewModel {
                 && !hasReasoning && !result.isStreamInterrupted
                 && result.stopReason != .maxTokens
 
-            guard isEmpty else { return result }
+            guard isEmpty else {
+                if let entryId = activeEntryId,
+                   let entry =
+                    ProviderConfigStore.shared
+                        .entry(for: entryId) {
+                    activateRuntime(
+                        for: entry,
+                        sessionKey:
+                            currentRequestBodyControlSessionKey
+                    )
+                }
+                return result
+            }
 
             // Empty response — record this entry and force-fail so the next
             // streamWithGroupFallback call advances to a different entry.

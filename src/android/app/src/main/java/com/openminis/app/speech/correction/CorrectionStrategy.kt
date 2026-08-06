@@ -62,7 +62,9 @@ class LlmCorrectionStrategy(
         val instance = repository.instance(entry.providerInstanceId)
             ?: throw CorrectionError.NoModelAvailable
         val apiKey = repository.loadApiKey(instance.id) ?: throw CorrectionError.NoModelAvailable
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, this.context)
+        val provider = ProviderFactory.create(instance, apiKey, entry.model, this.context, entry)
+        provider.requestSessionId = context.sessionId
+        provider.usesConversationRequestControlState = false
 
         val prompt = buildPrompt(transcript, candidates, context)
         val response = provider.sendMessage(

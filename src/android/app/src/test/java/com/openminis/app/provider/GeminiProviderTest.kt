@@ -4,6 +4,12 @@ import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.LLMStreamChunk
+import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.ModelOverrides
+import com.openminis.app.data.model.ProviderCredential
+import com.openminis.app.data.model.ProviderInstance
+import com.openminis.app.data.model.ProviderType
+import com.openminis.app.data.model.RequestBodyControl
 import com.openminis.app.provider.gemini.GeminiProvider
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -392,6 +398,122 @@ class GeminiProviderTest {
             return@runBlocking
         }
         throw AssertionError("Expected TransientError")
+    }
+
+    // -- Request customization end-to-end (header + body + controls) --
+    //
+    // [Minix] The RequestCustomization dictionary layer is covered exhaustively in
+    // RequestCustomizationTest; these cases prove the Gemini provider actually
+    // threads customization.apply(...) into the real outgoing request (headers +
+    // JSON body) rather than relying on cross-provider code homogeneity.
+
+    private fun customizedProvider(
+        instance: ProviderInstance,
+        entry: ModelEntry,
+        model: LLMModel,
+    ): GeminiProvider = GeminiProvider(
+        apiKey = "test-key",
+        model = model,
+        basePath = server.url("/").toString().trimEnd('/'),
+        requestCustomization = RequestCustomization(instance, entry),
+    )
+
+    private fun geminiInstance(
+        headers: List<String> = emptyList(),
+        body: List<String> = emptyList(),
+    ) = ProviderInstance(
+        id = "provider",
+        label = "Google",
+        providerType = ProviderType.gemini,
+        credentialType = ProviderCredential.apiKey,
+        customRequestHeaders = headers,
+        customRequestBody = body,
+    )
+
+    @Test
+    fun testStreamMessage_appliesCustomHeaderAndBodyToRequest_BitsUT() = runBlocking {
+        val instance = geminiInstance(
+            headers = listOf("""X-Provider = "prov""""),
+            body = listOf("""safetySettings.tag = "custom""""),
+        )
+        val model = LLMModel(id = "test-model", displayName = "Test Model", provider = "Google")
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(customRequestHeaders = listOf("""X-Model = "mdl"""")),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        val request = server.takeRequest()
+        assertEquals("prov", request.getHeader("X-Provider"))
+        assertEquals("mdl", request.getHeader("X-Model"))
+        val body = JSONObject(request.body.readUtf8())
+        assertEquals("custom", body.getJSONObject("safetySettings").getString("tag"))
+    }
+
+    @Test
+    fun testStreamMessage_headerDeleteRemovesCustomHeaderFromRequest_BitsUT() = runBlocking {
+        // Provider sets X-Temp; the model layer deletes it. The final request must
+        // not carry it. (Provider-hardcoded defaults — Content-Type, User-Agent —
+        // are re-applied unconditionally at build time and are out of scope here;
+        // see the delete-semantics note in the PR.)
+        val instance = geminiInstance(headers = listOf("""X-Temp = "set-by-provider""""))
+        val model = LLMModel(id = "test-model", displayName = "Test Model", provider = "Google")
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(customRequestHeaders = listOf("X-Temp = delete()")),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        assertNull(server.takeRequest().getHeader("X-Temp"))
+    }
+
+    @Test
+    fun testStreamMessage_thinkingControlInjectsThinkingConfigIntoRequestBody_BitsUT() = runBlocking {
+        // A thinkingBudget control's payloadExpressions must land in the real body
+        // (Gemini writes generationConfig.thinkingConfig). Uses an explicit option
+        // (not RequestBodyControlDefaults) so the assertion is self-contained.
+        val instance = geminiInstance()
+        val model = LLMModel(
+            id = "test-model",
+            displayName = "Test Model",
+            provider = "Google",
+            supportsReasoning = true,
+        )
+        val control = RequestBodyControl(
+            id = "thinking",
+            title = "Thinking",
+            kind = RequestBodyControl.Kind.toggle,
+            defaultIsActive = true,
+            payloadExpressions = listOf(
+                """body.generationConfig.thinkingConfig = {thinkingLevel: "high", includeThoughts: true}""",
+            ),
+        )
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(requestBodyControls = listOf(control)),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        val thinkingConfig = JSONObject(server.takeRequest().body.readUtf8())
+            .getJSONObject("generationConfig")
+            .getJSONObject("thinkingConfig")
+        assertEquals("high", thinkingConfig.getString("thinkingLevel"))
+        assertTrue(thinkingConfig.getBoolean("includeThoughts"))
     }
 
     // -- Provider metadata --

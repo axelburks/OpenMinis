@@ -3,6 +3,7 @@ package com.openminis.app.provider
 import android.content.Context
 import com.openminis.app.auth.OpenAIOAuthManager
 import com.openminis.app.data.model.LLMModel
+import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
@@ -15,7 +16,7 @@ object ProviderFactory {
      * Create a provider, optionally with OAuth support.
      * [context] is needed for OpenAI OAuth to access encrypted storage for token refresh.
      */
-    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null, entry: ModelEntry? = null): LLMProvider {
         // T174: route through ProviderInstance.effectiveBaseURL instead of
         // re-implementing the trim-+-endsWith dance inline. The previous
         // version did `url.endsWith("/v1")` on the raw, untrimmed string,
@@ -31,17 +32,21 @@ object ProviderFactory {
         // completions endpoint suffix at OpenAIProvider.kt:710 then
         // produces a single-slash join.
         val basePath = instance.effectiveBaseURL
+        val requestCustomization =
+            RequestCustomization(
+                instance,
+                entry,
+                context = context,
+            )
         return when (instance.providerType) {
             ProviderType.anthropic -> {
                 val isOAuth = instance.credentialType == ProviderCredential.oauth
-                // [T-provider-custom-user-agent] Only meaningful for custom-base
-                // (relay) instances; on the official direct path it's null.
-                if (basePath != null) AnthropicProvider(apiKey, model, basePath, isOAuth = isOAuth, customUserAgent = instance.customUserAgent)
-                else AnthropicProvider(apiKey, model, isOAuth = isOAuth)
+                if (basePath != null) AnthropicProvider(apiKey, model, basePath, isOAuth = isOAuth, requestCustomization = requestCustomization)
+                else AnthropicProvider(apiKey, model, isOAuth = isOAuth, requestCustomization = requestCustomization)
             }
             ProviderType.gemini -> {
-                if (basePath != null) GeminiProvider(apiKey, model, basePath)
-                else GeminiProvider(apiKey, model)
+                if (basePath != null) GeminiProvider(apiKey, model, basePath, requestCustomization = requestCustomization)
+                else GeminiProvider(apiKey, model, requestCustomization = requestCustomization)
             }
             ProviderType.openAI -> {
                 // Manual bearer token (set via Manual Bearer Token UI / imported
@@ -65,6 +70,7 @@ object ProviderFactory {
                         oauthTokenProvider = { oauthManager.validAccessToken() ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey() },
                         model = model,
                         codexAccountId = oauthManager.accountId,
+                        requestCustomization = requestCustomization,
                     )
                 } else {
                     // API key, or manual OAuth bearer (with or without custom
@@ -78,10 +84,7 @@ object ProviderFactory {
                         model = model,
                         basePath = base,
                         useResponsesAPI = instance.useResponsesAPI,
-                        // [T-provider-custom-user-agent] Covers both chat and
-                        // /responses for custom-base OpenAI-compat relays; null
-                        // on the official direct path.
-                        customUserAgent = instance.customUserAgent,
+                        requestCustomization = requestCustomization,
                         // [T-android-azure-openai] Azure auths with api-key +
                         // deployments-path URL. Pass the RAW customBaseURL (not
                         // the /v1-appended, query-stripped effectiveBaseURL) so
@@ -101,6 +104,7 @@ object ProviderFactory {
                         "HTTP-Referer" to "https://github.com/OpenMinis/OpenMinis",
                         "X-Title" to "Minis App",
                     ),
+                    requestCustomization = requestCustomization,
                 )
             }
             ProviderType.xAI -> {
@@ -126,6 +130,7 @@ object ProviderFactory {
                         },
                         model = model,
                         basePath = base,
+                        requestCustomization = requestCustomization,
                     )
                 } else {
                     val effectiveKey = if (!manualBearer.isNullOrEmpty()) manualBearer else apiKey
@@ -133,6 +138,7 @@ object ProviderFactory {
                         apiKey = effectiveKey,
                         model = model,
                         basePath = base,
+                        requestCustomization = requestCustomization,
                     )
                 }
             }
@@ -151,8 +157,7 @@ object ProviderFactory {
                     val oauthManager = com.openminis.app.auth.KimiOAuthManager(context, instance.id)
                     // Same path as xAI OAuth: Bearer token provider +
                     // forceChatCompletions so the Codex Responses backend
-                    // shaping never applies. No custom UA / extra headers —
-                    // iOS sends none either.
+                    // shaping never applies.
                     OpenAIProvider.oauthOpenAICompat(
                         oauthTokenProvider = {
                             oauthManager.validAccessToken()
@@ -160,6 +165,7 @@ object ProviderFactory {
                         },
                         model = model,
                         basePath = base,
+                        requestCustomization = requestCustomization,
                     )
                 } else {
                     // Manual Moonshot API key (or manual bearer) path.
@@ -168,6 +174,7 @@ object ProviderFactory {
                         apiKey = effectiveKey,
                         model = model,
                         basePath = base,
+                        requestCustomization = requestCustomization,
                     )
                 }
             }

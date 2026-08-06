@@ -62,6 +62,7 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         "ProviderInstanceV3":   secretsZoneName,
         "ProviderModelEntryV3": secretsZoneName,
         "ProviderModelGroupV3": secretsZoneName,
+        "ThinkingLevelDefinitionsV3": secretsZoneName,
         // [T-mcp-sync-zone-mapping] servers.json whole-file record. Was missing
         // from this map, so every MCPServersV2 portable was silently dropped at
         // the push loop's zone guard — MCP servers never reached CloudKit at
@@ -224,7 +225,8 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     // until they have been anchored once via `configTypeAnchoredKey`.
     private static let fullHistoryConfigTypes: Set<String> = [
         "ProviderInstanceV3", "ProviderModelEntryV3", "ProviderModelGroupV3",
-        "ProviderConfigV2", "MCPServersV2", "MCPServerItem", "EnvVarItem",
+        "ThinkingLevelDefinitionsV3", "ProviderConfigV2", "MCPServersV2",
+        "MCPServerItem", "EnvVarItem",
     ]
     /// Per-type "we have completed at least one full-history pull AND the
     /// consumer was ready to apply it" flag. Until set, the type pulls full
@@ -636,6 +638,7 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
             ("ProviderInstanceV3", "updatedAt"),
             ("ProviderModelEntryV3", "updatedAt"),
             ("ProviderModelGroupV3", "updatedAt"),
+            ("ThinkingLevelDefinitionsV3", "updatedAt"),
             ("MCPServersV2", "updatedAt"),
             ("MCPServerItem", "updatedAt"),
             ("EnvVarItem", "updatedAt"),

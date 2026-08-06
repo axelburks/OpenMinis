@@ -6,7 +6,7 @@ import com.openminis.app.data.model.normalizeModalities
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.ProviderModelsCache
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.applyDefaultUserAgent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -76,9 +76,7 @@ object OpenAIModelsApi {
         baseURL: String? = null,
         context: Context? = null,
         forceRefresh: Boolean = false,
-        // [T-provider-custom-user-agent] Per-provider UA override; null/blank
-        // keeps the default UA. Threaded from ProviderRepository.refreshModels.
-        customUserAgent: String? = null,
+        customHeaders: Map<String, String> = emptyMap(),
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         val isCustomBase = baseURL != null && !isOfficialOpenAI(baseURL)
         // For third-party endpoints (vLLM, Ollama, etc.), return empty on failure
@@ -91,12 +89,14 @@ object OpenAIModelsApi {
         }
 
         val url = buildURL(baseURL)
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer $apiKey")
-            // [T-provider-custom-user-agent] models-list UA override.
-            .applyUserAgentOverride(customUserAgent)
-            .build()
+            .applyDefaultUserAgent()
+        for ((key, value) in customHeaders) {
+            requestBuilder.header(key, value)
+        }
+        val request = requestBuilder.build()
 
         val response = client.newCall(request).execute()
         val body = response.body?.string() ?: return@withContext fallback

@@ -11,8 +11,10 @@ import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.provider.LLMProvider
-import com.openminis.app.provider.applyUserAgentOverride
+import com.openminis.app.provider.RequestCustomization
+import com.openminis.app.provider.applyDefaultUserAgent
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -65,13 +67,7 @@ class OpenAIProvider private constructor(
      * Responses backend at chatgpt.com, where it 404s.
      */
     private val forceChatCompletions: Boolean = false,
-    /**
-     * [T-provider-custom-user-agent] Per-provider User-Agent override.
-     * null/blank → default UA; non-blank → replaces User-Agent on every
-     * outbound request (chat + responses). Only set for custom-base
-     * OpenAI-compat instances.
-     */
-    private val customUserAgent: String? = null,
+    private val requestCustomization: RequestCustomization? = null,
     /**
      * [T-android-azure-openai] Azure OpenAI mode. When true, requests auth with
      * the `api-key:` header (not `Authorization: Bearer`) and the URL is built
@@ -97,7 +93,7 @@ class OpenAIProvider private constructor(
         basePath: String = "https://api.openai.com/v1",
         extraHeaders: Map<String, String> = emptyMap(),
         useResponsesAPI: Boolean = false,
-        customUserAgent: String? = null,
+        requestCustomization: RequestCustomization? = null,
         isAzure: Boolean = false,
         azureBase: String? = null,
     ) : this(
@@ -107,7 +103,7 @@ class OpenAIProvider private constructor(
         basePath = basePath,
         extraHeaders = extraHeaders,
         useResponsesAPI = useResponsesAPI,
-        customUserAgent = customUserAgent,
+        requestCustomization = requestCustomization,
         isAzure = isAzure,
         azureBase = azureBase,
     )
@@ -117,7 +113,14 @@ class OpenAIProvider private constructor(
         oauthTokenProvider: suspend () -> String,
         model: LLMModel = LLMModel.codexMini,
         codexAccountId: String? = null,
-    ) : this(apiKey = null, oauthTokenProvider = oauthTokenProvider, model = model, codexAccountId = codexAccountId)
+        requestCustomization: RequestCustomization? = null,
+    ) : this(
+        apiKey = null,
+        oauthTokenProvider = oauthTokenProvider,
+        model = model,
+        codexAccountId = codexAccountId,
+        requestCustomization = requestCustomization,
+    )
 
     companion object {
         /**
@@ -150,16 +153,42 @@ class OpenAIProvider private constructor(
             oauthTokenProvider: suspend () -> String,
             model: LLMModel,
             basePath: String,
+            requestCustomization: RequestCustomization? = null,
         ): OpenAIProvider = OpenAIProvider(
             apiKey = null,
             oauthTokenProvider = oauthTokenProvider,
             model = model,
             basePath = basePath,
             forceChatCompletions = true,
+            requestCustomization = requestCustomization,
         )
     }
 
     private val isOAuth: Boolean get() = oauthTokenProvider != null
+    override var thinkingDefinitionId: String? = null
+    override var requestSessionId: String?
+        get() = requestCustomization?.sessionId
+        set(value) {
+            requestCustomization?.sessionId = value
+        }
+    override var usesConversationRequestControlState: Boolean
+        get() = requestCustomization
+            ?.usesConversationRequestControlState
+            ?: false
+        set(value) {
+            requestCustomization
+                ?.usesConversationRequestControlState = value
+        }
+    override val requestCustomizationModelKey: String?
+        get() = requestCustomization?.modelEntry?.id
+    override fun resolvedThinkingDefinitionId(
+        requestedDefinitionId: String,
+    ): String? =
+        requestCustomization?.resolvedThinkingDefinitionId(
+            requestedDefinitionId,
+        ) ?: super.resolvedThinkingDefinitionId(
+            requestedDefinitionId,
+        )
 
     // MARK: - Image passthrough [T-android-model-use-image-passthrough GH#62]
 
@@ -370,53 +399,6 @@ class OpenAIProvider private constructor(
     private val isDashScope: Boolean = basePath.contains("dashscope")
 
     /**
-     * [T-unified-reasoning-effort] Whether this endpoint applies OpenAI's
-     * `reasoning_effort` (Chat) / `reasoning.effort` (Responses) uniformly to
-     * EVERY model it hosts — including third-party families (GLM / Kimi /
-     * DeepSeek / MiniMax) that, at their vendor-native endpoint, would instead
-     * use a `thinking:{}` object or self-reason with no toggle.
-     *
-     * Two known such gateways (mirrors iOS OpenAIProvider.usesUnifiedReasoningEffort):
-     *   • Volcengine Ark (`ark.` / `volces` in the base URL) — re-exposes
-     *     doubao/deepseek/glm/kimi through a single OpenAI-compatible surface
-     *     where thinking is controlled ONLY by `reasoning_effort` (min tier
-     *     `minimal`); the vendor-native `thinking:{}` shape is not honored.
-     *   • Azure OpenAI ([isAzure]) — reasoning is `reasoning_effort` for every
-     *     model surfaced through the deployment.
-     *
-     * Gated tightly so official direct endpoints (DeepSeek/GLM/Kimi native,
-     * which DO want their own thinking shape) are never mis-routed.
-     */
-    private val usesUnifiedReasoningEffort: Boolean =
-        isAzure || basePath.lowercase().let { it.contains("volces") || it.contains("ark.") }
-
-    /**
-     * [T-thinking-off-explicit] The wire value for "thinking OFF", or null to
-     * keep the historical omit-the-field behavior. ALLOWLIST, not blanket
-     * (mirrors iOS OpenAIAgentProvider.explicitOffEffort): only vendors whose
-     * off tier is DOCUMENTED get an explicit value —
-     *   • official OpenAI base (non-Azure) → "none" (documented off tier);
-     *   • Volcano Ark (volces/ark bases, seed/doubao families) → "minimal"
-     *     (their smallest tier — Ark's non-off default is what motivated this).
-     * Everyone else (relays, NIM, xAI, MiMo, …) keeps field omission = the
-     * vendor's own default. Azure stays omission too: its off tier is
-     * model-dependent ('none' on gpt-5.1+, 'minimal' on original gpt-5,
-     * unsupported on o1/o3), so an explicit value risks a 400.
-     */
-    private fun explicitOffEffort(): String? {
-        if (isAzure) return null
-        val base = basePath.lowercase()
-        if (base.startsWith("https://api.openai.com")) return "none"
-        val lid = model.id.lowercase()
-        if (base.contains("volces") || base.contains("ark.") ||
-            lid.contains("seed-") || lid.contains("doubao")
-        ) {
-            return "minimal"
-        }
-        return null
-    }
-
-    /**
      * Non-streaming entry point. Some providers (e.g. GPT-5.x via certain
      * gateways, Codex Responses backend) reject `stream=false` outright with
      * `[400] Stream must be set to true`. To keep this method usable across
@@ -516,8 +498,20 @@ class OpenAIProvider private constructor(
         // build + non-OAuth RequestBody), each materialising a fresh 30+ MB
         // string for long agent loops with heavy tool outputs. Stacked, that
         // pushed memory-tight devices (HONOR PTP-AN00) past the OOM line.
+        val token = getToken()
+        val mutableHeaders = defaultRequestHeaders(token)
+        requestCustomization?.let { customization ->
+            customization.thinkingDefinitionId =
+                thinkingDefinitionId
+                    ?: ThinkingLevelRegistry
+                        .definitionForLevelId(
+                            thinkingLevel.name.lowercase(),
+                            customization.context,
+                        )?.definitionId
+            customization.apply(body, mutableHeaders, token)
+        }
         val bodyStr = body.toString()
-        val request = buildRequest(bodyStr)
+        val request = buildRequest(bodyStr, mutableHeaders)
         val headerMap = mutableMapOf<String, String>()
         for (name in request.headers.names()) {
             headerMap[name] = request.headers[name] ?: ""
@@ -1193,10 +1187,27 @@ class OpenAIProvider private constructor(
         }
 
         val verb = method.uppercase()
+        val token = getToken()
+        val effectiveBody = bodyObject ?: JSONObject()
+        val mutableHeaders = linkedMapOf(
+            (if (isAzure) "api-key" else "Authorization") to
+                (if (isAzure) token else "Bearer $token"),
+            "Content-Type" to "application/json",
+        )
+        mutableHeaders.putAll(extraHeaders)
+        requestCustomization?.apply(
+            effectiveBody,
+            mutableHeaders,
+            token,
+        )
+
         val builder = Request.Builder().url(url)
-        if (verb != "GET" && bodyObject != null) {
+        if (verb != "GET" &&
+            (bodyObject != null || effectiveBody.length() > 0)
+        ) {
             val jsonMediaType = "application/json".toMediaType()
-            val bodyBytes = bodyObject.toString().toByteArray(Charsets.UTF_8)
+            val bodyBytes =
+                effectiveBody.toString().toByteArray(Charsets.UTF_8)
             val requestBody = object : okhttp3.RequestBody() {
                 override fun contentType() = jsonMediaType
                 override fun contentLength() = bodyBytes.size.toLong()
@@ -1206,17 +1217,14 @@ class OpenAIProvider private constructor(
         } else {
             builder.method(verb, null)
         }
-        val token = getToken()
-        builder.applyKeyAuth(token)
-        builder.header("Content-Type", "application/json")
-        // ctor extraHeaders, then user headers LAST — replace semantics.
-        for ((k, v) in extraHeaders) builder.header(k, v)
+        for ((k, v) in mutableHeaders) builder.header(k, v)
+        // Per-call passthrough headers remain the final explicit override.
         for ((k, v) in headers) builder.header(k, v)
 
         com.openminis.app.logging.AppLogger.info(
             "OpenAIProvider",
             "[ModelUseRoute] route=raw-passthrough method=$verb url=$url " +
-                "bodyKeys=[${bodyObject?.keys()?.asSequence()?.sorted()?.joinToString(",") ?: ""}] " +
+                "bodyKeys=[${effectiveBody.keys().asSequence().sorted().joinToString(",")}] " +
                 "headerOverrides=[${headers.keys.sorted().joinToString(",")}]",
         )
 
@@ -1270,26 +1278,34 @@ class OpenAIProvider private constructor(
             else -> "$basePath$imagePath"
         }
 
-        // [T-android-model-use-image-passthrough GH#62] When the user explicitly
-        // supplies response_format, respect it and skip the b64_json auto-probe.
-        val userSetResponseFormat = imageExtraBody.containsKey("response_format")
-        var triedWithoutFormat = userSetResponseFormat
-        while (true) {
-            val body = JSONObject()
-                .put("model", model.id)
-                .put("prompt", prompt)
-                .put("n", n)
-            if (size != null) body.put("size", size)
-            if (quality != null) body.put("quality", quality)
-            if (!triedWithoutFormat) body.put("response_format", "b64_json")
-            // [T-android-model-use-image-passthrough GH#62] Merge user-supplied
-            // passthrough fields. User keys WIN over our defaults (they can
-            // override prompt/size or add Seedream's `image`/`watermark`), but
-            // `model` is force-kept to the resolved id afterward so a stray
-            // override can't misroute the request.
-            for ((k, v) in imageExtraBody) body.put(k, v ?: JSONObject.NULL)
-            body.put("model", model.id)
+        val hasPassthroughResponseFormat =
+            imageExtraBody.containsKey("response_format")
+        val body = JSONObject()
+            .put("model", model.id)
+            .put("prompt", prompt)
+            .put("n", n)
+        if (size != null) body.put("size", size)
+        if (quality != null) body.put("quality", quality)
+        if (!hasPassthroughResponseFormat) {
+            body.put("response_format", "b64_json")
+        }
+        for ((k, v) in imageExtraBody) {
+            body.put(k, v ?: JSONObject.NULL)
+        }
+        body.put("model", model.id)
 
+        val mutableHeaders = linkedMapOf(
+            (if (isAzure) "api-key" else "Authorization") to
+                (if (isAzure) token else "Bearer $token"),
+            "Content-Type" to "application/json",
+        )
+        mutableHeaders.putAll(extraHeaders)
+        requestCustomization?.apply(body, mutableHeaders, token)
+        val usesAutomaticB64JSON =
+            !hasPassthroughResponseFormat &&
+                body.optString("response_format") == "b64_json"
+        var triedWithoutFormat = !usesAutomaticB64JSON
+        while (true) {
             val bodyStr = body.toString()
             val jsonMediaType = "application/json".toMediaType()
             val bodyBytes = bodyStr.toByteArray(Charsets.UTF_8)
@@ -1301,17 +1317,15 @@ class OpenAIProvider private constructor(
             val builder = Request.Builder()
                 .url(url)
                 .post(requestBody)
-                .applyKeyAuth(token)
-                .header("Content-Type", "application/json")
-            for ((key, value) in extraHeaders) {
+            builder.applyDefaultUserAgent()
+            for ((key, value) in mutableHeaders) {
                 builder.header(key, value)
             }
             // [T-android-model-use-image-passthrough GH#62] Per-call passthrough
-            // headers, merged after the ctor extraHeaders so they can add/override.
+            // headers remain the final explicit override.
             for ((key, value) in imageExtraHeaders) {
                 builder.header(key, value)
             }
-            builder.applyUserAgentOverride(customUserAgent)
             val request = builder.build()
 
             com.openminis.app.logging.AppLogger.info(
@@ -1333,6 +1347,7 @@ class OpenAIProvider private constructor(
                     "OpenAIProvider",
                     "[ModelUseRoute] images/generations rejected b64_json — retrying without response_format",
                 )
+                body.remove("response_format")
                 triedWithoutFormat = true
                 continue
             }
@@ -1459,10 +1474,9 @@ class OpenAIProvider private constructor(
             body.put("stream_options", JSONObject().put("include_usage", true))
         }
 
-        // Provider-specific thinking params. We always call this — some
-        // models (e.g. DeepSeek V4) reason by default and need an explicit
-        // `disabled` signal when the user toggles thinking off.
-        injectThinkingParams(body, thinkingLevel, maxTokens)
+        if (requestCustomization?.disablesBuiltInThinkingInjection != true) {
+            injectThinkingParams(body, thinkingLevel)
+        }
 
         // Tools
         if (tools.isNotEmpty()) {
@@ -1804,7 +1818,7 @@ class OpenAIProvider private constructor(
      * the OAuth byte build, and the OkHttp RequestBody. Per-call peak heap
      * dropped by ~2× the body size (often tens of MB on long agent loops).
      */
-    private suspend fun buildRequest(bodyStr: String): Request {
+    private suspend fun buildRequest(bodyStr: String, customHeaders: Map<String, String>): Request {
         val token = getToken()
 
         if (isOAuth && !forceChatCompletions) {
@@ -1826,16 +1840,9 @@ class OpenAIProvider private constructor(
                 .header("User-Agent", "codex_cli_rs/$CODEX_CLIENT_VERSION (Android; arm64)")
                 .header("Originator", "codex_cli_rs")
             codexAccountId?.let { builder.header("Chatgpt-Account-Id", it) }
-            // [T-provider-custom-user-agent] Applied last so a non-blank
-            // override wins over the Codex default UA. In practice null on
-            // this OAuth path (the UI only exposes it for custom-base
-            // instances), so this is a no-op there.
-            // [T-android-default-ua] `defaultUserAgent = null` — keep the
-            // codex_cli_rs fingerprint set above when no per-provider
-            // override is configured. We must NOT fall back to the branded
-            // Minis UA here: the ChatGPT OAuth backend validates the
-            // client identity against this header.
-            builder.applyUserAgentOverride(customUserAgent, defaultUserAgent = null)
+            for ((key, value) in customHeaders) {
+                builder.header(key, value)
+            }
             return builder.build()
         }
 
@@ -1873,18 +1880,35 @@ class OpenAIProvider private constructor(
         for ((key, value) in extraHeaders) {
             builder.header(key, value)
         }
+        // Persisted Header expressions are applied afterward and may replace it.
+        builder.applyDefaultUserAgent()
+        for ((key, value) in customHeaders) {
+            builder.header(key, value)
+        }
         // [T-android-model-use-passthrough-mode] Per-call chat header overrides,
         // applied AFTER the ctor extraHeaders → same-name REPLACE over any
         // default (incl. Authorization/Content-Type). Empty on normal calls.
         for ((key, value) in chatExtraHeaders) {
             builder.header(key, value)
         }
-        // [T-provider-custom-user-agent] Covers both chat/completions and
-        // /responses (this builder serves both). Applied after extraHeaders
-        // so the per-provider override wins. null/blank → default UA.
-        builder.applyUserAgentOverride(customUserAgent)
         return builder.build()
     }
+
+    private fun defaultRequestHeaders(token: String): LinkedHashMap<String, String> =
+        linkedMapOf<String, String>().apply {
+            if (isOAuth && !forceChatCompletions) {
+                put("Authorization", "Bearer $token")
+                put("Version", CODEX_CLIENT_VERSION)
+                put("Openai-Beta", "responses=experimental")
+                put("User-Agent", "codex_cli_rs/$CODEX_CLIENT_VERSION (Android; arm64)")
+                put("Originator", "codex_cli_rs")
+                codexAccountId?.let { put("Chatgpt-Account-Id", it) }
+            } else {
+                put(if (isAzure) "api-key" else "Authorization", if (isAzure) token else "Bearer $token")
+                put("Content-Type", "application/json")
+                putAll(extraHeaders)
+            }
+        }
 
     private fun parseChatCompletionsUsage(usage: JSONObject): LLMUsage {
         val promptTokens = usage.optInt("prompt_tokens", 0)
@@ -1912,203 +1936,23 @@ class OpenAIProvider private constructor(
     }
 
     /**
-     * Inject provider-specific thinking parameters into the request body.
-     * - OpenRouter: `reasoning: {effort: ...}` (omitted when off so
-     *   forced-reasoning models keep their default)
-     * - OpenAI o-series / GPT-5.x: `reasoning_effort: ...` (off → skip)
-     * - Qwen3 (DashScope): `enable_thinking: true/false, thinking_budget: N`
-     *   — Qwen3 thinks by default, so OFF needs an explicit disable.
-     * - DeepSeek V4 (deepseek-v4-flash / deepseek-v4-pro): `thinking` object —
-     *   V4 thinks by default and rejects requests without an explicit toggle
-     *   when reasoning_content is missing. Distinct from deepseek-reasoner /
-     *   deepseek-chat which keep the no-params path below.
-     * - DeepSeek (pre-V4) / GLM / Kimi / MiniMax: no params (model decides).
+     * Default Chat Completions thinking mapping.
+     *
+     * This is intentionally provider/protocol-level only: if an older model or
+     * OpenAI-compatible vendor needs a different shape, the user should define
+     * a model-level structured control. We only emit a default field when the
+     * selected model is known to support reasoning and the user enabled
+     * thinking for this request.
      */
-    /**
-     * [T-android-xhigh-effort-clamp] Clamp the reasoning-effort string for
-     * model families whose backend only accepts low/medium/high and 400/422 on
-     * our `xhigh` tier: MiMo-2.5/Pro and Agnes. For these, `xhigh` → `high`;
-     * every other value passes through untouched, and every other model is
-     * unaffected. Applied at the single point where each branch would emit an
-     * effort string (Chat Completions reasoning_effort / reasoning.effort AND
-     * the Responses API reasoning.effort) so no branch can leak a raw xhigh.
-     * lowercase-contains match, mirroring the T-reasoning-effort-fallback keys.
-     */
-    private fun clampEffortForModel(effort: String): String {
-        val lid = model.id.lowercase()
-        // [T-fallback-thinking-preclamp] Match the FAMILY substring, not one
-        // spelling: catalog docs say "MiMo-2.5" but the live API returns
-        // "mimo-v2.5" / "mimo-v2.5-pro", which the old "mimo-2.5" match missed
-        // (mirrors iOS 72968c4f).
-        return if (effort == "xhigh" && (lid.contains("mimo") || lid.contains("agnes"))) "high" else effort
-    }
-
-    private fun injectThinkingParams(body: JSONObject, level: ThinkingLevel, maxTokens: Int) {
-        // [T-android-thinking-level-arch] `level` is already clamped to the model
-        // ceiling by LLMProvider.streamMessage/sendMessage — do NOT re-clamp.
-        val lid = model.id.lowercase()
-
+    private fun injectThinkingParams(body: JSONObject, level: ThinkingLevel) {
+        if (requestCustomization?.disablesBuiltInThinkingInjection == true) return
+        if (model.supportsReasoning != true) return
+        if (level == ThinkingLevel.ULTRA) return
+        val effort = mapThinkingLevelToResponsesEffort(level) ?: return
         if (isOpenRouter) {
-            if (!level.isEnabled) return
-            val effort = clampEffortForModel(when (level) {
-                ThinkingLevel.LOW -> "low"
-                ThinkingLevel.MEDIUM -> "medium"
-                ThinkingLevel.HIGH -> "high"
-                ThinkingLevel.XHIGH -> "xhigh"
-                // [T-android-thinking-level-arch] MAX → "max". ULTRA is a
-                // client-side "Max + orchestration" concept, never a valid
-                // server effort — clamp it to "max" on the wire (mirrors iOS
-                // reasoningEffort case .max, .ultra: "max").
-                ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "max"
-                ThinkingLevel.OFF -> return
-            })
             body.put("reasoning", JSONObject().put("effort", effort))
-            return
-        }
-
-        // DeepSeek V4 — explicit thinking toggle required (mirrors iOS
-        // OpenAIAgentProvider.injectThinkingParams). High/xhigh map to
-        // "max", everything else lands on "high".
-        // [T-unified-reasoning-effort] On Volcengine Ark / Azure, deepseek-v4
-        // is controlled by the platform's uniform `reasoning_effort` field, NOT
-        // the vendor-native `thinking:{}` object — sending the latter leaves
-        // thinking uncontrolled. Skip this branch there and fall through to the
-        // generic reasoning_effort path below (mirrors iOS ba055121).
-        if (lid.contains("deepseek-v4") && !usesUnifiedReasoningEffort) {
-            if (level.isEnabled) {
-                val effort = when (level) {
-                    // [T-android-thinking-level-arch] DeepSeek V4 tops out at
-                    // "max"; every high-and-above tier collapses onto it.
-                    ThinkingLevel.HIGH, ThinkingLevel.XHIGH,
-                    ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "max"
-                    else -> "high"
-                }
-                body.put("thinking", JSONObject().apply {
-                    put("type", "enabled")
-                    put("reasoning_effort", effort)
-                })
-                com.openminis.app.logging.AppLogger.info(
-                    "OpenAIProvider",
-                    "DeepSeek V4 thinking enabled (level=${level.name} → effort=$effort) on $lid"
-                )
-            } else {
-                body.put("thinking", JSONObject().put("type", "disabled"))
-                com.openminis.app.logging.AppLogger.info(
-                    "OpenAIProvider",
-                    "DeepSeek V4 thinking disabled on $lid"
-                )
-            }
-            return
-        }
-
-        // [T-thinking-off-explicit] Thinking OFF on a reasoning-capable model:
-        // send the ALLOWLISTED explicit off tier instead of omitting the field —
-        // omission lets the vendor default kick in (Ark defaults to thinking ON).
-        // Vendors outside the allowlist keep the historical omission. MiMo/Agnes
-        // are exempt as defense in depth: their backends validate
-        // reasoning_effort against a STRICT low/medium/high enum and reject the
-        // whole request on "none"/"minimal" (mirrors iOS ff60c818 + c5efeb1e).
-        if (!level.isEnabled) {
-            val offEffort = explicitOffEffort() ?: return
-            if (lid.contains("mimo") || lid.contains("agnes")) return
-            when {
-                lid.startsWith("o") || lid.startsWith("gpt-5") ->
-                    body.put("reasoning_effort", offEffort)
-                // Qwen/DashScope keep their native enable_thinking mechanism —
-                // never route them through reasoning_effort.
-                lid.contains("qwen") || isDashScope -> return
-                lid.contains("deepseek") || lid.contains("glm") ||
-                    lid.contains("kimi") || lid.contains("minimax") -> {
-                    // Native self-reasoning families: only the unified-effort
-                    // gateways (Ark/Azure) understand an off tier for them.
-                    if (usesUnifiedReasoningEffort) body.put("reasoning_effort", offEffort)
-                }
-                model.supportsReasoning != false ->
-                    body.put("reasoning_effort", offEffort)
-            }
-            return
-        }
-
-        // [T-android-xhigh-effort-clamp] Clamp once here so BOTH the o-series/
-        // gpt-5 branch and the generic reasoning_effort fallback below emit a
-        // backend-accepted value for MiMo/Agnes (xhigh → high).
-        val effortStr = clampEffortForModel(when (level) {
-            ThinkingLevel.LOW -> "low"
-            ThinkingLevel.MEDIUM -> "medium"
-            ThinkingLevel.HIGH -> "high"
-            ThinkingLevel.XHIGH -> "xhigh"
-            // [T-android-thinking-level-arch] MAX → "max"; ULTRA also → "max"
-            // (ultra is client-side only, never a valid server effort).
-            ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "max"
-            ThinkingLevel.OFF -> return
-        })
-
-        when {
-            lid.startsWith("o") || lid.startsWith("gpt-5") -> {
-                body.put("reasoning_effort", effortStr)
-            }
-            lid.contains("qwen") || isDashScope -> {
-                var budget = when (level) {
-                    ThinkingLevel.LOW -> 4096
-                    ThinkingLevel.MEDIUM -> 16384
-                    ThinkingLevel.HIGH -> 32768
-                    ThinkingLevel.XHIGH -> 65536
-                    // [T-android-thinking-level-arch] Budget mode is "higher is
-                    // better, capped to maxTokens" — MAX/ULTRA reuse the ceiling.
-                    ThinkingLevel.MAX -> 65536
-                    ThinkingLevel.ULTRA -> 65536
-                    ThinkingLevel.OFF -> 0
-                }
-                // [T-android-qwen3-thinking-budget-max-tokens-constraint] (issue #35, #641)
-                // DashScope/Bailian enforces a STRICT `thinking_budget <
-                // max_completion_tokens` and 400s otherwise — equal values are
-                // rejected too ("[16384] must be greater than [16384]"). Our
-                // budget ladder is independent of maxTokens, so xhigh=65536 vs a
-                // 64000 max, or medium=16384 vs a 16384 max, both violate it.
-                // Clamp strictly below max_completion_tokens (== maxTokens) with a
-                // margin for the answer after thinking. The margin and ceiling are
-                // computed relative to maxTokens (which varies per qwen model —
-                // 64000, 16384, …), never a hardcoded threshold, and the ceiling
-                // is forced to at least maxTokens-1 so a tiny maxTokens can't leave
-                // the budget >= max. maxTokens<=0 means "not provided" (e.g. the
-                // title-gen reference) — skip the clamp then. Mirrors iOS #640.
-                if (budget > 0 && maxTokens > 0) {
-                    val margin = maxOf(2048, maxTokens / 8)
-                    // Stay strictly below max; never let the ceiling collapse to
-                    // <=0 when maxTokens is small — fall back to maxTokens-1.
-                    val ceiling = maxOf(1, minOf(maxTokens - margin, maxTokens - 1))
-                    if (budget >= ceiling) {
-                        budget = ceiling
-                    }
-                }
-                body.put("enable_thinking", true)
-                if (budget > 0) body.put("thinking_budget", budget)
-                body.put("extra_body", JSONObject().apply {
-                    put("enable_thinking", true)
-                    if (budget > 0) put("thinking_budget", budget)
-                })
-            }
-            // DeepSeek, GLM, Kimi, MiniMax — no params needed, model always reasons.
-            // [T-unified-reasoning-effort] EXCEPTION: on Volcengine Ark / Azure
-            // these families are re-hosted behind a uniform OpenAI surface that
-            // controls thinking ONLY via `reasoning_effort` — omitting it there
-            // means the gateway applies its own default and the user's level is
-            // ignored. Fall through to the generic reasoning_effort branch below
-            // in that case; keep the native skip for direct vendor endpoints.
-            (lid.contains("deepseek") || lid.contains("glm") ||
-                lid.contains("kimi") || lid.contains("minimax")) &&
-                !usesUnifiedReasoningEffort -> {}
-            // [T-reasoning-effort-fallback] Generic fallback for OpenAI-compatible
-            // third-party reasoning models whose IDs match none of the branches
-            // above (e.g. Volcano/Ark "seed" models): inject the standard Chat
-            // Completions `reasoning_effort` field (mirrors iOS
-            // OpenAIAgentProvider.injectThinkingParams). Tri-state
-            // supportsReasoning: only a hard `false` blocks injection — null
-            // (unknown) lets the user enable thinking in the UI, so the request
-            // must honor that here too. OFF already returned via effortStr above.
-            model.supportsReasoning != false -> {
-                body.put("reasoning_effort", effortStr)
-            }
+        } else {
+            body.put("reasoning_effort", effort)
         }
     }
 
@@ -2428,31 +2272,37 @@ class OpenAIProvider private constructor(
         // guard it here as well — only xhigh for those two families is affected.
         // [T-android-thinking-level-arch] `thinkingLevel` is already clamped by
         // LLMProvider.streamMessage/sendMessage before reaching here.
-        val effort = if (thinkingLevel.isEnabled) {
-            mapThinkingLevelToResponsesEffort(thinkingLevel)?.let { clampEffortForModel(it) }
+        val customizationDisablesThinking =
+            requestCustomization
+                ?.disablesBuiltInThinkingInjection == true
+        if (!customizationDisablesThinking &&
+            model.supportsReasoning == true &&
+            thinkingLevel == ThinkingLevel.OFF
+        ) {
+            body.put(
+                "reasoning",
+                JSONObject().put("effort", "none"),
+            )
+        }
+        val effort = if (!customizationDisablesThinking &&
+            model.supportsReasoning == true &&
+            thinkingLevel.isEnabled &&
+            thinkingLevel != ThinkingLevel.ULTRA
+        ) {
+            mapThinkingLevelToResponsesEffort(thinkingLevel)
         } else null
         when {
             effort != null -> body.put(
                 "reasoning",
                 JSONObject().put("effort", effort).put("summary", "auto"),
             )
-            isOAuth -> body.put(
+            !customizationDisablesThinking &&
+                thinkingLevel != ThinkingLevel.OFF &&
+                thinkingLevel != ThinkingLevel.ULTRA &&
+                isOAuth -> body.put(
                 "reasoning",
                 JSONObject().put("effort", "low").put("summary", "auto"),
             )
-            // [T-thinking-off-explicit] Thinking OFF on a reasoning-capable
-            // model: send the explicit off tier instead of omitting `reasoning`
-            // — omission lets the vendor default kick in. Same ALLOWLIST as the
-            // Chat path (official OpenAI → "none", Volcano Ark → "minimal");
-            // vendors with undocumented off semantics keep the historical
-            // omission. No summary/include: nothing should stream back.
-            // Mirrors iOS OpenAIAgentProvider ff60c818's Responses off branch.
-            !thinkingLevel.isEnabled && model.supportsReasoning == true &&
-                !model.id.lowercase().let { it.contains("mimo") || it.contains("agnes") } -> {
-                explicitOffEffort()?.let { offEffort ->
-                    body.put("reasoning", JSONObject().put("effort", offEffort))
-                }
-            }
         }
 
         // [T-responses-max-output-tokens] The builder received maxTokens but
@@ -2726,19 +2576,17 @@ class OpenAIProvider private constructor(
     /**
      * Map ThinkingLevel → Responses API `reasoning.effort` string. Mirrors
      * iOS reasoningEffort(for:level:) (OpenAIAgentProvider.swift:531).
-     * Returns null when the level is OFF — caller decides whether to omit
-     * the `reasoning` field entirely or fall back to "low" (Codex requires it).
+     * OFF maps to OpenAI's protocol-level `none` wire value.
      */
     private fun mapThinkingLevelToResponsesEffort(level: ThinkingLevel): String? = when (level) {
-        ThinkingLevel.OFF -> null
+        ThinkingLevel.OFF -> "none"
+        ThinkingLevel.MINIMAL -> "minimal"
         ThinkingLevel.LOW -> "low"
         ThinkingLevel.MEDIUM -> "medium"
         ThinkingLevel.HIGH -> "high"
         ThinkingLevel.XHIGH -> "xhigh"
-        // [T-android-thinking-level-arch] MAX → "max"; ULTRA also → "max" —
-        // the Responses/Codex endpoint rejects a literal "ultra"; ultra is a
-        // client-side "Max + orchestration" concept only (mirrors iOS).
-        ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "max"
+        ThinkingLevel.MAX -> "max"
+        ThinkingLevel.ULTRA -> null
     }
 
     /**

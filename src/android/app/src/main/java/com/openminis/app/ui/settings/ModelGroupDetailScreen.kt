@@ -51,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -59,8 +60,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
 import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.RoutingStrategy
+import com.openminis.app.data.model.RequestBodyControl
 import com.openminis.app.data.model.ThinkingLevel
-import com.openminis.app.provider.effectiveMaxThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.R
 import kotlinx.coroutines.launch
@@ -70,6 +72,7 @@ import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.ui.components.SectionTextField
+import com.openminis.app.ui.chat.localizedName
 import kotlin.math.roundToInt
 
 /**
@@ -103,6 +106,7 @@ fun ModelGroupDetailScreen(
     var name by remember { mutableStateOf(group.name) }
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     var strategy by remember { mutableStateOf(group.strategy) }
     var fallbackStrategy by remember { mutableStateOf(group.fallbackStrategy) }
@@ -111,8 +115,10 @@ fun ModelGroupDetailScreen(
     // values. Using `group` as key would also re-fire on every config
     // refresh (since `group` is recomputed from the StateFlow each
     // recomposition); id-keyed remember is the stable alternative.
-    var defaultThinkingLevel by remember(group.id) {
-        mutableStateOf(group.defaultThinkingLevel)
+    var defaultThinkingDefinitionId by remember(group.id) {
+        mutableStateOf(
+            group.defaultThinkingDefinitionId,
+        )
     }
     var contextLimitTokens by remember(group.id) {
         mutableStateOf(group.contextLimitTokens)
@@ -387,16 +393,31 @@ fun ModelGroupDetailScreen(
                     header = stringResource(R.string.model_group_detail_session_defaults),
                     footer = stringResource(R.string.model_group_detail_session_defaults_footer),
                 ) {
-                    val reasoningEnabled = defaultThinkingLevel != null
+                    val reasoningEnabled =
+                        defaultThinkingDefinitionId != null &&
+                            defaultThinkingDefinitionId !=
+                            ThinkingLevelRegistry.offDefinitionId
                     SettingsSwitchRow(
                         title = stringResource(R.string.model_group_detail_enable_reasoning),
                         checked = reasoningEnabled,
                         onCheckedChange = { on ->
                             // iOS parity: ON defaults to MEDIUM, OFF clears to null.
-                            val newLevel = if (on) ThinkingLevel.MEDIUM else null
-                            defaultThinkingLevel = newLevel
+                            val newDefinitionId = if (on) {
+                                ThinkingLevelRegistry
+                                    .definitionForLevelId(
+                                        "medium",
+                                        context,
+                                    )?.definitionId
+                            } else {
+                                null
+                            }
+                            defaultThinkingDefinitionId =
+                                newDefinitionId
                             providerRepository.updateGroup(
-                                group.copy(defaultThinkingLevel = newLevel)
+                                group.copy(
+                                    defaultThinkingDefinitionId =
+                                        newDefinitionId,
+                                ),
                             )
                         },
                         icon = Icons.Default.Psychology,
@@ -404,48 +425,60 @@ fun ModelGroupDetailScreen(
                         showDivider = reasoningEnabled,
                     )
                     if (reasoningEnabled) {
-                        // [T-android-thinking-level-arch] The group's thinking
-                        // CEILING is the HIGHEST level any reasoning-capable
-                        // member supports — max(), not min() (mirrors iOS
-                        // e51fef5d/53388728). min() was wrong twice:
-                        //   1. A non-reasoning member (e.g. an image model with
-                        //      effectiveMaxThinkingLevel == OFF) dragged the
-                        //      ceiling to OFF and emptied the Intensity picker,
-                        //      leaving "Enable Reasoning" on with no selector.
-                        //   2. Even among reasoning members it capped the group at
-                        //      the WEAKEST model — a group of [Opus MAX, a HIGH
-                        //      model] would only offer up to High, hiding the tiers
-                        //      Opus supports.
-                        // The per-request clamp (provider layer) still caps to the
-                        // ACTUAL model at send time, so offering the true ceiling
-                        // here is safe. Exclude OFF; fall back to XHIGH when no
-                        // member reasons (only reached with reasoning enabled).
-                        val groupMaxThinkingLevel = remember(group.memberEntryIds, config.modelEntries) {
+                        // The group offers the union of each member's built-in
+                        // catalog options or exact custom thinking-control
+                        // options. Per-model resolution happens before sending.
+                        val thinkingDefinitions = ThinkingLevelRegistry.definitions(context)
+                        val groupMaxThinkingRank = remember(
+                            group.memberEntryIds,
+                            config.modelEntries,
+                            thinkingDefinitions,
+                        ) {
                             group.memberEntryIds
                                 .mapNotNull { entryId ->
-                                    config.modelEntries.find { it.id == entryId }
-                                        ?.effectiveMaxThinkingLevel
+                                    val entry = config.modelEntries.find { it.id == entryId }
+                                        ?: return@mapNotNull null
+                                    val semanticControl = entry.overrides.requestBodyControls
+                                        .firstOrNull {
+                                            it.isEnabled &&
+                                                it.semanticKind ==
+                                                RequestBodyControl.SemanticKind.thinkingBudget
+                                        }
+                                    semanticControl
+                                        ?.options
+                                        ?.mapNotNull { option ->
+                                            ThinkingLevelRegistry.rank(
+                                                option.thinkingDefinitionId,
+                                                context,
+                                            )
+                                                .takeUnless { it == Int.MAX_VALUE }
+                                        }
+                                        ?.maxOrNull()
+                                        ?: run {
+                                            ThinkingLevel.availableLevels(
+                                                entry.model,
+                                            ).mapNotNull { level ->
+                                                ThinkingLevelRegistry
+                                                    .definitionForLevelId(
+                                                        level.name.lowercase(),
+                                                        context,
+                                                    )?.rank
+                                            }.maxOrNull()
+                                        }
                                 }
-                                .filter { it != ThinkingLevel.OFF }
-                                .maxByOrNull { it.rank }
-                                ?: ThinkingLevel.XHIGH
+                                .maxOrNull()
+                                ?: ThinkingLevelRegistry
+                                    .definitionForLevelId(
+                                        "xhigh",
+                                        context,
+                                    )?.rank
+                                ?: Int.MAX_VALUE
                         }
-                        val labelFor: @Composable (ThinkingLevel) -> String = { level ->
-                            when (level) {
-                                ThinkingLevel.LOW -> stringResource(R.string.model_group_detail_thinking_low)
-                                ThinkingLevel.MEDIUM -> stringResource(R.string.model_group_detail_thinking_medium)
-                                ThinkingLevel.HIGH -> stringResource(R.string.model_group_detail_thinking_high)
-                                ThinkingLevel.XHIGH -> stringResource(R.string.model_group_detail_thinking_xhigh)
-                                ThinkingLevel.MAX -> stringResource(R.string.model_group_detail_thinking_max)
-                                ThinkingLevel.ULTRA -> stringResource(R.string.model_group_detail_thinking_ultra)
-                                ThinkingLevel.OFF -> stringResource(R.string.model_group_detail_thinking_low)
-                            }
+                        val cases = thinkingDefinitions.filter {
+                            it.definitionId !=
+                                ThinkingLevelRegistry.offDefinitionId &&
+                                it.rank <= groupMaxThinkingRank
                         }
-                        // Steps exclude OFF (the toggle above carries OFF
-                        // semantics) and everything above the group ceiling.
-                        val cases = ThinkingLevel.entries
-                            .filter { it != ThinkingLevel.OFF && it.rank <= groupMaxThinkingLevel.rank }
-                            .map { it to labelFor(it) }
                         SettingsCardBlock {
                             Text(
                                 text = stringResource(R.string.model_group_detail_intensity),
@@ -456,13 +489,27 @@ fun ModelGroupDetailScreen(
                             SingleChoiceSegmentedButtonRow(
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                cases.forEachIndexed { idx, (level, label) ->
+                                cases.forEachIndexed { idx, definition ->
+                                    val label = if (definition.isBuiltIn) {
+                                        ThinkingLevelRegistry.nativeLevel(
+                                            definition.definitionId,
+                                        )
+                                            .localizedName(context)
+                                    } else {
+                                        definition.title
+                                    }
                                     SegmentedButton(
-                                        selected = defaultThinkingLevel == level,
+                                        selected =
+                                            defaultThinkingDefinitionId ==
+                                                definition.definitionId,
                                         onClick = {
-                                            defaultThinkingLevel = level
+                                            defaultThinkingDefinitionId =
+                                                definition.definitionId
                                             providerRepository.updateGroup(
-                                                group.copy(defaultThinkingLevel = level)
+                                                group.copy(
+                                                    defaultThinkingDefinitionId =
+                                                        definition.definitionId,
+                                                ),
                                             )
                                         },
                                         shape = SegmentedButtonDefaults.itemShape(

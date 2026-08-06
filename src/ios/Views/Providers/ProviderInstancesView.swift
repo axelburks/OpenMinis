@@ -7,6 +7,7 @@ struct ProviderInstancesView: View {
     @ObservedObject private var store = ProviderConfigStore.shared
     @State private var showAddProvider = false
     @State private var showImportFile = false
+    @State private var showThinkingLevels = false
     @State private var importMessage: String?
     @State private var showImportResult = false
     @State private var forceSyncToast: String?
@@ -103,6 +104,14 @@ struct ProviderInstancesView: View {
                     } label: {
                         Label(String(localized: "Import Provider"), systemImage: "square.and.arrow.down")
                     }
+                    Button {
+                        showThinkingLevels = true
+                    } label: {
+                        Label(
+                            String(localized: "Manage Thinking Levels"),
+                            systemImage: "slider.horizontal.3"
+                        )
+                    }
                     if #available(iOS 17.0, *), iCloudSyncEnabled {
                         Divider()
                         Button {
@@ -121,6 +130,9 @@ struct ProviderInstancesView: View {
             NavigationStack {
                 AddProviderView()
             }
+        }
+        .sheet(isPresented: $showThinkingLevels) {
+            ThinkingLevelsManagerSheet()
         }
         .fileImporter(isPresented: $showImportFile, allowedContentTypes: [.json]) { result in
             switch result {

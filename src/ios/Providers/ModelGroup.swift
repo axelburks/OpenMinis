@@ -27,8 +27,28 @@ struct ModelGroup: Identifiable, Codable, Hashable {
     var strategy: RoutingStrategy
     /// Controls which errors trigger fallback. Only applies when `strategy == .fallback`.
     var fallbackStrategy: FallbackStrategy
-    /// Default thinking level applied to new sessions bound to this group. nil = off (no override).
-    var defaultThinkingLevel: ThinkingLevel?
+    /// Immutable App-level definition ID applied to new sessions bound to
+    /// this group. nil means the group does not override the session.
+    var defaultThinkingDefinitionId: String?
+    /// Native convenience for call sites that intentionally work only with
+    /// built-in levels. Persistence and request routing use the semantic ID.
+    var defaultThinkingLevel: ThinkingLevel? {
+        get {
+            defaultThinkingDefinitionId.map {
+                ThinkingLevelRegistry.nativeLevel(
+                    forDefinitionId: $0
+                )
+            }
+        }
+        set {
+            defaultThinkingDefinitionId =
+                newValue.flatMap {
+                    ThinkingLevelRegistry.definition(
+                        forLevelId: $0.rawValue
+                    )?.definitionId
+                }
+        }
+    }
     /// Context window limit override in tokens applied in-memory to sessions bound to this group.
     /// nil = unlimited (use model's native context window).
     var contextLimitTokens: Int?
@@ -58,7 +78,7 @@ struct ModelGroup: Identifiable, Codable, Hashable {
         memberEntryIds: [String],
         strategy: RoutingStrategy = .fallback,
         fallbackStrategy: FallbackStrategy = .limited,
-        defaultThinkingLevel: ThinkingLevel? = nil,
+        defaultThinkingDefinitionId: String? = nil,
         contextLimitTokens: Int? = nil,
         lastContextLimitTokens: Int? = nil,
         addedMembers: [String: Date] = [:],
@@ -69,7 +89,8 @@ struct ModelGroup: Identifiable, Codable, Hashable {
         self.memberEntryIds = memberEntryIds
         self.strategy = strategy
         self.fallbackStrategy = fallbackStrategy
-        self.defaultThinkingLevel = defaultThinkingLevel
+        self.defaultThinkingDefinitionId =
+            defaultThinkingDefinitionId
         self.contextLimitTokens = contextLimitTokens
         self.lastContextLimitTokens = lastContextLimitTokens
         self.addedMembers = addedMembers
@@ -77,7 +98,9 @@ struct ModelGroup: Identifiable, Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, memberEntryIds, strategy, fallbackStrategy, defaultThinkingLevel, contextLimitTokens, lastContextLimitTokens, addedMembers, removedMembers
+        case id, name, memberEntryIds, strategy, fallbackStrategy
+        case defaultThinkingDefinitionId
+        case contextLimitTokens, lastContextLimitTokens, addedMembers, removedMembers
     }
 
     init(from decoder: Decoder) throws {
@@ -87,11 +110,12 @@ struct ModelGroup: Identifiable, Codable, Hashable {
         memberEntryIds = try container.decode([String].self, forKey: .memberEntryIds)
         strategy = try container.decode(RoutingStrategy.self, forKey: .strategy)
         fallbackStrategy = try container.decodeIfPresent(FallbackStrategy.self, forKey: .fallbackStrategy) ?? .limited
-        if let raw = try container.decodeIfPresent(String.self, forKey: .defaultThinkingLevel) {
-            defaultThinkingLevel = ThinkingLevel.decoded(raw)
-        } else {
-            defaultThinkingLevel = nil
-        }
+        defaultThinkingDefinitionId = try container
+            .decodeIfPresent(
+                String.self,
+                forKey:
+                    .defaultThinkingDefinitionId
+            )
         contextLimitTokens = try container.decodeIfPresent(Int.self, forKey: .contextLimitTokens)
         lastContextLimitTokens = try container.decodeIfPresent(Int.self, forKey: .lastContextLimitTokens)
         addedMembers = try container.decodeIfPresent([String: Date].self, forKey: .addedMembers) ?? [:]

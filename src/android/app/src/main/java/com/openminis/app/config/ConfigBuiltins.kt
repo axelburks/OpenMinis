@@ -18,7 +18,7 @@ import com.openminis.app.config.fields.ReadOnlyField
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.data.repository.ProviderRepository
-import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.ui.chat.ChatViewModelStore
 import kotlinx.coroutines.runBlocking
 import java.text.SimpleDateFormat
@@ -118,10 +118,8 @@ internal object ConfigBuiltins {
             ClosureField(
                 path = "session.thinkingLevel",
                 displayName = "Thinking level (current session)",
-                description = "off / low / medium / high / xhigh. Applied to the active chat.",
-                valueSchema = ConfigSchema.StrEnum(
-                    listOf("off", "low", "medium", "high", "xhigh")
-                ),
+                description = "Semantic app-level thinking level ID applied to the active chat.",
+                valueSchema = ConfigSchema.Str(maxLength = 100),
                 risk = ConfigRisk.NORMAL,
                 revertable = true,
                 reader = {
@@ -129,21 +127,35 @@ internal object ConfigBuiltins {
                     if (sid == null) ConfigValue.Null
                     else {
                         val session = runBlocking { chatRepo.dao.getSession(sid) }
-                        val raw = session?.thinkingOverride
-                        val token = if (raw == null) "off" else thinkingLevelToToken(
-                            runCatching { ThinkingLevel.valueOf(raw) }.getOrDefault(ThinkingLevel.OFF)
+                        val definitionId =
+                            session?.thinkingOverride
+                                ?: "auto"
+                        ConfigValue.Str(
+                            ThinkingLevelRegistry
+                                .definition(
+                                    definitionId,
+                                )?.levelId
+                                ?: "auto",
                         )
-                        ConfigValue.Str(token)
                     }
                 },
                 writer = { v ->
                     val token = (v as? ConfigValue.Str)?.value
                         ?: throw ConfigError.TypeMismatch("string")
-                    val level = thinkingLevelFromToken(token)
-                        ?: throw ConfigError.InvalidValue("Unknown thinking level: $token")
+                    val definition =
+                        ThinkingLevelRegistry
+                            .definitionForLevelId(token)
+                            ?: throw ConfigError.InvalidValue(
+                                "Unknown thinking level ID",
+                            )
                     val sid = ChatViewModelStore.activeSessionId
                         ?: throw ConfigError.InvalidValue("No active session — open a chat first")
-                    runBlocking { chatRepo.dao.updateThinkingOverride(sid, level.name) }
+                    runBlocking {
+                        chatRepo.dao.updateThinkingOverride(
+                            sid,
+                            definition.definitionId,
+                        )
+                    }
                 },
             )
         )
@@ -212,30 +224,6 @@ internal object ConfigBuiltins {
         // `subModelSource` field in `model_binding` JSON, no agent-loop
         // fallback path). Reported up at the spec level rather than
         // adding a no-op key that silently throws on every write.
-    }
-
-    /** iOS uses lowercase tokens (`off`/`low`/…); Android `ThinkingLevel.name`
-     *  is uppercase. Centralised so reader/writer round-trip identical strings. */
-    private fun thinkingLevelToToken(level: ThinkingLevel): String = when (level) {
-        ThinkingLevel.OFF -> "off"
-        ThinkingLevel.LOW -> "low"
-        ThinkingLevel.MEDIUM -> "medium"
-        ThinkingLevel.HIGH -> "high"
-        ThinkingLevel.XHIGH -> "xhigh"
-        // [T-android-thinking-level-arch] GPT-5.6 higher tiers.
-        ThinkingLevel.MAX -> "max"
-        ThinkingLevel.ULTRA -> "ultra"
-    }
-
-    private fun thinkingLevelFromToken(token: String): ThinkingLevel? = when (token) {
-        "off" -> ThinkingLevel.OFF
-        "low" -> ThinkingLevel.LOW
-        "medium" -> ThinkingLevel.MEDIUM
-        "high" -> ThinkingLevel.HIGH
-        "xhigh" -> ThinkingLevel.XHIGH
-        "max" -> ThinkingLevel.MAX
-        "ultra" -> ThinkingLevel.ULTRA
-        else -> null
     }
 
     /** Convert the `model_binding` JSON the chat layer writes into the

@@ -271,7 +271,7 @@ class ModelUseOffloadHandler(
             )
         val instance = providerRepository.instance(entry.providerInstanceId)
             ?: return NativeOffloadResult(2, "minis-model-use run: provider instance not found\n")
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, context)
+        val provider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
 
         // [GH#67] input_audio serialization is implemented for the OpenAI
         // chat/completions + responses paths only. Other provider types would

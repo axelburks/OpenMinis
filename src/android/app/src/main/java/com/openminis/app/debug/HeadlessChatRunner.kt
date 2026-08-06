@@ -3,7 +3,6 @@ package com.openminis.app.debug
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import com.openminis.app.MinisApp
-import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.ui.chat.ChatViewModel
 import com.openminis.app.ui.chat.ChatViewModelStore
 import com.openminis.app.ui.chat.InputAttachment
@@ -155,30 +154,29 @@ internal object HeadlessChatRunner {
         sessionId: String,
         text: String,
         attachments: List<InputAttachment> = emptyList(),
-        thinkingLevel: ThinkingLevel? = null,
+        thinkingDefinitionId: String? = null,
         wait: Boolean,
         timeoutMs: Long,
     ): PromptResult = withContext(Dispatchers.Main) {
         val vm = viewModel(context, sessionId)
-        // Apply per-call thinking override BEFORE sendMessage so streamMessage
-        // picks up the new level. Caller passes null to keep the VM's existing
-        // setting (default OFF for a fresh VM, last user-set value otherwise).
+        // Apply per-call thinking override before sendMessage. Caller passes
+        // null to keep the VM's existing setting.
         //
-        // ChatViewModel.setThinkingLevel silently no-ops when the active model
-        // hasn't resolved yet (currentModelSupportsReasoning checks
+        // ChatViewModel.setThinkingDefinitionId silently no-ops when the active
+        // model hasn't resolved yet (currentModelSupportsReasoning checks
         // `currentModel?.supportsReasoning == true`, and `currentModel` is
         // populated on a viewModelScope coroutine). For a freshly-created VM
         // bound to a new session, the resolver may not have run by the time we
         // reach this line — wait until activeEntryId flips non-null so the
         // override actually applies.
-        if (thinkingLevel != null) {
+        if (thinkingDefinitionId != null) {
             // Wait off Main: ChatViewModel's init coroutine runs on viewModelScope
             // (Main.immediate), and Flow.first() suspends the calling dispatcher
             // until the value arrives. If we wait on Main here we deadlock — the
             // VM's loadSession() never gets to populate _activeEntryId. Hop to
-            // Default for the wait, then come back to Main for setThinkingLevel.
-            // setThinkingLevel itself silently no-ops on a model that doesn't
-            // support reasoning — that gating is intentional UI parity, the
+            // Default for the wait, then come back to Main to set the definition.
+            // The setter silently no-ops on a model that doesn't support
+            // reasoning; that gating is intentional UI parity. The
             // 3 s ceiling here just keeps us from blocking forever if the VM
             // never resolves a model (no provider configured, etc.).
             withContext(Dispatchers.Default) {
@@ -186,7 +184,7 @@ internal object HeadlessChatRunner {
                     vm.activeEntryId.first { it != null }
                 }
             }
-            vm.setThinkingLevel(thinkingLevel)
+            vm.setThinkingDefinitionId(thinkingDefinitionId)
         }
         // Wait for ChatViewModel.currentProvider to resolve before sendMessage.
         // The VM populates currentProvider on a viewModelScope (Main.immediate)

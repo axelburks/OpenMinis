@@ -770,6 +770,12 @@ extension AIChatViewModel {
         // sticks to the user-visible model). Otherwise fall back to the
         // group's normal resolve (first available member).
         ensureSessionBindingFromDefaults(sessionId: sessionId)
+        if let entry = resolveCurrentEntry() {
+            activateRuntime(
+                for: entry,
+                sessionKey: sessionId
+            )
+        }
 
         // Detect interrupted agent loop:
         // Case A: last history entry is user with all toolResult parts → tools completed, next model call never happened
@@ -948,6 +954,12 @@ extension AIChatViewModel {
         }
         let model = selectedModel
         let session = await ChatStore.shared.createSession(modelId: model.id, source: sessionSource)
+        if let draftId {
+            RequestBodyControlRuntimeStore.migrate(
+                fromSessionKey: draftId,
+                toSessionKey: session.id
+            )
+        }
         sessionId = session.id
         Self.activeSessionId = session.id
         // [T-memory-enabled-new-session-bug] Sync the @Published memoryEnabled
@@ -1070,6 +1082,12 @@ extension AIChatViewModel {
         )
         store.setBinding(binding, for: sessionId)
         applyGroupSessionDefaults(group: group, sessionId: sessionId)
+        if let entry = store.entry(for: entryId) {
+            activateRuntime(
+                for: entry,
+                sessionKey: sessionId
+            )
+        }
         logger.info("🔀ENSURE binding created for synced session=\(sessionId): group=\(groupId) entry=\(entryId) (cachedModelId=\(self.cachedSessionModelId))")
     }
 
@@ -1137,6 +1155,10 @@ extension AIChatViewModel {
 
             // Fix session model_id to match the actually resolved model (not the hardcoded default)
             if let entry = store.entry(for: entryId) {
+                activateRuntime(
+                    for: entry,
+                    sessionKey: sessionId
+                )
                 Task { await ChatStore.shared.updateSessionModelId(sessionId, modelId: entry.model.id) }
                 let tierTag = overrideGroupId != nil ? "tier=0 longpress-group" : "tier=1 default-group"
                 logger.info("[NewSessionDefault] \(tierTag) sid=\(sessionId.prefix(8)) groupId=\(groupId.prefix(8)) entry=\(entryId.prefix(8)) modelId=\(entry.model.id)")
@@ -1160,6 +1182,10 @@ extension AIChatViewModel {
                 subModelSource: nil
             )
             store.setBinding(binding, for: sessionId)
+            activateRuntime(
+                for: entry,
+                sessionKey: sessionId
+            )
             Task { await ChatStore.shared.updateSessionModelId(sessionId, modelId: entry.model.id) }
             logger.info("[NewSessionDefault] tier=2 last-used sid=\(sessionId.prefix(8)) entry=\(entry.id.prefix(8)) modelId=\(entry.model.id) provider=\(entry.providerInstanceId.prefix(8))")
             return
@@ -1176,6 +1202,10 @@ extension AIChatViewModel {
                 subModelSource: nil
             )
             store.setBinding(binding, for: sessionId)
+            activateRuntime(
+                for: entry,
+                sessionKey: sessionId
+            )
             Task { await ChatStore.shared.updateSessionModelId(sessionId, modelId: entry.model.id) }
             logger.info("[NewSessionDefault] tier=3 latest-provider sid=\(sessionId.prefix(8)) entry=\(entry.id.prefix(8)) modelId=\(entry.model.id) provider=\(entry.providerInstanceId.prefix(8))")
             return
@@ -1279,9 +1309,12 @@ extension AIChatViewModel {
                                            preserveThinkingLevel: Bool = false) {
         let store = ProviderConfigStore.shared
         // Apply default thinking level (unless the user set one pre-send).
-        if !preserveThinkingLevel, let thinkLevel = group.defaultThinkingLevel {
+        if !preserveThinkingLevel,
+           let definitionId =
+            group.defaultThinkingDefinitionId {
             var cfg = store.inferenceConfig(for: sessionId) ?? SessionInferenceConfig()
-            cfg.thinkingLevel = thinkLevel
+            cfg.thinkingDefinitionId =
+                definitionId
             store.setInferenceConfig(cfg, for: sessionId)
         }
     }

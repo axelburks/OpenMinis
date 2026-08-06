@@ -17,7 +17,7 @@ data class ProviderModelGroupEntity(
     val name: String,
     val strategy: String,
     @ColumnInfo(name = "fallback_strategy") val fallbackStrategy: String,
-    @ColumnInfo(name = "default_thinking_level") val defaultThinkingLevel: String? = null,
+    @ColumnInfo(name = "default_thinking_level") val defaultThinkingDefinitionId: String? = null,
     @ColumnInfo(name = "context_limit_tokens") val contextLimitTokens: Int? = null,
     @ColumnInfo(name = "last_context_limit_tokens") val lastContextLimitTokens: Int? = null,
     @ColumnInfo(name = "member_entry_ids_json") val memberEntryIdsJson: String,

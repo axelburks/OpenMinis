@@ -1,7 +1,8 @@
 package com.openminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
@@ -11,6 +12,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -47,6 +49,7 @@ fun ModelEntryDetailScreen(
     instanceId: String,
     entryId: String,
     providerRepository: ProviderRepository,
+    onRequestCustomization: () -> Unit,
     onBack: () -> Unit,
 ) {
     val config by providerRepository.config.collectAsState()
@@ -65,7 +68,7 @@ fun ModelEntryDetailScreen(
     var displayName by remember { mutableStateOf(overrides.displayName ?: baseModel.displayName) }
     var maxOutputTokensText by remember { mutableStateOf(overrides.maxOutputTokens?.toString() ?: "") }
     var contextWindowText by remember { mutableStateOf(overrides.contextWindow?.toString() ?: "") }
-    var thinkingEnabled by remember {
+    var thinkingEnabled by remember(entryId) {
         mutableStateOf(overrides.supportsReasoning ?: baseModel.supportsReasoning ?: false)
     }
     var isHidden by remember { mutableStateOf(entry.isHidden) }
@@ -90,6 +93,86 @@ fun ModelEntryDetailScreen(
     var imageOutput by remember { mutableStateOf("image" in effectiveOutput) }
     var audioOutput by remember { mutableStateOf("audio" in effectiveOutput) }
 
+    fun pendingOverrides(): ModelOverrides {
+        val baseInputs = baseModel.inputModalities ?: emptyList()
+        val baseOutputs = baseModel.outputModalities ?: emptyList()
+        val newInputs = buildList {
+            if (imageInput) add("image")
+            if (pdfInput) add("pdf")
+            if (audioInput) add("audio")
+            if (videoInput) add("video")
+        }
+        val newOutputs = buildList {
+            if (imageOutput) add("image")
+            if (audioOutput) add("audio")
+        }
+        return overrides.copy(
+            displayName = displayName.trim()
+                .takeIf { it.isNotEmpty() && it != baseModel.displayName },
+            maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
+            contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
+            supportsReasoning = thinkingEnabled.takeIf {
+                it != (baseModel.supportsReasoning ?: false)
+            },
+            inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
+            outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
+        )
+    }
+
+    fun saveAndClose() {
+        val updated = if (entry.isCustom) {
+            entry.copy(
+                baseModel = baseModel.copy(id = modelId),
+                overrides = pendingOverrides(),
+                isHidden = isHidden,
+            )
+        } else {
+            entry.copy(overrides = pendingOverrides(), isHidden = isHidden)
+        }
+        providerRepository.updateEntry(updated)
+        onBack()
+    }
+
+    val hasUnsavedChanges =
+        pendingOverrides() != overrides ||
+            isHidden != entry.isHidden ||
+            (entry.isCustom && modelId != baseModel.id)
+    var showUnsavedChangesDialog by remember { mutableStateOf(false) }
+    val requestClose = {
+        if (hasUnsavedChanges) {
+            showUnsavedChangesDialog = true
+        } else {
+            onBack()
+        }
+    }
+
+    BackHandler(onBack = requestClose)
+
+    if (showUnsavedChangesDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showUnsavedChangesDialog = false },
+            title = { Text(stringResource(R.string.request_unsaved_title)) },
+            text = { Text(stringResource(R.string.request_unsaved_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = { saveAndClose() },
+                ) {
+                    Text(stringResource(R.string.common_save))
+                }
+            },
+            dismissButton = {
+                Column {
+                    TextButton(onClick = { onBack() }) {
+                        Text(stringResource(R.string.request_unsaved_discard))
+                    }
+                    TextButton(onClick = { showUnsavedChangesDialog = false }) {
+                        Text(stringResource(R.string.request_unsaved_continue))
+                    }
+                }
+            },
+        )
+    }
+
     SettingsScaffold(
         title = stringResource(R.string.model_entry_model_detail),
         // [T-android-modeldetail-savecancel-ios-parity] iOS modal pattern
@@ -102,7 +185,7 @@ fun ModelEntryDetailScreen(
         centerTitle = true,
         navigation = {
             MinisTextButton(
-                onClick = onBack,
+                onClick = requestClose,
                 modifier = Modifier.padding(start = 8.dp),
                 colors = ButtonDefaults.textButtonColors(
                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -111,39 +194,7 @@ fun ModelEntryDetailScreen(
         },
         actions = {
             MinisButton(
-                onClick = {
-                    val baseInputs = baseModel.inputModalities ?: emptyList()
-                    val baseOutputs = baseModel.outputModalities ?: emptyList()
-                    val newInputs = buildList {
-                        if (imageInput) add("image")
-                        if (pdfInput) add("pdf")
-                        if (audioInput) add("audio")
-                        if (videoInput) add("video")
-                    }
-                    val newOutputs = buildList {
-                        if (imageOutput) add("image")
-                        if (audioOutput) add("audio")
-                    }
-                    val newOverrides = ModelOverrides(
-                        displayName = displayName.trim().takeIf { it.isNotEmpty() && it != baseModel.displayName },
-                        maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
-                        contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
-                        // supportsReasoning: persist only when user diverged from base.
-                        supportsReasoning = thinkingEnabled.takeIf { it != (baseModel.supportsReasoning ?: false) },
-                        // Modality lists: persist only when user-edited set differs
-                        // from baseModel's set; otherwise leave null so the entry
-                        // tracks future provider updates to the base modalities.
-                        inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
-                        outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
-                    )
-                    val updated = if (entry.isCustom) {
-                        entry.copy(baseModel = baseModel.copy(id = modelId), overrides = newOverrides, isHidden = isHidden)
-                    } else {
-                        entry.copy(overrides = newOverrides, isHidden = isHidden)
-                    }
-                    providerRepository.updateEntry(updated)
-                    onBack()
-                },
+                onClick = ::saveAndClose,
                 modifier = Modifier.padding(end = 8.dp),
             ) { Text(stringResource(R.string.common_save)) }
         },
@@ -235,6 +286,22 @@ fun ModelEntryDetailScreen(
                 checked = isHidden,
                 onCheckedChange = { isHidden = it },
                 showDivider = false,
+            )
+        }
+
+        SettingsSection(
+            footer = stringResource(R.string.request_customization_footer),
+        ) {
+            SettingsRow(
+                title = stringResource(R.string.request_customization_title),
+                subtitle = stringResource(
+                    R.string.request_customization_summary,
+                    overrides.customRequestHeaders.size,
+                    overrides.customRequestBody.size,
+                    overrides.requestBodyControls.size,
+                ),
+                showDivider = false,
+                onClick = onRequestCustomization,
             )
         }
 

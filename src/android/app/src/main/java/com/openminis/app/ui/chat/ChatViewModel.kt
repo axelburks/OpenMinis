@@ -35,6 +35,7 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.R
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.MemoryRepository
@@ -42,8 +43,7 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
-import com.openminis.app.provider.catalogMaxThinkingLevel
-import com.openminis.app.provider.effectiveMaxThinkingLevel
+import com.openminis.app.provider.RequestBodyControlRuntimeStore
 import com.openminis.app.agent.shell.BashismDetector
 import com.openminis.app.agent.shell.BashismReminder
 import com.openminis.app.agent.shell.OnDemandBash
@@ -901,6 +901,12 @@ class ChatViewModel(
 
     internal val _thinkingLevel = MutableStateFlow(ThinkingLevel.OFF)
     val thinkingLevel: StateFlow<ThinkingLevel> = _thinkingLevel.asStateFlow()
+    internal val _thinkingDefinitionId =
+        MutableStateFlow(
+            ThinkingLevel.OFF.name.lowercase(),
+        )
+    val thinkingDefinitionId: StateFlow<String> =
+        _thinkingDefinitionId.asStateFlow()
 
     /**
      * [T-android-enhanced-cache] Enhanced Cache (1-hour Anthropic cache TTL)
@@ -1093,40 +1099,61 @@ class ChatViewModel(
     val mentionSelectedIndex: StateFlow<Int> = _mentionSelectedIndex.asStateFlow()
 
     val currentModelSupportsReasoning: Boolean
-        get() = currentModel?.supportsReasoning == true
+        get() = currentModel?.supportsReasoning != false &&
+            currentModel != null
 
-    /**
-     * [T-android-thinking-level-arch] The thinking ceiling the currently-bound
-     * model actually supports. Prefers the active ModelEntry's
-     * effectiveMaxThinkingLevel (so a user override on the entry is honored);
-     * falls back to the resolved model's catalog default when no entry is
-     * pinned (e.g. a group-resolved turn) or the model isn't known.
-     */
-    private val currentModelMaxThinkingLevel: ThinkingLevel
+    val availableThinkingLevels: List<ThinkingLevel>
         get() {
             val entry = _activeEntryId.value?.let { id ->
                 providerRepository.config.value.modelEntries.find { it.id == id }
             }
-            if (entry != null) {
-                return entry.effectiveMaxThinkingLevel
-            }
-            val model = currentModel ?: return ThinkingLevel.XHIGH
-            return model.catalogMaxThinkingLevel
+            val model = entry?.model ?: currentModel ?: return listOf(
+                ThinkingLevel.OFF,
+                ThinkingLevel.LOW,
+                ThinkingLevel.MEDIUM,
+                ThinkingLevel.HIGH,
+                ThinkingLevel.XHIGH,
+            )
+            return ThinkingLevel.availableLevels(model)
         }
 
-    /**
-     * [T-android-thinking-level-arch] Levels the chat composer picker should
-     * offer: everything up to the current model's ceiling, EXCLUDING OFF —
-     * mirrors iOS availableThinkingLevels (`filter { $0 != .off && $0 <= max }`).
-     * There is no standalone "Off" capsule; tapping the already-selected level
-     * toggles thinking off (see ThinkingLevelPicker). setThinkingLevel
-     * additionally clamps as a belt-and-suspenders defense.
-     */
-    val availableThinkingLevels: List<ThinkingLevel>
+    val availableThinkingDefinitionIds: List<String>
         get() {
-            val ceiling = currentModelMaxThinkingLevel
-            return ThinkingLevel.entries.filter { it != ThinkingLevel.OFF && it.rank <= ceiling.rank }
+            val customThinkingControl = currentRequestBodyControls.firstOrNull {
+                it.isEnabled &&
+                    it.semanticKind == com.openminis.app.data.model.RequestBodyControl.SemanticKind.thinkingBudget
+            }
+            if (customThinkingControl != null) {
+                return ThinkingLevelRegistry
+                    .sortedThinkingOptions(customThinkingControl.options, context)
+                    .mapNotNull {
+                        it.thinkingDefinitionId
+                    }
+            }
+            return availableThinkingLevels.mapNotNull {
+                ThinkingLevelRegistry
+                    .definitionForLevelId(
+                        it.name.lowercase(),
+                        context,
+                    )?.definitionId
+            }
         }
+
+    val currentRequestBodyControls: List<com.openminis.app.data.model.RequestBodyControl>
+        get() {
+            val entryId = _activeEntryId.value ?: return emptyList()
+            return providerRepository.config.value.modelEntries
+                .find { it.id == entryId }
+                ?.overrides
+                ?.requestBodyControls
+                ?: emptyList()
+        }
+
+    val currentRequestBodyControlModelKey: String
+        get() = _activeEntryId.value ?: currentModel?.id ?: "default"
+
+    val currentRequestBodyControlSessionKey: String
+        get() = activeSessionId
 
     // [T-anthropic-context-window] Token Usage sheet's context-window row.
     // Route through contextWindowTokens (heuristic-backed) so models without an
@@ -1195,10 +1222,19 @@ class ChatViewModel(
     /** Read-only view of the current thinking configuration for the model. */
     fun thinkingInfo(): ThinkingInfo? {
         val model = currentModel ?: return null
-        val supported = model.supportsReasoning == true
-        val level = _thinkingLevel.value
-        val enabled = supported && level.isEnabled
-        val levelText = if (enabled) level.displayName else "—"
+        val supported = model.supportsReasoning != false
+        val definitionId =
+            _thinkingDefinitionId.value
+        val enabled = supported &&
+            definitionId != ThinkingLevelRegistry.offDefinitionId
+        val levelText = if (enabled) {
+            ThinkingLevelRegistry.title(
+                definitionId,
+                context,
+            ) ?: definitionId
+        } else {
+            "—"
+        }
         return ThinkingInfo(supported, enabled, levelText)
     }
 
@@ -1262,12 +1298,6 @@ class ChatViewModel(
             title = "Memory",
             subtitle = "",
         ),
-        SlashCommand(
-            id = "thinking",
-            icon = Icons.Default.Lightbulb,
-            title = "Thinking",
-            subtitle = "",
-        ),
     )
 
     // [T-android-split-chat] filteredSlashCommands / updateSlashMenuState /
@@ -1327,7 +1357,6 @@ class ChatViewModel(
         when (cmd.id) {
             "compact" -> compactAll()
             "memory" -> toggleMemoryEnabled()
-            "thinking" -> toggleThinking()
             "clear" -> _clearChatConfirmRequested.value = true
             else -> AppLogger.info(TAG, "[Slash] unrecognized id=${cmd.id} — no dispatch")
         }
@@ -1369,8 +1398,7 @@ class ChatViewModel(
             return
         }
         val newLevel = if (_thinkingLevel.value.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
-        _thinkingLevel.value = newLevel
-        persistThinkingOverride(newLevel)
+        setThinkingLevel(newLevel)
         appendSystemInfo(
             text = "Thinking set to ${newLevel.displayName.lowercase()}.",
             iconKind = "thinking",
@@ -1379,37 +1407,84 @@ class ChatViewModel(
 
     /**
      * Set thinking level explicitly. Used by the inline level picker in the
-     * `/thinking` slash row. Mirrors iOS `setThinkingLevel(_:)` — silently
+     * request-controls row. Mirrors iOS `setThinkingLevel(_:)` — silently
      * ignored when the current model doesn't support reasoning.
      */
     fun setThinkingLevel(level: ThinkingLevel) {
-        if (!currentModelSupportsReasoning) return
-        // [T-android-thinking-level-arch] Double-safety clamp: the composer UI
-        // already filters to availableThinkingLevels, but never fully trust the
-        // caller — cap to the current model's ceiling so a stale/over-range
-        // request can't persist a level the model can't reach.
-        val ceiling = currentModelMaxThinkingLevel
-        val clamped = if (level.rank > ceiling.rank) ceiling else level
-        if (_thinkingLevel.value == clamped) return
-        _thinkingLevel.value = clamped
-        persistThinkingOverride(clamped)
+        val definitionId = ThinkingLevelRegistry
+            .definitionForLevelId(
+                level.name.lowercase(),
+                context,
+            )?.definitionId ?: return
+        setThinkingDefinitionId(definitionId)
     }
 
-    /**
-     * T239: write the user's explicit thinking-level choice back to the
-     * sessions row so it survives cold-start. Stored as enum name; null
-     * means "no override" (legacy behaviour). We always store a non-null
-     * value here — including OFF — because the user's explicit "turn it
-     * off for this session" must persist as distinct from "never set".
-     *
-     * Uses [ensureSession] so toggling on a draft (no DB row yet) first
-     * materialises the row, mirroring how toggleMemoryEnabled lands its
-     * preference on the persisted id rather than the `__new__…` draft key.
-     */
-    private fun persistThinkingOverride(level: ThinkingLevel) {
+    fun setThinkingDefinitionId(
+        definitionId: String,
+    ) {
+        if (!currentModelSupportsReasoning) return
+        val resolvedDefinitionId =
+            ThinkingLevelRegistry.resolvedDefinitionId(
+            definitionId,
+            availableThinkingDefinitionIds,
+            context,
+        ) ?: return
+        if (
+            _thinkingDefinitionId.value ==
+            resolvedDefinitionId
+        ) return
+        _thinkingDefinitionId.value =
+            resolvedDefinitionId
+        _thinkingLevel.value =
+            ThinkingLevelRegistry.nativeLevel(
+                resolvedDefinitionId,
+                context,
+            )
+        persistThinkingOverride(
+            resolvedDefinitionId,
+        )
+    }
+
+    private fun activateCurrentModelRuntime(
+        preferredThinkingDefinitionId: String? = null,
+    ) {
+        val modelKey = currentRequestBodyControlModelKey
+        RequestBodyControlRuntimeStore.activateModel(
+            context = context,
+            sessionKey = currentRequestBodyControlSessionKey,
+            modelKey = modelKey,
+        )
+
+        val requestedDefinitionId =
+            preferredThinkingDefinitionId
+                ?: _thinkingDefinitionId.value
+        val resolvedDefinitionId =
+            ThinkingLevelRegistry.resolvedDefinitionId(
+                requestedDefinitionId,
+                availableThinkingDefinitionIds,
+                context,
+            ) ?: ThinkingLevelRegistry.offDefinitionId
+        if (_thinkingDefinitionId.value == resolvedDefinitionId) {
+            return
+        }
+        _thinkingDefinitionId.value = resolvedDefinitionId
+        _thinkingLevel.value = ThinkingLevelRegistry.nativeLevel(
+            resolvedDefinitionId,
+            context,
+        )
+        persistThinkingOverride(resolvedDefinitionId)
+    }
+
+    /** Persist the immutable definition ID for the current session. */
+    private fun persistThinkingOverride(
+        definitionId: String,
+    ) {
         viewModelScope.launch {
             val sid = ensureSession()
-            chatRepository.dao.updateThinkingOverride(sid, level.name)
+            chatRepository.dao.updateThinkingOverride(
+                sid,
+                definitionId,
+            )
         }
     }
 
@@ -2450,6 +2525,9 @@ class ChatViewModel(
         val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
         val provider = currentProvider
             ?: throw IllegalStateException("No LLM provider available for compaction")
+        provider.requestSessionId =
+            realSessionId.takeIf { it.isNotEmpty() }
+        provider.usesConversationRequestControlState = false
         val response = provider.sendMessage(
             messages = listOf(
                 LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
@@ -2664,6 +2742,7 @@ class ChatViewModel(
                 ) {
                     val before = activeEntry
                     if (resolveProviderFromGroup(groupBound)) {
+                        activateCurrentModelRuntime()
                         AppLogger.info(
                             TAG,
                             "🔀RESOLVE group=$groupBound active entry=$before provider disabled — re-resolved to entry=${_activeEntryId.value} model=${currentModel?.id}",
@@ -2708,6 +2787,7 @@ class ChatViewModel(
                         resolved = resolveProviderFromGroup(effectiveGroupId)
                         if (resolved) {
                             _selectedGroupId.value = effectiveGroupId
+                            activateCurrentModelRuntime()
                         }
                     }
                     if (!resolved) {
@@ -2776,6 +2856,11 @@ class ChatViewModel(
         // sessionId so re-entering the session reuses the same instance.
         if (isDraft) {
             ChatViewModelStore.rename(sessionId, session.id)
+            RequestBodyControlRuntimeStore.migrate(
+                context = context,
+                fromSessionKey = sessionId,
+                toSessionKey = session.id,
+            )
             // Bring every disk/shell resource that was opened with the draft
             // id over to the real id *before* agent tools start running against
             // the persisted session — otherwise the first tool call (e.g.
@@ -2952,14 +3037,17 @@ class ChatViewModel(
             _sessionTitle.value = session.title ?: "New Chat"
             _sessionCategory.value = session.category
             _memoryEnabled.value = session.memoryEnabled != 0
-            // T239: hydrate persisted thinking-mode override. null = unset
-            // (use OFF as the legacy default); non-null = explicit user
-            // choice persisted across cold-start. runCatching guards against
-            // a stale enum name from a future rename — fall back silently
-            // rather than crashing the session load.
-            _thinkingLevel.value = session.thinkingOverride
-                ?.let { runCatching { ThinkingLevel.valueOf(it) }.getOrNull() }
-                ?: ThinkingLevel.OFF
+            // null means no explicit session choice and resolves to Off;
+            // non-null is an immutable thinking definition ID.
+            val persistedThinkingDefinitionId =
+                session.thinkingOverride
+                    ?: ThinkingLevel.OFF.name.lowercase()
+            _thinkingDefinitionId.value =
+                persistedThinkingDefinitionId
+            _thinkingLevel.value = ThinkingLevelRegistry.nativeLevel(
+                persistedThinkingDefinitionId,
+                context,
+            )
 
             // Priority 1: restore from persisted model_binding (group or entry)
             var resolved = restoreFromBinding(session.modelBinding)
@@ -2975,9 +3063,10 @@ class ChatViewModel(
                     if (instance != null) {
                         val apiKey = providerRepository.loadApiKey(instance.id)
                         if (apiKey != null) {
-                            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
+                            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
                             _providerName.value = instance.label.ifEmpty { entry.model.provider }
                             resolved = true
+                            activateCurrentModelRuntime()
                             // No binding row (e.g. a synced session that only
                             // carried model_id). If the entry belongs to the
                             // default group, adopt that group so group fallback
@@ -3002,7 +3091,10 @@ class ChatViewModel(
                 val defaultGroupId = providerRepository.defaultPrimaryGroupId
                 if (defaultGroupId != null) {
                     resolved = resolveProviderFromGroup(defaultGroupId)
-                    if (resolved) _selectedGroupId.value = defaultGroupId
+                    if (resolved) {
+                        _selectedGroupId.value = defaultGroupId
+                        activateCurrentModelRuntime()
+                    }
                 }
             }
 
@@ -3505,7 +3597,10 @@ class ChatViewModel(
                     val groupId = obj.optString("groupId").takeIf { it.isNotEmpty() } ?: return false
                     val lastEntryId = obj.optString("lastEntryId").takeIf { it.isNotEmpty() }
                     val resolved = resolveProviderFromGroup(groupId, lastEntryId)
-                    if (resolved) _selectedGroupId.value = groupId
+                    if (resolved) {
+                        _selectedGroupId.value = groupId
+                        activateCurrentModelRuntime()
+                    }
                     resolved
                 }
                 "entry" -> {
@@ -3519,7 +3614,8 @@ class ChatViewModel(
                     _selectedGroupId.value = null
                     _selectedGroupName.value = ""
                     _activeEntryId.value = entry.id
-                    currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
+                    currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
+                    activateCurrentModelRuntime()
                     true
                 }
                 else -> false
@@ -3557,7 +3653,7 @@ class ChatViewModel(
         _providerName.value = instance.label.ifEmpty { targetEntry.model.provider }
         _selectedGroupName.value = group.name
         _activeEntryId.value = targetEntry.id
-        currentProvider = ProviderFactory.create(instance, apiKey, targetEntry.model, context)
+        currentProvider = ProviderFactory.create(instance, apiKey, targetEntry.model, context, targetEntry)
         return true
     }
 
@@ -3590,7 +3686,8 @@ class ChatViewModel(
      * T312: mirrors iOS `AIChatViewModel.applyGroupSessionDefaults`.
      * When a session newly binds to a group (user picks the group, or a
      * draft session resolves the default group), copy the group's
-     * `defaultThinkingLevel` into the session's persisted thinking_override.
+     * immutable `defaultThinkingDefinitionId` into the session's persisted
+     * thinking_override.
      * Context limit is in-memory only on iOS; Android has no equivalent
      * runtime field yet, so we only handle thinking level here.
      *
@@ -3601,13 +3698,9 @@ class ChatViewModel(
      */
     private fun applyGroupSessionDefaults(groupId: String) {
         val group = providerRepository.group(groupId) ?: return
-        val level = group.defaultThinkingLevel ?: return
-        if (_thinkingLevel.value == level) return
-        _thinkingLevel.value = level
-        viewModelScope.launch {
-            val sid = ensureSession()
-            chatRepository.dao.updateThinkingOverride(sid, level.name)
-        }
+        activateCurrentModelRuntime(
+            group.defaultThinkingDefinitionId,
+        )
     }
 
     /**
@@ -3638,8 +3731,9 @@ class ChatViewModel(
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
         val apiKey = providerRepository.loadApiKey(instance.id)
         if (apiKey != null) {
-            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
+            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
         }
+        activateCurrentModelRuntime()
         return true
     }
 
@@ -3656,7 +3750,8 @@ class ChatViewModel(
         _selectedGroupId.value = null
         _selectedGroupName.value = ""
         _activeEntryId.value = entry.id
-        currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
+        currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
+        activateCurrentModelRuntime()
         persistBinding("""{"type":"entry","entryId":"$entryId"}""")
         // [T-newchat-default-model-fallback-android] Remember this as the
         // global last-used model so the NEXT new chat (when no default group
@@ -3687,10 +3782,17 @@ class ChatViewModel(
         val config = providerRepository.config.value
         val group = config.modelGroups.find { it.id == groupId } ?: return emptyList()
         val members = group.memberEntryIds
-        // Find current provider's position in the group
-        val currentIdx = members.indexOfFirst { entryId ->
-            config.modelEntries.find { it.id == entryId }?.model?.id == primaryProvider.model.id
-        }
+        val currentModelKey =
+            primaryProvider.requestCustomizationModelKey
+                ?: _activeEntryId.value
+        val currentIdx = currentModelKey
+            ?.let(members::indexOf)
+            ?.takeIf { it >= 0 }
+            ?: members.indexOfFirst { entryId ->
+                config.modelEntries.find {
+                    it.id == entryId
+                }?.model?.id == primaryProvider.model.id
+            }
         val result = mutableListOf<LLMProvider>()
         // Iterate starting from the entry AFTER the primary, cycling around
         for (offset in 1 until members.size) {
@@ -3701,7 +3803,7 @@ class ChatViewModel(
             if (!instance.isEnabled) continue
             val apiKey = providerRepository.loadApiKey(instance.id) ?: continue
             val p = try {
-                ProviderFactory.create(instance, apiKey, entry.model, context)
+                ProviderFactory.create(instance, apiKey, entry.model, context, entry)
             } catch (_: Exception) { continue }
             result.add(p)
         }
@@ -3761,7 +3863,7 @@ class ChatViewModel(
             currentModel = entry.model
             _modelName.value = entry.model.displayName
             _activeEntryId.value = entry.id
-            val provider = ProviderFactory.create(instance, apiKey, entry.model, context)
+            val provider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
             currentProvider = provider
             return provider
         }
@@ -4279,7 +4381,7 @@ class ChatViewModel(
                         if (freshToken != storedKey) {
                             providerRepository.saveApiKey(instance.id, freshToken)
                             provider = com.openminis.app.provider.ProviderFactory.create(
-                                instance, freshToken, currentModel ?: provider.model, context
+                                instance, freshToken, currentModel ?: provider.model, context, entry
                             )
                             currentProvider = provider
                         }
@@ -4935,7 +5037,7 @@ class ChatViewModel(
                                 providerRepository.saveApiKey(instance.id, freshToken)
                                 // Recreate provider with fresh token
                                 provider = com.openminis.app.provider.ProviderFactory.create(
-                                    instance, freshToken, currentModel ?: provider.model, context
+                                    instance, freshToken, currentModel ?: provider.model, context, entry
                                 )
                                 currentProvider = provider
                                 android.util.Log.i(TAG, "OAuth token refreshed before send")
@@ -5281,7 +5383,7 @@ class ChatViewModel(
                             val storedKey = providerRepository.loadApiKey(instance.id)
                             if (freshToken != storedKey) {
                                 providerRepository.saveApiKey(instance.id, freshToken)
-                                provider = ProviderFactory.create(instance, freshToken, currentModel ?: provider.model, context)
+                                provider = ProviderFactory.create(instance, freshToken, currentModel ?: provider.model, context, entry)
                                 currentProvider = provider
                             }
                         }
@@ -6017,6 +6119,20 @@ class ChatViewModel(
                     // Non-Anthropic providers ignore it (cast fails silently).
                     (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
                         ?.enhancedCache = _enhancedCacheEnabled.value
+                    val requestedThinkingDefinitionId =
+                        _thinkingDefinitionId.value
+                    val resolvedThinkingDefinitionId =
+                        currentProvider
+                            .resolvedThinkingDefinitionId(
+                                requestedThinkingDefinitionId,
+                            )
+                            ?: requestedThinkingDefinitionId
+                    currentProvider.thinkingDefinitionId =
+                        resolvedThinkingDefinitionId
+                    currentProvider.requestSessionId =
+                        realSessionId.ifEmpty { sessionId }.takeIf { it.isNotEmpty() }
+                    currentProvider
+                        .usesConversationRequestControlState = true
                     // Route through effectiveAgentHistory() so a populated
                     // [_compactSummary] is prepended as a `<context-summary>`
                     // user message. Falls through to the raw agentHistory when
@@ -6025,7 +6141,14 @@ class ChatViewModel(
                         applyRequestImageBudget(effectiveAgentHistory()),
                         systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
                         tools = agentTools,
-                        thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
+                        thinkingLevel = if (currentModelSupportsReasoning) {
+                            ThinkingLevelRegistry.nativeLevel(
+                                resolvedThinkingDefinitionId,
+                                context,
+                            )
+                        } else {
+                            ThinkingLevel.OFF
+                        },
                     ).collect { chunk ->
                 when (chunk) {
                     is LLMStreamChunk.ThinkingDelta -> {
@@ -6366,6 +6489,31 @@ class ChatViewModel(
                     lastUiUpdateMs = 0L
                     lastFileToolInputMs = 0L
                     lastOtherToolInputMs = 0L
+                    if (
+                        resolvedThinkingDefinitionId !=
+                        requestedThinkingDefinitionId
+                    ) {
+                        _thinkingDefinitionId.value =
+                            resolvedThinkingDefinitionId
+                        _thinkingLevel.value =
+                            ThinkingLevelRegistry.nativeLevel(
+                                resolvedThinkingDefinitionId,
+                                context,
+                            )
+                        persistThinkingOverride(
+                            resolvedThinkingDefinitionId,
+                        )
+                    }
+                    currentProvider.requestCustomizationModelKey
+                        ?.let { modelKey ->
+                            RequestBodyControlRuntimeStore
+                                .activateModel(
+                                    context = context,
+                                    sessionKey =
+                                        currentRequestBodyControlSessionKey,
+                                    modelKey = modelKey,
+                                )
+                        }
                     collectDone = true
                     // Stream completed without error — clear any lingering retry UI state.
                     if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
@@ -6495,9 +6643,20 @@ class ChatViewModel(
                         // in sync with the instance we actually used.)
                         _modelName.value = currentProvider.model.displayName
                         // Update activeEntryId so model picker reflects the switch
-                        val newEntry = providerRepository.config.value.modelEntries.find {
-                            it.model.id == currentProvider.model.id
-                        }
+                        val customizationModelKey =
+                            currentProvider
+                                .requestCustomizationModelKey
+                        val newEntry =
+                            customizationModelKey?.let { modelKey ->
+                                providerRepository.config.value
+                                    .modelEntries.find {
+                                        it.id == modelKey
+                                    }
+                            } ?: providerRepository.config.value
+                                .modelEntries.find {
+                                    it.model.id ==
+                                        currentProvider.model.id
+                                }
                         if (newEntry != null) {
                             _activeEntryId.value = newEntry.id
                             currentModel = newEntry.model
@@ -8682,6 +8841,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 // default), keep the T334 budget bump so it can finish thinking
                 // and still emit the JSON. Unified with regenerateTitle's ladder.
                 val titleMaxTokens = if (provider.model.supportsReasoning == true) 2048 else 100
+                provider.requestSessionId =
+                    realSessionId.ifEmpty { sessionId }
+                        .takeIf { it.isNotEmpty() }
+                provider.usesConversationRequestControlState = false
                 val response = provider.sendMessage(
                     messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
                     systemPrompt = effectiveSystemPrompt,
@@ -8826,7 +8989,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 Log.w(TAG, "TitleGen OAuth refresh failed: ${e.message}")
             }
         }
-        return ProviderFactory.create(instance, apiKey, entry.model, context)
+        return ProviderFactory.create(instance, apiKey, entry.model, context, entry)
     }
 
     /** Parse LLM response for title/category JSON. Multiple fallback strategies. */
@@ -8965,7 +9128,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             if (freshToken != storedKey) {
                                 providerRepository.saveApiKey(instance.id, freshToken)
                                 provider = com.openminis.app.provider.ProviderFactory.create(
-                                    instance, freshToken, currentModel ?: provider.model, context
+                                    instance, freshToken, currentModel ?: provider.model, context, entry
                                 )
                                 currentProvider = provider
                             }

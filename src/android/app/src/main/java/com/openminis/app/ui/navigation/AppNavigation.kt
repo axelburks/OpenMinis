@@ -40,9 +40,11 @@ import com.openminis.app.ui.settings.AddModelsToGroupScreen
 import com.openminis.app.ui.settings.ShadowVoiceDetailScreen
 import com.openminis.app.ui.settings.AddProviderScreen
 import com.openminis.app.ui.settings.ModelEntryDetailScreen
+import com.openminis.app.ui.settings.ModelRequestCustomizationScreen
 import com.openminis.app.ui.settings.ModelGroupDetailScreen
 import com.openminis.app.ui.settings.ModelGroupsScreen
 import com.openminis.app.ui.settings.ProviderDetailScreen
+import com.openminis.app.ui.settings.ProviderRequestCustomizationScreen
 import com.openminis.app.ui.settings.ProviderListScreen
 import com.openminis.app.ui.sandbox.FileBrowserScreen
 import com.openminis.app.ui.sandbox.FileBrowserViewModel
@@ -92,6 +94,8 @@ object Routes {
     const val PROVIDER_LIST = "providers"
     const val ADD_PROVIDER = "add_provider"
     const val PROVIDER_DETAIL = "provider/{instanceId}"
+    const val PROVIDER_REQUEST_CUSTOMIZATION =
+        "provider_request_customization/{instanceId}"
     /** [T-android-provider-voice] Read-only shadow Voice Service detail. */
     const val SHADOW_VOICE_DETAIL = "voice_service/{instanceId}"
     const val MODEL_GROUPS = "model_groups"
@@ -107,6 +111,8 @@ object Routes {
      *  builds pops back instead of crashing. */
     const val AGENT_LOOP_MODELS = "agent_loop_models"
     const val MODEL_ENTRY_DETAIL = "model_entry/{instanceId}/{entryId}"
+    const val MODEL_REQUEST_CUSTOMIZATION =
+        "model_request_customization/{instanceId}/{entryId}"
     const val ADD_CUSTOM_MODEL = "add_custom_model/{instanceId}"
     const val STORAGE = "storage"
     const val SESSION_STORAGE_DETAIL = "session_storage/{sessionId}"
@@ -185,6 +191,8 @@ object Routes {
     fun memoryFileEdit(fileName: String, isGlobal: Boolean) = "memory_file/$fileName/$isGlobal"
     fun chat(sessionId: String) = "chat/$sessionId"
     fun providerDetail(instanceId: String) = "provider/$instanceId"
+    fun providerRequestCustomization(instanceId: String) =
+        "provider_request_customization/${android.net.Uri.encode(instanceId)}"
     fun shadowVoiceDetail(instanceId: String) = "voice_service/$instanceId"
     fun modelGroupDetail(groupId: String) = "model_group/$groupId"
     fun addModelsToGroup(groupId: String) = "add_models_to_group/$groupId"
@@ -198,6 +206,9 @@ object Routes {
     // slash becomes %2F (one segment); the receiver decodes it back.
     fun modelEntryDetail(instanceId: String, entryId: String) =
         "model_entry/${android.net.Uri.encode(instanceId)}/${android.net.Uri.encode(entryId)}"
+    fun modelRequestCustomization(instanceId: String, entryId: String) =
+        "model_request_customization/" +
+            "${android.net.Uri.encode(instanceId)}/${android.net.Uri.encode(entryId)}"
     fun addCustomModel(instanceId: String) = "add_custom_model/$instanceId"
 }
 
@@ -564,6 +575,11 @@ fun AppNavigation(
                     navController.safeNavigate(Routes.FILE_PREVIEW)
                 },
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
+                onEditCurrentModel = { instanceId, entryId ->
+                    navController.safeNavigate(
+                        Routes.modelRequestCustomization(instanceId, entryId),
+                    )
+                },
             )
         }
 
@@ -717,6 +733,11 @@ fun AppNavigation(
                 instanceId = instanceId,
                 providerRepository = providerRepository,
                 onBack = { navController.safePopBackStack() },
+                onRequestCustomization = {
+                    navController.safeNavigate(
+                        Routes.providerRequestCustomization(instanceId),
+                    )
+                },
                 onModelEntryClick = { entryId ->
                     navController.safeNavigate(Routes.modelEntryDetail(instanceId, entryId))
                 },
@@ -726,6 +747,23 @@ fun AppNavigation(
                 onVoiceServiceClick = { id ->
                     navController.safeNavigate(Routes.shadowVoiceDetail(id))
                 },
+            )
+        }
+
+        composable(
+            route = Routes.PROVIDER_REQUEST_CUSTOMIZATION,
+            arguments = listOf(
+                navArgument("instanceId") { type = NavType.StringType },
+            ),
+        ) { backStackEntry ->
+            val instanceId = backStackEntry.arguments
+                ?.getString("instanceId")
+                ?.let { android.net.Uri.decode(it) }
+                ?: return@composable
+            ProviderRequestCustomizationScreen(
+                instanceId = instanceId,
+                providerRepository = providerRepository,
+                onBack = { navController.safePopBackStack() },
             )
         }
 
@@ -822,6 +860,30 @@ fun AppNavigation(
             val entryId = backStackEntry.arguments?.getString("entryId")
                 ?.let { android.net.Uri.decode(it) } ?: return@composable
             ModelEntryDetailScreen(
+                instanceId = instanceId,
+                entryId = entryId,
+                providerRepository = providerRepository,
+                onRequestCustomization = {
+                    navController.safeNavigate(
+                        Routes.modelRequestCustomization(instanceId, entryId),
+                    )
+                },
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(
+            route = Routes.MODEL_REQUEST_CUSTOMIZATION,
+            arguments = listOf(
+                navArgument("instanceId") { type = NavType.StringType },
+                navArgument("entryId") { type = NavType.StringType },
+            ),
+        ) { backStackEntry ->
+            val instanceId = backStackEntry.arguments?.getString("instanceId")
+                ?.let { android.net.Uri.decode(it) } ?: return@composable
+            val entryId = backStackEntry.arguments?.getString("entryId")
+                ?.let { android.net.Uri.decode(it) } ?: return@composable
+            ModelRequestCustomizationScreen(
                 instanceId = instanceId,
                 entryId = entryId,
                 providerRepository = providerRepository,

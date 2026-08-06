@@ -13,6 +13,11 @@ final class AntigravityProvider: LLMProvider {
     private let authTokenProvider: () async throws -> String
     var projectID: String?
 
+    /// Minix request customization (provider/model headers, body, controls).
+    /// Applied to the Gemini-format envelope *inner* so expressions match the
+    /// same `body.generationConfig.*` shape users write for the Gemini provider.
+    var requestCustomization: RequestCustomization?
+
     /// Stable session ID for the lifetime of this provider instance.
     private let sessionId = UUID().uuidString
 
@@ -33,8 +38,7 @@ final class AntigravityProvider: LLMProvider {
         temperature: Double?
     ) async throws -> LLMResponse {
         let innerBody = buildInnerBody(messages: messages, systemPrompt: systemPrompt, maxTokens: maxTokens, temperature: temperature)
-        let envelope = wrapEnvelope(innerBody)
-        let request = try await buildRequest(path: "generateContent", body: envelope)
+        let request = try await buildRequest(path: "generateContent", inner: innerBody)
 
         #if DEBUG
         logFullRequest(request)
@@ -62,8 +66,7 @@ final class AntigravityProvider: LLMProvider {
         temperature: Double?
     ) async throws -> AsyncThrowingStream<LLMStreamChunk, Error> {
         let innerBody = buildInnerBody(messages: messages, systemPrompt: systemPrompt, maxTokens: maxTokens, temperature: temperature)
-        let envelope = wrapEnvelope(innerBody)
-        let request = try await buildRequest(path: "streamGenerateContent?alt=sse", body: envelope)
+        let request = try await buildRequest(path: "streamGenerateContent?alt=sse", inner: innerBody)
 
         #if DEBUG
         logFullRequest(request)
@@ -128,8 +131,12 @@ final class AntigravityProvider: LLMProvider {
             "maxOutputTokens": maxTokens,
             "temperature": 0.7,
         ]
-        let thinkCfg = thinkingLevel.isEnabled ? elevatedThinkingConfig(level: thinkingLevel) : minimalThinkingConfig()
-        if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        if requestCustomization?.disablesBuiltInThinkingInjection != true {
+            let thinkCfg = thinkingLevel.isEnabled
+                ? elevatedThinkingConfig(level: thinkingLevel)
+                : minimalThinkingConfig()
+            if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        }
         inner["generationConfig"] = genConfig
 
         if !tools.isEmpty {
@@ -137,8 +144,7 @@ final class AntigravityProvider: LLMProvider {
             inner["toolConfig"] = ["functionCallingConfig": ["mode": "AUTO"]]
         }
 
-        let envelope = wrapEnvelope(inner)
-        let request = try await buildRequest(path: "streamGenerateContent?alt=sse", body: envelope, thinkingEnabled: thinkingLevel.isEnabled)
+        let request = try await buildRequest(path: "streamGenerateContent?alt=sse", inner: inner, thinkingEnabled: thinkingLevel.isEnabled)
 
         #if DEBUG
         logFullRequest(request)
@@ -191,8 +197,10 @@ final class AntigravityProvider: LLMProvider {
             "maxOutputTokens": maxTokens,
             "temperature": 0.7,
         ]
-        let thinkCfg = minimalThinkingConfig()
-        if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        if requestCustomization?.disablesBuiltInThinkingInjection != true {
+            let thinkCfg = minimalThinkingConfig()
+            if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        }
         inner["generationConfig"] = genConfig
 
         if !tools.isEmpty {
@@ -200,8 +208,7 @@ final class AntigravityProvider: LLMProvider {
             inner["toolConfig"] = ["functionCallingConfig": ["mode": "AUTO"]]
         }
 
-        let envelope = wrapEnvelope(inner)
-        let request = try await buildRequest(path: "generateContent", body: envelope)
+        let request = try await buildRequest(path: "generateContent", inner: inner)
 
         #if DEBUG
         logFullRequest(request)
@@ -252,19 +259,19 @@ final class AntigravityProvider: LLMProvider {
         if id.contains("claude") { return [:] }  // Claude uses Anthropic-native thinking
         if id.contains("gemini-3") {
             let geminiLevel: String = switch level {
-            case .off: "minimal"; case .low: "low"; case .medium: "medium"; case .high, .xhigh, .max, .ultra: "high"
+            case .off, .minimal: "minimal"; case .low: "low"; case .medium: "medium"; case .high, .xhigh, .max, .ultra: "high"
             }
             return ["thinkingLevel": geminiLevel, "includeThoughts": true]
         }
         if id.contains("2.5-pro") {
             let budget: Int = switch level {
-            case .off: 128; case .low: 2048; case .medium: 8192; case .high: 16384; case .xhigh, .max, .ultra: 32768
+            case .off: 128; case .minimal, .low: 2048; case .medium: 8192; case .high: 16384; case .xhigh, .max, .ultra: 32768
             }
             return ["thinkingBudget": budget, "includeThoughts": true]
         }
         if id.contains("2.5-flash") && !id.contains("lite") {
             let budget: Int = switch level {
-            case .off: 0; case .low: 1024; case .medium: 4096; case .high: 8192; case .xhigh, .max, .ultra: 16384
+            case .off: 0; case .minimal, .low: 1024; case .medium: 4096; case .high: 8192; case .xhigh, .max, .ultra: 16384
             }
             return ["thinkingBudget": budget, "includeThoughts": true]
         }
@@ -297,9 +304,11 @@ final class AntigravityProvider: LLMProvider {
         if let temp = temperature {
             config["temperature"] = temp
         }
-        let thinkCfg = minimalThinkingConfig()
-        if !thinkCfg.isEmpty {
-            config["thinkingConfig"] = thinkCfg
+        if requestCustomization?.disablesBuiltInThinkingInjection != true {
+            let thinkCfg = minimalThinkingConfig()
+            if !thinkCfg.isEmpty {
+                config["thinkingConfig"] = thinkCfg
+            }
         }
         body["generationConfig"] = config
 
@@ -321,7 +330,7 @@ final class AntigravityProvider: LLMProvider {
         ]
     }
 
-    private func buildRequest(path: String, body: [String: Any], thinkingEnabled: Bool = false) async throws -> URLRequest {
+    private func buildRequest(path: String, inner: [String: Any], thinkingEnabled: Bool = false) async throws -> URLRequest {
         let urlString = URLBuilding.join(activeBaseURL, "v1internal:\(path)")
         guard let url = URL(string: urlString) else {
             throw LLMError.providerError(message: "Invalid Antigravity API URL")
@@ -351,10 +360,33 @@ final class AntigravityProvider: LLMProvider {
             request.setValue("interleaved-thinking-2025-05-14", forHTTPHeaderField: "anthropic-beta")
         }
 
+        // Apply Minix request customization to the Gemini-format *inner* body
+        // (before it's wrapped in the Cloud Code envelope) so expressions match
+        // the same `body.generationConfig.*` shape as the Gemini provider. The
+        // envelope scaffolding (model/project/userAgent/requestType) is added
+        // afterward and stays out of the user's reach.
+        var customizedInner = inner
+        if let requestCustomization {
+            let originalHeaders = request.allHTTPHeaderFields ?? [:]
+            var headers = originalHeaders
+            let apiKey = headers["Authorization"]?.replacingOccurrences(of: "Bearer ", with: "")
+            requestCustomization.apply(to: &customizedInner, headers: &headers, apiKey: apiKey)
+            // URLRequest header patching is set-only: a deleted key just vanishes
+            // from the dict, so clear it explicitly or the default survives.
+            let survivingKeys = Set(headers.keys.map { $0.lowercased() })
+            for key in originalHeaders.keys where !survivingKeys.contains(key.lowercased()) {
+                request.setValue(nil, forHTTPHeaderField: key)
+            }
+            for (key, value) in headers {
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+        }
+        let envelope = wrapEnvelope(customizedInner)
+
         // sortedKeys: stable byte-level prefix so server-side prompt caches can
         // match across calls (Antigravity routes to multiple upstreams, some of
         // which use prefix-based caching).
-        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        request.httpBody = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
         return request
     }
 

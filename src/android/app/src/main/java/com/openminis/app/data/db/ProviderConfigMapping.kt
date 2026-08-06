@@ -11,7 +11,7 @@ import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RoutingStrategy
-import com.openminis.app.data.model.ThinkingLevel
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -35,6 +35,34 @@ data class ProviderConfigSnapshot(
     val loopIds: List<ProviderAgentLoopIdEntity>,
     val meta: List<ProviderConfigMetaEntity>,
 )
+
+@Serializable
+private data class ProviderRequestCustomizationBlob(
+    val headers: List<String> = emptyList(),
+    val body: List<String> = emptyList(),
+)
+
+private fun encodeProviderRequestCustomization(
+    json: Json,
+    headers: List<String>,
+    body: List<String>,
+): String? {
+    if (headers.isEmpty() && body.isEmpty()) return null
+    return json.encodeToString(
+        ProviderRequestCustomizationBlob.serializer(),
+        ProviderRequestCustomizationBlob(headers = headers, body = body),
+    )
+}
+
+private fun decodeProviderRequestCustomization(
+    json: Json,
+    encoded: String?,
+): ProviderRequestCustomizationBlob {
+    if (encoded.isNullOrBlank()) return ProviderRequestCustomizationBlob()
+    return runCatching {
+        json.decodeFromString(ProviderRequestCustomizationBlob.serializer(), encoded)
+    }.getOrDefault(ProviderRequestCustomizationBlob())
+}
 
 object ProviderConfigMetaKeys {
     const val DEFAULT_PRIMARY_GROUP_ID = "default_primary_group_id"
@@ -87,7 +115,11 @@ fun ProviderConfig.toSnapshot(
             // explicitly (not null) so a legit "auto" survives round-trips too.
             imageEndpointMode = inst.imageEndpointMode.name,
             imageEndpointResolved = inst.imageEndpointResolved?.name,
-            customUserAgent = inst.customUserAgent,
+            requestCustomizationJson = encodeProviderRequestCustomization(
+                json = jsonForBlobs,
+                headers = inst.customRequestHeaders,
+                body = inst.customRequestBody,
+            ),
             isEnabled = if (inst.isEnabled) 1 else 0,
             sortOrder = idx,
             createdAt = inst.createdAt,
@@ -130,7 +162,8 @@ fun ProviderConfig.toSnapshot(
             name = g.name,
             strategy = g.strategy.name,
             fallbackStrategy = g.fallbackStrategy.name,
-            defaultThinkingLevel = g.defaultThinkingLevel?.name,
+            defaultThinkingDefinitionId =
+                g.defaultThinkingDefinitionId,
             contextLimitTokens = g.contextLimitTokens,
             lastContextLimitTokens = g.lastContextLimitTokens,
             memberEntryIdsJson = jsonForBlobs.encodeToString(
@@ -190,6 +223,7 @@ fun ProviderConfig.toSnapshot(
  */
 fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig {
     val instances = this.instances.map { row ->
+        val requestCustomization = decodeProviderRequestCustomization(jsonForBlobs, row.requestCustomizationJson)
         ProviderInstance(
             id = row.id,
             label = row.label,
@@ -199,7 +233,8 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             createdAt = row.createdAt,
             customBaseURL = row.customBaseURL,
             appendV1Suffix = row.appendV1Suffix != 0,
-            customUserAgent = row.customUserAgent,
+            customRequestHeaders = requestCustomization.headers,
+            customRequestBody = requestCustomization.body,
             useResponsesAPI = row.useResponsesAPI != 0,
             azureMode = row.azureMode != 0,
             // [GH#68] Safe parse: null (pre-migration rows) or an unknown
@@ -240,12 +275,8 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
                 .toMutableList(),
             strategy = RoutingStrategy.valueOf(row.strategy),
             fallbackStrategy = FallbackStrategy.valueOf(row.fallbackStrategy),
-            // [T-android-thinking-level-arch] decoded() (not valueOf()) so a
-            // level string a NEWER build persisted (e.g. "MAX"/"ULTRA") can't
-            // throw and blow up the whole DB load — which would fall back to the
-            // JSON mirror, which fails identically on the same enum value,
-            // wiping all providers/groups from the UI. Unknown → XHIGH.
-            defaultThinkingLevel = row.defaultThinkingLevel?.let { ThinkingLevel.decoded(it) },
+            defaultThinkingDefinitionId =
+                row.defaultThinkingDefinitionId,
             contextLimitTokens = row.contextLimitTokens,
             lastContextLimitTokens = row.lastContextLimitTokens,
         )

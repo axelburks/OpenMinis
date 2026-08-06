@@ -3,7 +3,7 @@ package com.openminis.app.debug
 import android.content.Context
 import androidx.core.content.FileProvider
 import com.openminis.app.MinisApp
-import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.ui.chat.InputAttachment
 import org.json.JSONObject
 import java.io.File
@@ -85,13 +85,13 @@ internal object ChatMutationMethods {
 
         val wait = params.optBoolean("wait", false)
         val timeoutSec = params.optInt("waitTimeout", 600).coerceIn(1, 1800)
-        val thinkingLevel = parseThinkingLevel(params)
+        val thinkingDefinitionId = parseThinkingDefinitionId(context, params)
         val result = HeadlessChatRunner.prompt(
             context = context,
             sessionId = sessionId,
             text = text,
             attachments = attachments,
-            thinkingLevel = thinkingLevel,
+            thinkingDefinitionId = thinkingDefinitionId,
             wait = wait,
             timeoutMs = timeoutSec * 1000L,
         )
@@ -440,29 +440,21 @@ internal object ChatMutationMethods {
         return out
     }
 
-    /**
-     * Map the RPC `thinkingLevel` string ("off"/"low"/"medium"/"high"/"xhigh")
-     * to the [ThinkingLevel] enum. Unknown values raise -32602 so callers
-     * notice typos rather than silently falling back to OFF. Returns null when
-     * the param was omitted, signaling "leave the VM's existing level alone".
-     */
-    private fun parseThinkingLevel(params: JSONObject): ThinkingLevel? {
+    private fun parseThinkingDefinitionId(
+        context: Context,
+        params: JSONObject,
+    ): String? {
         if (!params.has("thinkingLevel") || params.isNull("thinkingLevel")) return null
-        val raw = params.optString("thinkingLevel", "").trim().lowercase()
+        val raw = params.optString("thinkingLevel", "").trim()
         if (raw.isEmpty()) return null
-        return when (raw) {
-            "off" -> ThinkingLevel.OFF
-            "low" -> ThinkingLevel.LOW
-            "medium" -> ThinkingLevel.MEDIUM
-            "high" -> ThinkingLevel.HIGH
-            "xhigh" -> ThinkingLevel.XHIGH
-            // [T-android-thinking-level-arch] MAX/ULTRA are now distinct tiers.
-            // "max" previously aliased XHIGH (when XHIGH's label was "Max"); it
-            // now maps to the real MAX tier.
-            "max" -> ThinkingLevel.MAX
-            "ultra" -> ThinkingLevel.ULTRA
-            else -> throw RPCException(-32602, "Invalid thinkingLevel: $raw (expected off/low/medium/high/xhigh/max/ultra)")
-        }
+        return ThinkingLevelRegistry.definitionForLevelId(raw, context)
+            ?.definitionId
+            ?: ThinkingLevelRegistry.definition(raw, context)
+                ?.definitionId
+            ?: throw RPCException(
+                -32602,
+                "Invalid thinkingLevel: $raw (expected a registered levelId or definitionId)",
+            )
     }
 
     private fun guessMime(name: String): String {

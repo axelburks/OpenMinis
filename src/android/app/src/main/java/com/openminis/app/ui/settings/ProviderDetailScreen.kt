@@ -1,5 +1,6 @@
 package com.openminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -82,6 +83,7 @@ fun ProviderDetailScreen(
     instanceId: String,
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
+    onRequestCustomization: () -> Unit = {},
     onModelEntryClick: (String) -> Unit = {},
     onAddCustomModel: () -> Unit = {},
     onVoiceServiceClick: (String) -> Unit = {},
@@ -119,18 +121,70 @@ fun ProviderDetailScreen(
     var isEnabled by remember { mutableStateOf(instance.isEnabled) }
     var customBaseURL by remember { mutableStateOf(instance.customBaseURL ?: "") }
     var appendV1Suffix by remember { mutableStateOf(instance.appendV1Suffix) }
-    // [T-provider-custom-user-agent] Per-provider UA override input. Only the
-    // OpenAI-/Anthropic-compat custom-base section surfaces it (see gate below).
-    var customUserAgent by remember { mutableStateOf(instance.customUserAgent ?: "") }
+    var showUnsavedChangesDialog by remember { mutableStateOf(false) }
+
+    fun saveRequestSettings(closeAfterSave: Boolean = false) {
+        providerRepository.updateInstance(
+            instance.copy(
+                customBaseURL = customBaseURL.ifBlank { null },
+                appendV1Suffix = appendV1Suffix,
+            ),
+        )
+        AppLogger.info(
+            TAG,
+            "Saved request settings for ${instance.id}: " +
+                "url='${customBaseURL.ifBlank { "<default>" }}', appendV1=$appendV1Suffix",
+        )
+        if (closeAfterSave) onBack()
+    }
+
+    val hasUnsavedRequestSettings =
+        customBaseURL.ifBlank { null } != instance.customBaseURL ||
+            appendV1Suffix != instance.appendV1Suffix
+    val requestClose = {
+        if (hasUnsavedRequestSettings) {
+            showUnsavedChangesDialog = true
+        } else {
+            onBack()
+        }
+    }
+    BackHandler(enabled = hasUnsavedRequestSettings) {
+        showUnsavedChangesDialog = true
+    }
 
     val entries = providerRepository.entriesFor(instanceId)
     var isRefreshing by remember { mutableStateOf(false) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
 
+    if (showUnsavedChangesDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showUnsavedChangesDialog = false },
+            title = { Text(stringResource(R.string.request_unsaved_title)) },
+            text = { Text(stringResource(R.string.request_unsaved_message)) },
+            confirmButton = {
+                MinisTextButton(
+                    onClick = { saveRequestSettings(closeAfterSave = true) },
+                ) {
+                    Text(stringResource(R.string.common_save))
+                }
+            },
+            dismissButton = {
+                Column {
+                    MinisTextButton(onClick = onBack) {
+                        Text(stringResource(R.string.request_unsaved_discard))
+                    }
+                    MinisTextButton(onClick = { showUnsavedChangesDialog = false }) {
+                        Text(stringResource(R.string.request_unsaved_continue))
+                    }
+                }
+            },
+        )
+    }
+
     SettingsScaffold(
         title = instance.label,
-        onBack = onBack,
+        onBack = requestClose,
         actions = {
             IconButton(onClick = {
                 AppLogger.info(TAG, "Export instance ${instance.id} (${instance.label})")
@@ -278,64 +332,34 @@ fun ProviderDetailScreen(
                     thickness = 0.5.dp,
                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                 )
-                // [T-provider-custom-user-agent] Custom User-Agent input —
-                // only for OpenAI-/Anthropic-compat (relay) protocols. Some
-                // gateways reject Minis' default UA and only allow official
-                // clients (e.g. Claude Code). Blank → default UA. Official
-                // direct OpenAI/Anthropic instances still see the field because
-                // protocol == openAI/anthropic; it's harmless there (the value
-                // is only injected when this instance has a custom base, and on
-                // the official path customUserAgent stays at its default null
-                // unless the user typed one — applied verbatim if they do).
-                val showUserAgentField = instance.providerType == ProviderType.openAI ||
-                    instance.providerType == ProviderType.anthropic
-                if (showUserAgentField) {
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                        Text(
-                            text = stringResource(R.string.provider_detail_custom_user_agent),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        SectionTextField(
-                            value = customUserAgent,
-                            onValueChange = { customUserAgent = it },
-                            singleLine = true,
-                            placeholder = stringResource(R.string.provider_detail_custom_user_agent_placeholder),
-                            fieldModifier = Modifier.bringIntoViewOnFocus(),
-                        )
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        thickness = 0.5.dp,
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                    )
-                }
                 // Save action — TextButton presentation so it reads as a list
                 // row rather than a floating filled button inside the card.
                 MinisSmallTextButton(
-                    onClick = {
-                        providerRepository.updateInstance(
-                            instance.copy(
-                                customBaseURL = customBaseURL.ifBlank { null },
-                                appendV1Suffix = appendV1Suffix,
-                                // [T-provider-custom-user-agent] Blank → null →
-                                // default UA. Only the gated providers can edit
-                                // this; for others customUserAgent equals the
-                                // unchanged instance value, so the copy is inert.
-                                customUserAgent = customUserAgent.ifBlank { null },
-                            )
-                        )
-                        AppLogger.info(
-                            TAG,
-                            "Saved base URL for ${instance.id}: " +
-                                "url='${customBaseURL.ifBlank { "<default>" }}', appendV1=$appendV1Suffix, " +
-                                "ua='${customUserAgent.ifBlank { "<default>" }}'",
-                        )
-                    },
+                    onClick = { saveRequestSettings() },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.provider_detail_save_url_settings))
                 }
             }
+        }
+
+        SettingsSection(
+            footer = stringResource(
+                R.string.provider_request_customization_footer,
+            ),
+        ) {
+            SettingsRow(
+                title = stringResource(
+                    R.string.request_customization_title,
+                ),
+                subtitle = stringResource(
+                    R.string.provider_request_customization_summary,
+                    instance.customRequestHeaders.size,
+                    instance.customRequestBody.size,
+                ),
+                showDivider = false,
+                onClick = onRequestCustomization,
+            )
         }
 
         // ─── API Format (OpenAI API-key only) ───────────────────────

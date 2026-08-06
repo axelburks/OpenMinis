@@ -909,10 +909,8 @@ struct TypingIndicator: View {
 
     var body: some View {
         // The thinking-level badge that used to trail this indicator was
-        // removed — the nav-bar title (AIChatView.thinkingLevelBadge) is now
-        // the single place that shows and changes the thinking level, so a
-        // duplicate here was redundant. ThinkingLevelSheetView is unchanged;
-        // it's still presented from the nav-bar badge.
+        // removed; request controls now live behind AIChatView's composer
+        // control button.
         HStack(spacing: 0) {
             Text("\(soulName) is thinking")
             ForEach(0..<3, id: \.self) { i in
@@ -935,50 +933,6 @@ struct TypingIndicator: View {
                         .delay(Double(i) * 0.15)
                 ) {
                     dotOffsets[i] = true
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Thinking Level Sheet
-
-struct ThinkingLevelSheetView: View {
-    let currentLevel: ThinkingLevel
-    let availableLevels: [ThinkingLevel]
-    let onSelect: (ThinkingLevel) -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                thinkingRow(level: .off, isSelected: !currentLevel.isEnabled)
-                Section {
-                    ForEach(availableLevels, id: \.self) { level in
-                        thinkingRow(level: level, isSelected: currentLevel == level)
-                    }
-                }
-            }
-            .navigationTitle(String(localized: "Thinking Intensity"))
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    private func thinkingRow(level: ThinkingLevel, isSelected: Bool) -> some View {
-        Button {
-            onSelect(level)
-        } label: {
-            HStack {
-                Image("ThinkingIcon")
-                    .resizable()
-                    .frame(width: 16, height: 16)
-                    .opacity(level == .off ? 0.4 : 1.0)
-                Text(level.displayName)
-                    .foregroundStyle(.primary)
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .foregroundStyle(.blue)
-                        .fontWeight(.semibold)
                 }
             }
         }

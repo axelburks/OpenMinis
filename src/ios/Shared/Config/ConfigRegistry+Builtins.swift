@@ -192,24 +192,43 @@ extension ConfigRegistry {
         r.register(ClosureField(
             path: "session.thinkingLevel",
             displayName: "Thinking level (current session)",
-            description: "off / low / medium / high / xhigh / max / ultra. Applied to the active chat.",
-            valueSchema: .stringEnum(["off", "low", "medium", "high", "xhigh", "max", "ultra"]),
+            description: "An App-level thinking intensity ID. Applied to the active chat.",
+            valueSchema: .stringEnum(
+                ThinkingLevelRegistry
+                    .definitions.map(\.levelId)
+            ),
             risk: .normal, revertable: true,
             reader: {
                 guard let sid = AIChatViewModel.activeSessionId else { return .null }
-                let level = ProviderConfigStore.shared.inferenceConfig(for: sid)?.thinkingLevel ?? .off
-                return .string(level.rawValue)
+                let definitionId =
+                    ProviderConfigStore.shared
+                        .inferenceConfig(for: sid)?
+                        .thinkingDefinitionId
+                    ?? ThinkingLevelRegistry
+                        .offDefinitionId
+                return .string(
+                    ThinkingLevelRegistry.definition(
+                        forDefinitionId:
+                            definitionId
+                    )?.levelId
+                        ?? ThinkingLevel.off
+                            .rawValue
+                )
             },
             writer: { v in
                 guard case .string(let s) = v,
-                      let level = ThinkingLevel(rawValue: s) else {
-                    throw ConfigError.invalidValue("Unknown thinking level. Valid: \(ThinkingLevel.allCases.map(\.rawValue).joined(separator: ", "))")
+                      let definition =
+                        ThinkingLevelRegistry.definition(
+                            forLevelId: s
+                        ) else {
+                    throw ConfigError.invalidValue("Unknown thinking level. Valid: \(ThinkingLevelRegistry.definitions.map(\.levelId).joined(separator: ", "))")
                 }
                 guard let sid = AIChatViewModel.activeSessionId else {
                     throw ConfigError.invalidValue("No active session — open a chat first")
                 }
                 var cfg = ProviderConfigStore.shared.inferenceConfig(for: sid) ?? SessionInferenceConfig()
-                cfg.thinkingLevel = level
+                cfg.thinkingDefinitionId =
+                    definition.definitionId
                 ProviderConfigStore.shared.setInferenceConfig(cfg, for: sid)
             }
         ))
@@ -490,8 +509,17 @@ extension ConfigRegistry {
                         "name": .string(g.name),
                         "strategy": .string(g.strategy.rawValue),
                         "fallback_strategy": .string(g.fallbackStrategy.rawValue),
-                        "default_thinking_level": g.defaultThinkingLevel
-                            .map { .string($0.rawValue) } ?? .null,
+                        "default_thinking_level":
+                            g.defaultThinkingDefinitionId
+                                .flatMap {
+                                    ThinkingLevelRegistry
+                                        .definition(
+                                            forDefinitionId:
+                                                $0
+                                        )?.levelId
+                                }
+                                .map(ConfigValue.string)
+                                ?? .null,
                         "context_limit_tokens": g.contextLimitTokens
                             .map { .int($0) } ?? .null,
                         "entries": .array(entries),

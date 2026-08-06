@@ -235,6 +235,7 @@ struct AIChatView: View {
     @State private var inputHasSelection: Bool = false
     @State private var inputIsScrollable: Bool = false
     @State private var inputBarHeight: CGFloat = 0
+    @State private var inputPopupAnchorHeight: CGFloat?
     @State private var inputBarHeightDebounce: Task<Void, Never>?
     /// [T-voice-inputbar-anim-tail] The most recent ON-SCREEN composer height
     /// reported by onGeometryChange. The debounced commit reads THIS instead of
@@ -330,7 +331,8 @@ struct AIChatView: View {
     /// True while unsent share-extension content is in the input bar.
     @State private var hasInjectedShareContent = false
     @State private var showModelPicker = false
-    @State private var showThinkingLevelSheet = false
+    @State private var showStructuredControlsSheet = false
+    @State private var requestCustomizationEntry: ModelEntry?
     @State private var showSessionSkills = false
     @State private var showSessionMCPs = false
     @State private var showSessionMemory = false
@@ -488,12 +490,13 @@ struct AIChatView: View {
                         // land outside the popup card. Taps on the popup
                         // itself naturally fall through to the popup view
                         // because it sits on top in z-order.
-                        if vm.showSlashMenu || vm.showMentionMenu {
+                        if showStructuredControlsSheet
+                            || vm.showSlashMenu
+                            || vm.showMentionMenu {
                             Color.clear
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    if vm.showSlashMenu { vm.dismissSlashMenu() }
-                                    else if vm.showMentionMenu { vm.dismissMentionMenu() }
+                                    dismissInputPopup()
                                 }
                         }
                         VStack(spacing: 0) {
@@ -513,7 +516,13 @@ struct AIChatView: View {
                         // region the global speech capsule must not cover.
                         .capsuleProtectedFrame("inputBar")
                         inputPopupOverlay
-                            .padding(.bottom, inputBarHeight)
+                            .padding(
+                                .bottom,
+                                max(
+                                    inputPopupAnchorHeight ?? 0,
+                                    max(inputBarHeight, latestInputBarFrameH)
+                                )
+                            )
                     }
                 }
                 // Collapse the expanded speech player on a tap anywhere in the chat
@@ -585,6 +594,12 @@ struct AIChatView: View {
             kernelBootOverlay
         }
         .background(ChatColors.background)
+        .background {
+            MinixInteractivePopGestureController(
+                isDisabled: showStructuredControlsSheet
+            )
+            .frame(width: 0, height: 0)
+        }
         .onDrop(of: [.image, .movie, .fileURL, .data], isTargeted: $isDropTargeted) { providers in
             handleDropProviders(providers)
             return true
@@ -806,6 +821,11 @@ struct AIChatView: View {
             // the user can keep typing without an extra tap on the field.
             inputFocused = true
         }
+        .onChange(of: inputFocused) { focused in
+            if focused {
+                closeStructuredControlsIfNeeded()
+            }
+        }
         .modifier(ChatInputAppendListener(vm: vm, inputFocused: $inputFocused))
         .modifier(RerunFromToolBlockListener(vm: vm))
         .fullScreenCover(item: $previewVideoFile) { fileURL in
@@ -909,6 +929,9 @@ struct AIChatView: View {
                 }
             }
             .presentationDetents([.large])
+        }
+        .sheet(item: $requestCustomizationEntry) { entry in
+            ModelRequestCustomizationSheet(entry: entry)
         }
         .sheet(isPresented: $showTokenUsage) {
             TokenUsageSheet(vm: cached.vm)
@@ -1818,8 +1841,13 @@ struct AIChatView: View {
             resolvedText: resolved.map { "\($0.providerLabel) · \($0.modelName)" },
             hasBinding: vm.sessionId != nil && configStore.binding(for: vm.sessionId!) != nil,
             hasProviders: !configStore.instances.isEmpty,
-            showThinkingBadge: !vm.availableThinkingLevels.isEmpty && vm.currentThinkingLevel.isEnabled,
-            thinkingLevelName: vm.currentThinkingLevel.displayName,
+            showThinkingBadge:
+                !vm.availableThinkingDefinitionIds
+                    .isEmpty
+                && vm.currentThinkingDefinitionId
+                    != ThinkingLevelRegistry
+                        .offDefinitionId,
+            thinkingLevelName: vm.currentThinkingLevelTitle,
             fallbackTrigger: vm.fallbackTrigger,
             fallbackPulse: fallbackPulseOpacity,
             titleLocked: titleIsVisuallyLocked
@@ -1985,13 +2013,8 @@ struct AIChatView: View {
                 }
 
                 if let detail = resolved {
-                    // Row 2: "provider · model" + the thinking-level badge as a
-                    // SEPARATE tappable sibling (not nested in the model-picker
-                    // Button) so the badge opens ThinkingLevelSheetView while the
-                    // text still opens the model picker — mirroring how row 1's
-                    // model-name Button and badge were laid out. The model name
-                    // truncates first (layoutPriority(-1) + lineLimit(1)); the
-                    // badge keeps its intrinsic size and always shows in full.
+                    // Row 2: "provider · model" + a read-only thinking-level badge.
+                    // The request-control button in the composer owns changes.
                     HStack(spacing: 4) {
                         // [T-codex-fast-mode] Circular-background ⚡ badge in
                         // front of the resolved model line (row 3) while Fast
@@ -2046,7 +2069,12 @@ struct AIChatView: View {
                         // entirely rather than render a placeholder. The picker
                         // still lists Off, so users can turn thinking back off from
                         // there.
-                        if !vm.availableThinkingLevels.isEmpty, vm.currentThinkingLevel.isEnabled {
+                        if !vm
+                            .availableThinkingDefinitionIds
+                            .isEmpty,
+                           vm.currentThinkingDefinitionId
+                            != ThinkingLevelRegistry
+                                .offDefinitionId {
                             thinkingLevelBadge
                                 .fixedSize()
                                 // Match the model-name line's descender
@@ -2122,7 +2150,6 @@ struct AIChatView: View {
 
     @ViewBuilder
     private var thinkingLevelBadge: some View {
-        let level = vm.currentThinkingLevel
         // Sits on nav-bar row 2 (the 9pt "provider · model" line). Kept a
         // touch smaller than that text (8pt / 6px icon) so it stays the most
         // compact label in the title and never larger than the "is thinking…"
@@ -2134,27 +2161,13 @@ struct AIChatView: View {
             Image("ThinkingIcon")
                 .resizable()
                 .frame(width: 6, height: 6)
-            Text(level.displayName)
+            Text(vm.currentThinkingLevelTitle)
                 .font(.system(size: 8, weight: .medium))
         }
         .foregroundStyle(ChatColors.secondaryText)
         .padding(.horizontal, 4)
         .padding(.vertical, 1)
         .background(Capsule().fill(Color.secondary.opacity(0.10)))
-        .onTapGesture {
-            showThinkingLevelSheet = true
-        }
-        .sheet(isPresented: $showThinkingLevelSheet) {
-            ThinkingLevelSheetView(
-                currentLevel: level,
-                availableLevels: vm.availableThinkingLevels,
-                onSelect: { newLevel in
-                    vm.setThinkingLevel(newLevel)
-                    showThinkingLevelSheet = false
-                }
-            )
-            .presentationDetents([.medium])
-        }
     }
 
     /// True when the current session's navbar title must render blurred —
@@ -2353,6 +2366,9 @@ struct AIChatView: View {
                 floatingBarHeight: floatingBarHeight,
                 inputBarHeight: inputBarHeight
             )
+            .simultaneousGesture(TapGesture().onEnded {
+                closeStructuredControlsIfNeeded()
+            })
             // Empty/loading overlay for tap-to-dismiss-keyboard.
             // Placed BEFORE the directory timeline in the ZStack so the
             // timeline can sit on top and receive its own taps (folder-card
@@ -2362,7 +2378,10 @@ struct AIChatView: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .onTapGesture { inputFocused = false }
+                    .onTapGesture {
+                        inputFocused = false
+                        closeStructuredControlsIfNeeded()
+                    }
             }
             // Empty-chat onboarding tip: a single card explaining the
             // per-session vs cross-session /var/minis/ layout. Only shown
@@ -2895,7 +2914,11 @@ struct AIChatView: View {
     private var inputBottomRow: AnyView {
         let row = HStack(spacing: 12) {
             attachmentMenuButton
+                .accessibilityIdentifier("attachmentMenuButton")
+            structuredControlsButton
+                .accessibilityIdentifier("requestControlsButton")
             slashMenuButton
+                .accessibilityIdentifier("slashMenuButton")
             if vm.editingMessageIndex != nil { editExitButton }
             Spacer()
             // Mutually exclusive with editExitButton: while editing a past
@@ -2964,6 +2987,8 @@ struct AIChatView: View {
             if vm.showSlashMenu {
                 vm.dismissSlashMenu()
             } else {
+                showStructuredControlsSheet = false
+                vm.dismissMentionMenu()
                 vm.showSlashMenuOverInput()
                 inputFocused = true
             }
@@ -2977,6 +3002,42 @@ struct AIChatView: View {
                 .clipShape(Circle())
                 .overlay(Circle().stroke(ChatColors.inputIconBorder, lineWidth: 0.5))
         }
+    }
+
+    /// Dedicated request-control button shown next to the slash menu.
+    private var structuredControlsButton: some View {
+        Image(systemName: "slider.horizontal.3")
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(
+                showStructuredControlsSheet
+                    ? Color.accentColor
+                    : (requestControlsAvailable ? ChatColors.secondaryText : ChatColors.secondaryText.opacity(0.45))
+            )
+            .frame(width: 34, height: 34)
+            .background(ChatColors.inputIconBg)
+            .clipShape(Circle())
+            .overlay(Circle().stroke(ChatColors.inputIconBorder, lineWidth: 0.5))
+            .contentShape(Circle())
+            .onTapGesture {
+                guard requestControlsAvailable else { return }
+                setRequestControlsExpanded(
+                    !showStructuredControlsSheet
+                )
+            }
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                guard requestControlsAvailable else { return }
+                setRequestControlsExpanded(
+                    !showStructuredControlsSheet
+                )
+            }
+            .accessibilityHidden(!requestControlsAvailable)
+            .allowsHitTesting(requestControlsAvailable)
+    }
+
+    private var requestControlsAvailable: Bool {
+        !vm.currentRequestBodyControls.isEmpty || !vm.availableThinkingLevels.isEmpty
     }
 
     /// "Exit Edit Mode" capsule shown while editing a past message.
@@ -3078,8 +3139,16 @@ struct AIChatView: View {
                     inputText: inputTextBinding,
                     onPasteImage: { image in vm.addImageAttachment(image) },
                     onPasteFile: { url in vm.addFileAttachment(from: url) },
-                    conversationContext: { voiceCorrectionContext(from: vm.messages) }
+                    conversationContext: {
+                        voiceCorrectionContext(
+                            from: vm.messages,
+                            sessionId: vm.sessionId
+                        )
+                    }
                 )
+                .simultaneousGesture(TapGesture().onEnded {
+                    closeStructuredControlsIfNeeded()
+                })
             )
         }
         if speechManager.state == .recording {
@@ -3156,10 +3225,14 @@ struct AIChatView: View {
             },
             desiredCaret: vm.pendingCaret
         )
+        .accessibilityIdentifier("chatComposerTextView")
         .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 16)
         .padding(.top, topPadding)
         .padding(.bottom, 10)
+        .simultaneousGesture(TapGesture().onEnded {
+            closeStructuredControlsIfNeeded()
+        })
         return AnyView(field)
     }
 
@@ -3234,7 +3307,10 @@ struct AIChatView: View {
                     .padding(.bottom, 10)
             }
             .contentShape(RoundedRectangle(cornerRadius: 20))
-            .onTapGesture { inputFocused = true }
+            .onTapGesture {
+                closeStructuredControlsIfNeeded()
+                inputFocused = true
+            }
             .onReceive(speechManager.$recognizedText) { text in
                 guard speechManager.state == .recording || !text.isEmpty else { return }
                 // Append only the new delta to preserve existing input text
@@ -3617,7 +3693,13 @@ struct AIChatView: View {
     @ViewBuilder
     private var inputPopupOverlay: some View {
         ZStack {
-            if vm.showSlashMenu && !vm.filteredSlashCommands.isEmpty {
+            if showStructuredControlsSheet {
+                popupOverlayContainer(onDismiss: {
+                    showStructuredControlsSheet = false
+                }) {
+                    requestControlsPopup
+                }
+            } else if vm.showSlashMenu && !vm.filteredSlashCommands.isEmpty {
                 popupOverlayContainer(onDismiss: { vm.dismissSlashMenu() }) {
                     slashCommandMenu
                 }
@@ -3632,6 +3714,20 @@ struct AIChatView: View {
         // touch of overshoot to read as iOS 26-native.
         .animation(.spring(response: 0.18, dampingFraction: 0.82), value: vm.showSlashMenu)
         .animation(.spring(response: 0.18, dampingFraction: 0.82), value: vm.showMentionMenu)
+        .animation(.easeOut(duration: 0.1), value: showStructuredControlsSheet)
+        .onChange(
+            of: showStructuredControlsSheet
+                || vm.showSlashMenu
+                || vm.showMentionMenu
+        ) { isVisible in
+            if isVisible {
+                if inputPopupAnchorHeight == nil {
+                    inputPopupAnchorHeight = inputBarHeight
+                }
+            } else {
+                inputPopupAnchorHeight = nil
+            }
+        }
     }
 
     /// [T-ipad-inputbar-height-zero] Bounds of the window hosting the chat, in
@@ -3686,6 +3782,65 @@ struct AIChatView: View {
             ))
     }
 
+    private var requestControlsPopup: some View {
+        let display = SessionModelDisplay(
+            store: configStore,
+            draftGroupId: vm.initialGroupId
+        )
+        let detail = display.resolvedDetail(for: vm.sessionId)
+        let entry = vm.currentRequestCustomizationEntry
+        let providerName = detail?.providerLabel
+            ?? entry.flatMap {
+                configStore.instance(for: $0.providerInstanceId)?.label
+            }
+            ?? entry?.model.provider
+            ?? String(localized: "Provider")
+        let modelName = detail?.modelName
+            ?? entry?.model.displayName
+            ?? display.displayName(for: vm.sessionId)
+
+        return InputBarPopupChrome(maxContentWidth: maxContentWidth) {
+            MinixChatRequestControlsPanel(
+                providerName: providerName,
+                modelName: modelName,
+                currentThinkingDefinitionId:
+                    vm.currentThinkingDefinitionId,
+                currentThinkingLevelTitle: vm.currentThinkingLevelTitle,
+                availableThinkingLevels: vm.availableThinkingLevels,
+                controls: vm.currentRequestBodyControls,
+                sessionKey:
+                    vm.currentRequestBodyControlSessionKey,
+                modelKey: vm.currentRequestBodyControlModelKey,
+                onSelectThinkingDefinitionId: {
+                    definitionId in
+                    vm.setThinkingDefinitionId(
+                        definitionId
+                    )
+                },
+                onOpenModelPicker: {
+                    withAnimation {
+                        showStructuredControlsSheet = false
+                    }
+                    DispatchQueue.main.async {
+                        showModelPicker = true
+                    }
+                },
+                onOpenRequestCustomization: {
+                    guard let entry =
+                            vm.currentRequestCustomizationEntry else {
+                        return
+                    }
+                    withAnimation {
+                        showStructuredControlsSheet = false
+                    }
+                    DispatchQueue.main.async {
+                        requestCustomizationEntry = entry
+                    }
+                }
+            )
+        }
+    }
+
     /// Slash command popup — matches FloatingToolBar width/radius/shadow, overlays on top of it.
     /// [T-slash-picker-scroll] Wrapped in ScrollView with a half-screen height
     /// cap so long command lists (skills + builtin actions) stay reachable
@@ -3707,37 +3862,17 @@ struct AIChatView: View {
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 2)
                         }
-                        if cmd.id == "thinking" {
-                            let supported = vm.currentModelSupportsReasoning
+                        Button {
+                            vm.executeSlashCommand(cmd)
+                        } label: {
                             SlashCommandRow(
                                 cmd: cmd,
                                 isSelected: isSelected,
-                                memoryEnabled: vm.memoryEnabled,
-                                thinkingLevel: vm.currentThinkingLevel,
-                                thinkingSupported: supported,
-                                availableLevels: vm.availableThinkingLevels,
-                                onSetThinkingLevel: supported ? { level in
-                                    vm.setThinkingLevel(level)
-                                } : nil,
-                                onToggleThinking: supported ? {
-                                    let newLevel: ThinkingLevel = vm.currentThinkingLevel.isEnabled ? .off : .medium
-                                    vm.setThinkingLevel(newLevel)
-                                    vm.dismissSlashMenu()
-                                } : nil
+                                memoryEnabled: vm.memoryEnabled
                             )
-                        } else {
-                            Button {
-                                vm.executeSlashCommand(cmd)
-                            } label: {
-                                SlashCommandRow(
-                                    cmd: cmd,
-                                    isSelected: isSelected,
-                                    memoryEnabled: vm.memoryEnabled
-                                )
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(SlashMenuButtonStyle(isSelected: isSelected))
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(SlashMenuButtonStyle(isSelected: isSelected))
                     }
                 }
             }
@@ -3951,38 +4086,15 @@ struct AIChatView: View {
         let cmd: AIChatViewModel.SlashCommand
         let isSelected: Bool
         let memoryEnabled: Bool
-        var thinkingLevel: ThinkingLevel = .off
-        var thinkingSupported: Bool = true
-        var availableLevels: [ThinkingLevel] = ThinkingLevel.allCases
-        var onSetThinkingLevel: ((ThinkingLevel) -> Void)?
-        var onToggleThinking: (() -> Void)?
 
         var body: some View {
             HStack(spacing: 8) {
-                // Label area — tap to toggle thinking on/off and dismiss
                 HStack(spacing: 8) {
-                    Group {
-                        if cmd.id == "thinking" {
-                            Image("ThinkingIcon")
-                                .resizable()
-                                .frame(width: 16, height: 16)
-                        } else {
-                            Image(systemName: cmd.icon)
-                                .font(.system(size: 14, weight: .medium))
-                        }
-                    }
-                    .foregroundStyle(thinkingIconColor)
-                    .frame(width: 20)
+                    Image(systemName: cmd.icon)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(isSelected ? .white.opacity(0.8) : ChatColors.secondaryText)
+                        .frame(width: 20)
                     VStack(alignment: .leading, spacing: 1) {
-                        let isThinkingActive = cmd.id == "thinking" && thinkingLevel.isEnabled && thinkingSupported
-                        let titleColor: Color = isThinkingActive
-                            ? .blue : (isSelected ? .white : ChatColors.primaryText)
-                        let subtitleText = (cmd.id == "thinking" && !thinkingSupported)
-                            ? String(localized: "Not supported by current model")
-                            : cmd.subtitle
-                        let subtitleColor: Color = (cmd.id == "thinking" && !thinkingSupported)
-                            ? .secondary
-                            : (isThinkingActive ? .blue.opacity(0.7) : (isSelected ? .white.opacity(0.7) : ChatColors.secondaryText))
                         // [T-slash-picker-product-rules] Title + subtitle
                         // each clamped to a single line. Long skill names
                         // and descriptions used to wrap and pump the row
@@ -3990,77 +4102,27 @@ struct AIChatView: View {
                         // multi-screen picker.
                         Text("/\(cmd.title.lowercased())")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(titleColor)
+                            .foregroundStyle(isSelected ? .white : ChatColors.primaryText)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        Text(subtitleText)
+                        Text(cmd.subtitle)
                             .font(.system(size: 11))
-                            .foregroundStyle(subtitleColor)
+                            .foregroundStyle(isSelected ? .white.opacity(0.7) : ChatColors.secondaryText)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
                     Spacer()
                 }
                 .contentShape(Rectangle())
-                .allowsHitTesting(cmd.id == "thinking")
-                .onTapGesture { onToggleThinking?() }
                 if cmd.id == "memory" {
                     Image(systemName: memoryEnabled ? "checkmark.circle.fill" : "slash.circle")
                         .font(.system(size: 16))
                         .foregroundStyle(memoryEnabled ? (isSelected ? .white : .green) : (isSelected ? .white.opacity(0.6) : .secondary))
                 }
-                if cmd.id == "thinking" && thinkingSupported {
-                    thinkingLevelPicker
-                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .frame(minHeight: 44)
-        }
-
-        private var thinkingIconColor: Color {
-            guard cmd.id == "thinking" else {
-                return isSelected ? .white.opacity(0.8) : ChatColors.secondaryText
-            }
-            if !thinkingSupported { return .secondary }
-            return thinkingLevel.isEnabled ? .blue : (isSelected ? .white.opacity(0.8) : ChatColors.secondaryText)
-        }
-
-        private var thinkingLevelPicker: some View {
-            let maxAvailable = availableLevels.last
-            let isClamped = thinkingLevel.isEnabled && maxAvailable != nil && thinkingLevel > (maxAvailable ?? thinkingLevel)
-
-            return HStack(spacing: 0) {
-                ForEach(availableLevels, id: \.self) { level in
-                    let isExactMatch = thinkingLevel == level
-                    let isClampedHighlight = isClamped && level == maxAvailable
-                    let isHighlighted = isExactMatch || isClampedHighlight
-
-                    HStack(spacing: 1) {
-                        Text(level.displayName)
-                            .font(.system(size: 11, weight: isHighlighted ? .bold : .regular))
-                        if isClampedHighlight {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 8, weight: .bold))
-                        }
-                    }
-                    .foregroundStyle(isHighlighted ? .white : .secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .background(
-                        isHighlighted
-                            ? (isClampedHighlight
-                                ? Color.orange.opacity(0.75)
-                                : Color.blue)
-                            : Color.clear
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture { onSetThinkingLevel?(isHighlighted ? .off : level) }
-                    .id(level)
-                }
-            }
-            .background(Color.secondary.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
     }
 
@@ -4086,8 +4148,43 @@ struct AIChatView: View {
             || !vm.attachments.isEmpty
     }
 
+    private func dismissKeyboard() {
+        guard GCKeyboard.coalesced == nil else { return }
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    private func closeStructuredControlsIfNeeded() {
+        guard showStructuredControlsSheet else { return }
+        showStructuredControlsSheet = false
+    }
+
+    private func dismissInputPopup() {
+        if showStructuredControlsSheet {
+            showStructuredControlsSheet = false
+        } else if vm.showSlashMenu {
+            vm.dismissSlashMenu()
+        } else if vm.showMentionMenu {
+            vm.dismissMentionMenu()
+        }
+    }
+
+    private func setRequestControlsExpanded(_ expanded: Bool) {
+        if expanded {
+            if vm.showSlashMenu {
+                vm.dismissSlashMenu()
+            }
+            if vm.showMentionMenu {
+                vm.dismissMentionMenu()
+            }
+            inputFocused = false
+            dismissKeyboard()
+        }
+        showStructuredControlsSheet = expanded
+    }
 
     private func performEnqueue() {
+        closeStructuredControlsIfNeeded()
         // Dismiss the software keyboard on enqueue. With a hardware keyboard,
         // keep focus so the user can continue typing the next candidate.
         if GCKeyboard.coalesced == nil {
@@ -4113,6 +4210,7 @@ struct AIChatView: View {
 
     /// Dismiss keyboard (commit dictation/marked text) before sending.
     private func performSend() {
+        closeStructuredControlsIfNeeded()
         // Intercept slash commands — execute instead of sending to LLM
         if vm.tryExecuteInputAsSlashCommand() { return }
 
@@ -5353,6 +5451,7 @@ private struct MicButton: View {
                     }
             )
             .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier("voiceInputButton")
             .accessibilityLabel(isVoiceActive
                 ? Text("Switch to text input", comment: "Mic button exits voice mode")
                 : Text("Voice input", comment: "Mic button opens voice panel"))
@@ -5774,7 +5873,10 @@ private struct SessionLoadingCard: View {
 /// This is what lets correction work on a FRESH INSTALL. With both learned tables empty and
 /// no context, the prompt has no evidence at all and the model correctly refuses to change
 /// anything — which is exactly why the suggestion icon never appeared on a new device.
-func voiceCorrectionContext(from messages: [ChatMessage]) -> ConversationContext {
+func voiceCorrectionContext(
+    from messages: [ChatMessage],
+    sessionId: String? = nil
+) -> ConversationContext {
     // Budgeted builder (2026-07-16): sentence-split + segment + rarity-rank the
     // recent turns, expanding the message count under a 5k-char budget, instead
     // of the original "last user + reply, first 500 chars each". §12.1 still
@@ -5806,7 +5908,9 @@ func voiceCorrectionContext(from messages: [ChatMessage]) -> ConversationContext
             return CorrectionSourceMessage(role: msg.role == .user ? .user : .assistant,
                                            text: TypedVocabularyBuilder.stripAttachmentMarkup(text))
         }
-    return CorrectionContextBuilder.build(messages: source)
+    var context = CorrectionContextBuilder.build(messages: source)
+    context.sessionId = sessionId
+    return context
 }
 
 /// [T-browser-download-ux-v2] Sheet item for "Show in Files" from the

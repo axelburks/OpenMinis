@@ -8,7 +8,7 @@ enum OpenRouterModelsAPI {
 
     private static let baseURL = "https://openrouter.ai/api/v1"
 
-    static func fetchModels(apiKey: String, forceRefresh: Bool = false) async throws -> [LLMModel] {
+    static func fetchModels(apiKey: String, forceRefresh: Bool = false, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         if !forceRefresh, let cached = OpenRouterModelsCache.load(credential: apiKey) {
             logger.info("Returning \(cached.count) cached OpenRouter models")
             return cached
@@ -19,6 +19,9 @@ enum OpenRouterModelsAPI {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("https://github.com/OpenMinis/OpenMinis", forHTTPHeaderField: "HTTP-Referer")
         request.setValue("Minis App", forHTTPHeaderField: "X-Title")
+        for (key, value) in customHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         logger.info("Fetching OpenRouter models")
 
         let (data, response) = try await URLSession.shared.data(for: request)

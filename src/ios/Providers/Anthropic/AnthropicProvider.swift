@@ -24,6 +24,12 @@ final class AnthropicProvider: LLMProvider {
     /// The underlying SDK service — exposed for direct tool-use calls.
     let service: AnthropicService
 
+    var requestCustomization: RequestCustomization? {
+        didSet {
+            requestCustomizationBox.setCustomization(requestCustomization)
+        }
+    }
+
     /// Whether this provider uses Claude Code OAuth credentials.
     let isClaudeCode: Bool
 
@@ -39,6 +45,10 @@ final class AnthropicProvider: LLMProvider {
     /// those endpoints only, and leave the official endpoint alone
     /// where signature-less thinking blocks are rejected.
     let isOfficialAnthropicEndpoint: Bool
+
+    private let staticRequestAPIKey: String?
+    private let requestOAuthTokenProvider: (@Sendable () async throws -> String)?
+    private let requestCustomizationBox: AnthropicRequestCustomizationBox
 
     /// Required system prompt prefix for Claude Code OAuth credentials.
     ///
@@ -127,10 +137,14 @@ final class AnthropicProvider: LLMProvider {
         return host == "api.anthropic.com" || host.hasSuffix(".anthropic.com")
     }
 
-    init(apiKey: String, model: LLMModel = .claudeHaiku45, basePath: String? = nil, appendV1Suffix: Bool = true, customUserAgent: String? = nil) {
+    init(apiKey: String, model: LLMModel = .claudeHaiku45, basePath: String? = nil, appendV1Suffix: Bool = true) {
+        let customizationBox = AnthropicRequestCustomizationBox(apiKey: apiKey)
         self.model = model
         self.isClaudeCode = false
         self.betaHeaders = nil
+        self.staticRequestAPIKey = apiKey
+        self.requestOAuthTokenProvider = nil
+        self.requestCustomizationBox = customizationBox
         let resolvedBase = appendV1Suffix
             ? stripV1Suffix(basePath ?? "https://api.anthropic.com")
             : (basePath ?? "https://api.anthropic.com")
@@ -139,16 +153,24 @@ final class AnthropicProvider: LLMProvider {
             apiKey: apiKey,
             basePath: resolvedBase,
             betaHeaders: nil,
-            httpClient: EagerStreamingHTTPClient(customUserAgent: customUserAgent)
+            httpClient: EagerStreamingHTTPClient(
+                customizationBox: customizationBox
+            )
         )
     }
 
     /// Manual token constructor: sends both `x-api-key` and `Authorization: Bearer` headers
     /// for maximum compatibility with third-party proxies and Coding Plan endpoints.
-    init(manualToken: String, model: LLMModel = .claudeHaiku45, basePath: String? = nil, appendV1Suffix: Bool = true, customUserAgent: String? = nil) {
+    init(manualToken: String, model: LLMModel = .claudeHaiku45, basePath: String? = nil, appendV1Suffix: Bool = true) {
+        let customizationBox = AnthropicRequestCustomizationBox(
+            apiKey: manualToken
+        )
         self.model = model
         self.isClaudeCode = false
         self.betaHeaders = nil
+        self.staticRequestAPIKey = manualToken
+        self.requestOAuthTokenProvider = nil
+        self.requestCustomizationBox = customizationBox
         let resolvedBase = appendV1Suffix
             ? stripV1Suffix(basePath ?? "https://api.anthropic.com")
             : (basePath ?? "https://api.anthropic.com")
@@ -157,7 +179,9 @@ final class AnthropicProvider: LLMProvider {
             apiKey: manualToken,
             basePath: resolvedBase,
             betaHeaders: nil,
-            httpClient: DualAuthHTTPClient(customUserAgent: customUserAgent)
+            httpClient: DualAuthHTTPClient(
+                customizationBox: customizationBox
+            )
         )
     }
 
@@ -168,9 +192,13 @@ final class AnthropicProvider: LLMProvider {
         appendV1Suffix: Bool = true
     ) {
         let headers = ["oauth-2025-04-20"]
+        let customizationBox = AnthropicRequestCustomizationBox()
         self.model = model
         self.isClaudeCode = true
         self.betaHeaders = headers
+        self.staticRequestAPIKey = nil
+        self.requestOAuthTokenProvider = oauthTokenProvider
+        self.requestCustomizationBox = customizationBox
         let resolvedBase = appendV1Suffix
             ? stripV1Suffix(basePath ?? "https://api.anthropic.com")
             : (basePath ?? "https://api.anthropic.com")
@@ -179,8 +207,32 @@ final class AnthropicProvider: LLMProvider {
             apiKey: "oauth-placeholder",
             basePath: resolvedBase,
             betaHeaders: headers,
-            httpClient: OAuthHTTPClient(tokenProvider: oauthTokenProvider)
+            httpClient: OAuthHTTPClient(
+                tokenProvider: oauthTokenProvider,
+                customizationBox: customizationBox
+            )
         )
+    }
+
+    func prepareRequestCustomization() async {
+        requestCustomizationBox.setCustomization(requestCustomization)
+        guard requestCustomization?
+            .referencesProviderAPIKey == true
+        else {
+            requestCustomizationBox.setAPIKey(
+                staticRequestAPIKey
+            )
+            return
+        }
+        let apiKey: String?
+        if let staticRequestAPIKey {
+            apiKey = staticRequestAPIKey
+        } else if let requestOAuthTokenProvider {
+            apiKey = try? await requestOAuthTokenProvider()
+        } else {
+            apiKey = nil
+        }
+        requestCustomizationBox.setAPIKey(apiKey)
     }
 
     /// Build the effective system prompt.
@@ -211,6 +263,7 @@ final class AnthropicProvider: LLMProvider {
         maxTokens: Int,
         temperature: Double?
     ) async throws -> LLMResponse {
+        await prepareRequestCustomization()
         let parameter = MessageParameter(
             model: .other(model.id),
             messages: messages.map { $0.toAnthropicMessage() },
@@ -258,6 +311,7 @@ final class AnthropicProvider: LLMProvider {
         maxTokens: Int,
         temperature: Double?
     ) async throws -> AsyncThrowingStream<LLMStreamChunk, Error> {
+        await prepareRequestCustomization()
         let parameter = MessageParameter(
             model: .other(model.id),
             messages: messages.map { $0.toAnthropicMessage() },

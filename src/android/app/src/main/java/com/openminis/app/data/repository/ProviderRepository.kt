@@ -21,13 +21,17 @@ import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.SystemVoiceIds
+import com.openminis.app.data.model.ThinkingLevelDefinition
+import com.openminis.app.data.model.ThinkingLevelRegistry
 import com.openminis.app.data.model.VoiceProviderTemplate
 import com.openminis.app.data.model.hasAudioInput
 import com.openminis.app.data.model.hasAudioOutput
 import com.openminis.app.data.model.hasVoiceModality
 import com.openminis.app.data.model.isVoiceTemplateSeedShape
+import com.openminis.app.data.model.thinkingDefinitionReferenceCount
 import com.openminis.app.data.model.withInferredVoiceModality
 import com.openminis.app.provider.ModelsDevApi
+import com.openminis.app.provider.RequestCustomization
 import com.openminis.app.provider.anthropic.AnthropicModelsApi
 import com.openminis.app.provider.gemini.GeminiModelsApi
 import com.openminis.app.provider.openai.OpenAIModelsApi
@@ -39,6 +43,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 // Modality bit layout — must match src/ios/Providers/LLMTypes.swift
@@ -976,6 +981,16 @@ class ProviderRepository(private val context: Context) {
         }
     }
 
+    fun thinkingDefinitionReferenceCount(
+        definitionId: String,
+    ): Int {
+        ensureConfigLoaded()
+        return _config.value
+            .thinkingDefinitionReferenceCount(
+                definitionId,
+            )
+    }
+
     fun removeEntry(entryId: String) {
         ensureConfigLoaded()
         val config = _config.value
@@ -1591,18 +1606,49 @@ class ProviderRepository(private val context: Context) {
 
         if (apiKey != null) {
             val baseURL = instance.effectiveBaseURL
+            fun customHeaders(initial: Map<String, String>): Map<String, String> =
+                RequestCustomization.providerHeadersForModelList(instance, apiKey, initial)
             val models = try {
                 when (instance.providerType) {
                     ProviderType.anthropic -> AnthropicModelsApi.fetchModels(
                         apiKey, baseURL,
                         isOAuth = instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth,
-                        // [T-provider-custom-user-agent] models-list UA override.
-                        customUserAgent = instance.customUserAgent,
+                        customHeaders = customHeaders(
+                            if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
+                                mapOf(
+                                    "Authorization" to "Bearer $apiKey",
+                                    "anthropic-version" to "2023-06-01",
+                                    "anthropic-beta" to "oauth-2025-04-20",
+                                )
+                            } else if (baseURL != null) {
+                                mapOf(
+                                    "Authorization" to "Bearer $apiKey",
+                                    "anthropic-version" to "2023-06-01",
+                                )
+                            } else {
+                                mapOf(
+                                    "x-api-key" to apiKey,
+                                    "anthropic-version" to "2023-06-01",
+                                )
+                            },
+                        ),
                     )
-                    ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey)
-                    // [T-provider-custom-user-agent] models-list UA override.
-                    ProviderType.openAI -> OpenAIModelsApi.fetchModels(apiKey, baseURL, customUserAgent = instance.customUserAgent)
-                    ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(apiKey)
+                    ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey, customHeaders = customHeaders(emptyMap()))
+                    ProviderType.openAI -> OpenAIModelsApi.fetchModels(
+                        apiKey,
+                        baseURL,
+                        customHeaders = customHeaders(mapOf("Authorization" to "Bearer $apiKey")),
+                    )
+                    ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(
+                        apiKey,
+                        customHeaders = customHeaders(
+                            mapOf(
+                                "Authorization" to "Bearer $apiKey",
+                                "HTTP-Referer" to "https://github.com/OpenMinis/OpenMinis",
+                                "X-Title" to "Minis App",
+                            ),
+                        ),
+                    )
                     // xAI: the OAuth model list is fixed (no /v1/models gating
                     // call needed — XAIModelsApi exposes the spec-mandated set).
                     // For API-key users we still call the same static list; if
@@ -1617,7 +1663,7 @@ class ProviderRepository(private val context: Context) {
                     ProviderType.kimiCode -> OpenAIModelsApi.fetchModels(
                         apiKey,
                         baseURL ?: "${com.openminis.app.auth.KimiDeviceFlow.CODING_API_BASE}/v1",
-                        customUserAgent = instance.customUserAgent,
+                        customHeaders = customHeaders(mapOf("Authorization" to "Bearer $apiKey")),
                     )
                 }
             } catch (e: Exception) {
@@ -1822,17 +1868,12 @@ class ProviderRepository(private val context: Context) {
                     // win when present (Android↔Android lossless), bitfield is
                     // the iOS→Android fallback.
                     if (!entry.overrides.isEmpty) {
-                        val o = JSONObject()
-                        entry.overrides.displayName?.let { o.put("displayName", it) }
-                        entry.overrides.maxOutputTokens?.let { o.put("maxOutputTokens", it) }
-                        entry.overrides.contextWindow?.let { o.put("contextWindow", it) }
-                        entry.overrides.supportsReasoning?.let { o.put("supportsReasoning", it) }
-                        entry.overrides.inputModalities?.let {
-                            o.put("inputModalities", JSONArray(it))
-                        }
-                        entry.overrides.outputModalities?.let {
-                            o.put("outputModalities", JSONArray(it))
-                        }
+                        val o = JSONObject(
+                            json.encodeToString(
+                                ModelOverrides.serializer(),
+                                entry.overrides,
+                            ),
+                        )
                         val bitfield = modalityBitfieldFromLists(
                             entry.overrides.inputModalities,
                             entry.overrides.outputModalities,
@@ -1904,10 +1945,21 @@ class ProviderRepository(private val context: Context) {
             instance.customBaseURL?.let { put("customBaseURL", it) }
             if (!instance.appendV1Suffix) put("appendV1Suffix", false)
             if (instance.useResponsesAPI) put("useResponsesAPI", true)
-            // [T-provider-custom-user-agent] Additive, optional. Only written
-            // when set; old/new readers without the key decode to null →
-            // default UA. Field name matches iOS for cross-platform interop.
-            instance.customUserAgent?.takeIf { it.isNotBlank() }?.let { put("customUserAgent", it) }
+            if (instance.customRequestHeaders.isNotEmpty()) {
+                put("customRequestHeaders", org.json.JSONArray(instance.customRequestHeaders))
+            }
+            if (instance.customRequestBody.isNotEmpty()) {
+                put("customRequestBody", org.json.JSONArray(instance.customRequestBody))
+            }
+            put(
+                "thinkingLevelDefinitions",
+                JSONArray(
+                    json.encodeToString(
+                        ListSerializer(ThinkingLevelDefinition.serializer()),
+                        ThinkingLevelRegistry.definitions(context),
+                    ),
+                ),
+            )
         }
         return obj.toString(2)
     }
@@ -1940,9 +1992,55 @@ class ProviderRepository(private val context: Context) {
         val customBaseURL = dict.optString("customBaseURL", "").ifEmpty { null }
         val appendV1 = dict.optBoolean("appendV1Suffix", true)
         val useResponsesAPI = dict.optBoolean("useResponsesAPI", false)
-        // [T-provider-custom-user-agent] Additive: old exports lack the key →
-        // empty → null → default UA. Field name matches iOS.
-        val customUserAgent = dict.optString("customUserAgent", "").ifEmpty { null }
+        val thinkingDefinitionIdRemap =
+            mutableMapOf<String, String>()
+        dict.optJSONArray("thinkingLevelDefinitions")?.let { definitionsJSON ->
+            val incoming = runCatching {
+                json.decodeFromString(
+                    ListSerializer(ThinkingLevelDefinition.serializer()),
+                    definitionsJSON.toString(),
+                )
+            }.getOrDefault(emptyList())
+            if (incoming.isNotEmpty()) {
+                val local =
+                    ThinkingLevelRegistry.definitions(context)
+                incoming.forEach { imported ->
+                    val localDefinition =
+                        local.firstOrNull {
+                            it.definitionId ==
+                                imported.definitionId
+                        } ?: local.firstOrNull {
+                            it.levelId == imported.levelId
+                        }
+                    thinkingDefinitionIdRemap[
+                        imported.definitionId
+                    ] = localDefinition?.definitionId
+                        ?: imported.definitionId
+                }
+                val merged = ThinkingLevelRegistry.mergedDefinitions(
+                    local,
+                    incoming,
+                )
+                ThinkingLevelRegistry.saveDefinitions(
+                    context,
+                    merged,
+                )
+            }
+        }
+        val customRequestHeaders = dict.optJSONArray("customRequestHeaders")?.let { array ->
+            buildList {
+                for (i in 0 until array.length()) {
+                    array.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+            }
+        } ?: emptyList()
+        val customRequestBody = dict.optJSONArray("customRequestBody")?.let { array ->
+            buildList {
+                for (i in 0 until array.length()) {
+                    array.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+            }
+        } ?: emptyList()
 
         val instance = ProviderInstance(
             id = java.util.UUID.randomUUID().toString(),
@@ -1952,7 +2050,8 @@ class ProviderRepository(private val context: Context) {
             customBaseURL = customBaseURL,
             appendV1Suffix = appendV1,
             useResponsesAPI = useResponsesAPI,
-            customUserAgent = customUserAgent,
+            customRequestHeaders = customRequestHeaders,
+            customRequestBody = customRequestBody,
         )
         addInstance(instance)
 
@@ -2039,22 +2138,49 @@ class ProviderRepository(private val context: Context) {
                     outputModalities = baseOut,
                 )
                 val overridesObj = m.optJSONObject("overrides")
-                val overrides = if (overridesObj != null) {
+                var overrides = if (overridesObj != null) {
                     // [T-provider-export-model-overrides] Read the full
                     // overrides layer. Each key is read independently — a
                     // missing key (old export, partial object) simply stays
                     // null → the field falls back to baseModel / defaults.
                     val (ovIn, ovOut) = readModalitiesWithBitfieldFallback(overridesObj)
-                    ModelOverrides(
-                        displayName = overridesObj.optString("displayName", "").ifEmpty { null },
-                        maxOutputTokens = if (overridesObj.has("maxOutputTokens")) overridesObj.optInt("maxOutputTokens").takeIf { it > 0 } else null,
-                        contextWindow = if (overridesObj.has("contextWindow")) overridesObj.optInt("contextWindow").takeIf { it > 0 } else null,
-                        supportsReasoning = if (overridesObj.has("supportsReasoning")) overridesObj.optBoolean("supportsReasoning") else null,
-                        inputModalities = ovIn,
-                        outputModalities = ovOut,
-                    )
+                    runCatching {
+                        json.decodeFromString(
+                            ModelOverrides.serializer(),
+                            overridesObj.toString(),
+                        )
+                    }.getOrDefault(ModelOverrides()).let { decoded ->
+                        decoded.copy(
+                            inputModalities = decoded.inputModalities ?: ovIn,
+                            outputModalities = decoded.outputModalities ?: ovOut,
+                        )
+                    }
                 } else {
                     ModelOverrides()
+                }
+                if (thinkingDefinitionIdRemap.isNotEmpty()) {
+                    overrides = overrides.copy(
+                        requestBodyControls =
+                            overrides.requestBodyControls.map {
+                                control ->
+                                control.copy(
+                                    options =
+                                        control.options.map {
+                                            option ->
+                                            option.copy(
+                                                thinkingDefinitionId =
+                                                    option
+                                                        .thinkingDefinitionId
+                                                        ?.let {
+                                                            thinkingDefinitionIdRemap[
+                                                                it
+                                                            ] ?: it
+                                                        },
+                                            )
+                                        },
+                                )
+                            },
+                    )
                 }
                 entries.add(ModelEntry(
                     providerInstanceId = instance.id,

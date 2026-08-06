@@ -36,7 +36,6 @@ extension AIChatViewModel {
         SlashCommand(id: "clear", icon: "trash", title: "Clear", subtitle: "Clear all messages in this session"),
         SlashCommand(id: "compact", icon: "arrow.down.right.and.arrow.up.left", title: "Compact", subtitle: "Compress conversation history into summary"),
         SlashCommand(id: "memory", icon: "brain.head.profile", title: "Memory", subtitle: "Toggle memory writes on/off (reads unaffected)"),
-        SlashCommand(id: "thinking", icon: "lightbulb", title: "Thinking", subtitle: "Toggle deep thinking mode on/off"),
     ]
 
     /// Show slash menu without replacing existing input text.
@@ -336,9 +335,9 @@ extension AIChatViewModel {
         // [T-slash-picker-recent] Record this use so the default `/`
         // picker (no filter) can rank by recency. Stored as
         // [id: lastUsedUnix] in UserDefaults — sub-ms, no persistence
-        // ceremony, survives app restarts. Tag/no-op rows like
-        // /memory and /thinking still count because the user *did*
-        // pick them; ranking by raw pick count is the right signal.
+        // ceremony, survives app restarts. Tag/no-op rows like /memory still
+        // count because the user *did* pick them; ranking by raw pick count is
+        // the right signal.
         recordSlashCommandUsage(id: cmd.id)
         // [T-skill-slash a88ea8f9] Skill rows are not directly executable
         // here — they're a typing aid. Tap → fill composer with "/<name>"

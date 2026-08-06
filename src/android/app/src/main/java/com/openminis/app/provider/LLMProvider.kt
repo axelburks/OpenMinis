@@ -13,6 +13,21 @@ import kotlinx.coroutines.flow.flow
 interface LLMProvider {
     val name: String
     var model: LLMModel
+    var thinkingDefinitionId: String?
+        get() = null
+        set(_) {}
+    var requestSessionId: String?
+        get() = null
+        set(_) {}
+    var usesConversationRequestControlState: Boolean
+        get() = false
+        set(_) {}
+    val requestCustomizationModelKey: String?
+        get() = null
+
+    fun resolvedThinkingDefinitionId(
+        requestedDefinitionId: String,
+    ): String? = requestedDefinitionId
 
     /**
      * Effective max output tokens ceiling for the given model.
@@ -42,14 +57,9 @@ interface LLMProvider {
     val streamTextIsMonolithic: Boolean get() = false
 
     /**
-     * [T-android-thinking-level-arch] PUBLIC entry — this is what every caller
-     * (agent loop, fallback, quick test, model-use, …) invokes. It is NOT
-     * overridden by providers: the default implementation clamps the requested
-     * thinking level to the current [model]'s ceiling ONCE, then delegates to
-     * [sendMessageClamped]. Making the clamp structural (rather than a call each
-     * impl must remember) means no code path can send an over-range level — a
-     * fallback that swapped [model] mid-flight clamps to the NEW model's limit
-     * automatically. Mirrors iOS AgentProvider.streamAgentMessage → …Clamped.
+     * Public entry used by agent loops, fallback, quick test and model-use.
+     * The caller resolves built-in catalog options or exact custom controls
+     * before invoking this method.
      */
     suspend fun sendMessage(
         messages: List<LLMMessage>,
@@ -61,10 +71,10 @@ interface LLMProvider {
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): LLMResponse = sendMessageClamped(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools,
-        clampThinkingLevel(thinkingLevel),
+        thinkingLevel,
     )
 
-    /** See [sendMessage] — the clamped, provider-implemented counterpart. */
+    /** See [sendMessage] — the provider-implemented counterpart. */
     fun streamMessage(
         messages: List<LLMMessage>,
         systemPrompt: String?,
@@ -75,14 +85,13 @@ interface LLMProvider {
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): Flow<LLMStreamChunk> = streamMessageClamped(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools,
-        clampThinkingLevel(thinkingLevel),
+        thinkingLevel,
     )
 
     /**
-     * [T-android-thinking-level-arch] Provider implementations override THIS
-     * (not [sendMessage]). The `thinkingLevel` received here has already been
-     * clamped to the model's ceiling by [sendMessage] — implementations must NOT
-     * re-clamp. Mirrors iOS `streamAgentMessageClamped`.
+     * Provider implementations override this method. The caller has already
+     * resolved the level against either built-in catalog options or the
+     * model's custom thinking-control options.
      */
     suspend fun sendMessageClamped(
         messages: List<LLMMessage>,
@@ -105,16 +114,6 @@ interface LLMProvider {
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk>
 
-    /**
-     * [T-android-thinking-level-arch] Cap a requested thinking level to the
-     * current [model]'s ceiling by rank. Used by the [sendMessage]/[streamMessage]
-     * default entries above; the catalog ceiling is resolved off the live
-     * `model`.
-     */
-    fun clampThinkingLevel(level: ThinkingLevel): ThinkingLevel {
-        val ceiling = model.catalogMaxThinkingLevel
-        return if (level.rank > ceiling.rank) ceiling else level
-    }
 }
 
 /**

@@ -52,6 +52,7 @@ final class AnthropicAgentProvider: AgentProvider {
         thinkingLevel: ThinkingLevel
     ) async throws -> AsyncThrowingStream<AgentStreamEvent, Error> {
         pendingToolResultImages.removeAll()
+        await provider.prepareRequestCustomization()
         #if DEBUG
         AgentRequestTrace.shared.step("anthropic.convertMessages", detail: "input messages=\(messages.count)")
         #endif
@@ -73,28 +74,23 @@ final class AnthropicAgentProvider: AgentProvider {
         // ignores legacy budget_tokens and produces empty thinking on the wire — the
         // exact "thinking enabled but no thoughts" symptom that surfaced in 4.7.
         // Older Claude models still take budget_tokens. Pick the right one per model.
-        if thinkingLevel.isEnabled, model.supportsReasoning ?? false {
-            if AnthropicProvider.modelUsesAdaptiveThinking(model.id) {
-                let effort = Self.thinkingEffort(for: thinkingLevel)
-                RequestBodyPatcher.setThinkingEffort(effort)
-                logger.info("Thinking enabled (adaptive): effort=\(effort)")
-            } else {
-                let budget = Self.thinkingBudget(for: model, maxTokens: maxTokens, level: thinkingLevel)
-                if budget > 0 {
-                    RequestBodyPatcher.setThinkingBudget(budget)
-                    logger.info("Thinking enabled (budget): budget_tokens=\(budget)")
+        if provider.requestCustomization?.disablesBuiltInThinkingInjection != true {
+            if thinkingLevel == .off, AnthropicProvider.modelUsesAdaptiveThinking(model.id) {
+                RequestBodyPatcher.setThinkingDisabled()
+                logger.info("Thinking explicitly DISABLED (adaptive default-on model, level=off)")
+            } else if thinkingLevel.isEnabled, model.supportsReasoning ?? false {
+                if AnthropicProvider.modelUsesAdaptiveThinking(model.id) {
+                    let effort = Self.thinkingEffort(for: thinkingLevel)
+                    RequestBodyPatcher.setThinkingEffort(effort)
+                    logger.info("Thinking enabled (adaptive): effort=\(effort)")
+                } else {
+                    let budget = Self.thinkingBudget(for: model, maxTokens: maxTokens, level: thinkingLevel)
+                    if budget > 0 {
+                        RequestBodyPatcher.setThinkingBudget(budget)
+                        logger.info("Thinking enabled (budget): budget_tokens=\(budget)")
+                    }
                 }
             }
-        } else if AnthropicProvider.modelUsesAdaptiveThinking(model.id) {
-            // Adaptive-generation models (4.6+/5) think by DEFAULT when the
-            // request carries no thinking field at all — "off" must be sent
-            // explicitly, or small-maxTokens calls burn the whole budget on
-            // thinking_tokens and return zero text (observed: voice-correction
-            // call with max_tokens=256 → stop_reason=max_tokens,
-            // thinking_tokens=256/256, empty body). Legacy (<=4.5) models
-            // default to no thinking, so absence is fine there.
-            RequestBodyPatcher.setThinkingDisabled()
-            logger.info("Thinking explicitly DISABLED (adaptive default-on model, level=off)")
         }
 
         // Anthropic-compat proxies (e.g. DeepSeek's deepseek-v4-pro endpoint
@@ -424,7 +420,7 @@ final class AnthropicAgentProvider: AgentProvider {
         guard model.supportsReasoning ?? false else { return 0 }
         let cap: Int = switch level {
         case .off: 0
-        case .low: 8192
+        case .minimal, .low: 8192
         case .medium: 32768
         case .high: min(maxTokens, 65536)
         case .xhigh, .max, .ultra: maxTokens
@@ -444,8 +440,7 @@ final class AnthropicAgentProvider: AgentProvider {
     /// but `max` is the more universally recognized token across 4.6 and 4.7.
     static func thinkingEffort(for level: ThinkingLevel) -> String {
         switch level {
-        case .off: return "low"  // never reached: caller checks isEnabled first
-        case .low: return "low"
+        case .off, .minimal, .low: return "low"
         case .medium: return "medium"
         case .high: return "high"
         case .xhigh, .max, .ultra: return "max"

@@ -13,31 +13,34 @@ private func stripV1Suffix(_ base: String) -> String {
 
 enum AnthropicModelsAPI {
 
-    static func fetchModels(apiKey: String, baseURL: String? = nil, appendV1Suffix: Bool = true, forceRefresh: Bool = false, userAgent: String? = nil) async throws -> [LLMModel] {
+    static func fetchModels(apiKey: String, baseURL: String? = nil, appendV1Suffix: Bool = true, forceRefresh: Bool = false, userAgent: String? = nil, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         try await fetchWithFallback(credential: apiKey, baseURL: baseURL, appendV1Suffix: appendV1Suffix, forceRefresh: forceRefresh) { request in
             request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             if let ua = userAgent { request.setValue(ua, forHTTPHeaderField: "User-Agent") }
+            for (key, value) in customHeaders { request.setValue(value, forHTTPHeaderField: key) }
         }
     }
 
     /// Fetch models using a plain Bearer token (no Anthropic OAuth beta header).
     /// Used for manual OAuth tokens on proxy/third-party endpoints.
     /// Sends both `Authorization: Bearer` and `x-api-key` for maximum compatibility.
-    static func fetchModels(bearerToken: String, baseURL: String? = nil, appendV1Suffix: Bool = true, forceRefresh: Bool = false, userAgent: String? = nil) async throws -> [LLMModel] {
+    static func fetchModels(bearerToken: String, baseURL: String? = nil, appendV1Suffix: Bool = true, forceRefresh: Bool = false, userAgent: String? = nil, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         try await fetchWithFallback(credential: bearerToken, baseURL: baseURL, appendV1Suffix: appendV1Suffix, forceRefresh: forceRefresh) { request in
             request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
             request.setValue(bearerToken, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             if let ua = userAgent { request.setValue(ua, forHTTPHeaderField: "User-Agent") }
+            for (key, value) in customHeaders { request.setValue(value, forHTTPHeaderField: key) }
         }
     }
 
-    static func fetchModels(oauthToken: String, baseURL: String? = nil, appendV1Suffix: Bool = true, forceRefresh: Bool = false) async throws -> [LLMModel] {
+    static func fetchModels(oauthToken: String, baseURL: String? = nil, appendV1Suffix: Bool = true, forceRefresh: Bool = false, customHeaders: [String: String] = [:]) async throws -> [LLMModel] {
         try await fetchWithFallback(credential: oauthToken, baseURL: baseURL, appendV1Suffix: appendV1Suffix, forceRefresh: forceRefresh) { request in
             request.setValue("Bearer \(oauthToken)", forHTTPHeaderField: "Authorization")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            for (key, value) in customHeaders { request.setValue(value, forHTTPHeaderField: key) }
         }
     }
 

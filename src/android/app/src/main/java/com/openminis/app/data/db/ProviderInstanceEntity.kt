@@ -30,7 +30,7 @@ data class ProviderInstanceEntity(
     // "can't switch off Auto". Nullable TEXT; null → auto / no cached probe.
     @ColumnInfo(name = "image_endpoint_mode") val imageEndpointMode: String? = null,
     @ColumnInfo(name = "image_endpoint_resolved") val imageEndpointResolved: String? = null,
-    @ColumnInfo(name = "custom_user_agent") val customUserAgent: String? = null,
+    @ColumnInfo(name = "request_customization_json") val requestCustomizationJson: String? = null,
     @ColumnInfo(name = "is_enabled") val isEnabled: Int = 1,
     @ColumnInfo(name = "sort_order") val sortOrder: Int = 0,
     @ColumnInfo(name = "created_at") val createdAt: Long,

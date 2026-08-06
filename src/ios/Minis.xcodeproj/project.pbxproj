@@ -66,6 +66,9 @@
 		E51000003 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E51000013 /* Assets.xcassets */; };
 		E51000004 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E51000014 /* Preview Assets.xcassets */; };
 		E52000001 /* LLMTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E52000011 /* LLMTypes.swift */; };
+		E5MXRE001 /* MinixRequestExpression.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5MXRE011 /* MinixRequestExpression.swift */; };
+		E5MXRC001 /* MinixRequestControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5MXRC011 /* MinixRequestControls.swift */; };
+		E5MXTL001 /* MinixThinkingLevelRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5MXTL011 /* MinixThinkingLevelRegistry.swift */; };
 		E52000002 /* LLMError.swift in Sources */ = {isa = PBXBuildFile; fileRef = E52000012 /* LLMError.swift */; };
 		E52000003 /* LLMProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = E52000013 /* LLMProvider.swift */; };
 		E52000004 /* AnthropicProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = E52000014 /* AnthropicProvider.swift */; };
@@ -75,6 +78,7 @@
 		E52000009 /* AnthropicModelsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = E52000018 /* AnthropicModelsAPI.swift */; };
 		E53000001 /* AIChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53000011 /* AIChatViewModel.swift */; };
 		E53000002 /* AIChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53000012 /* AIChatView.swift */; };
+		E5MXCR001 /* MinixChatRequestControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5MXCR011 /* MinixChatRequestControls.swift */; };
 		E53000004 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53000014 /* ChatStore.swift */; };
 		E53000005 /* UsageStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53000015 /* UsageStatsView.swift */; };
 		E53000006 /* CacheKeepAliveManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53000016 /* CacheKeepAliveManager.swift */; };
@@ -126,6 +130,7 @@
 		E5BSH0003 /* OnDemandBash.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5BSH0013 /* OnDemandBash.swift */; };
 		E5BSH0004 /* bashism_rules.json in Resources */ = {isa = PBXBuildFile; fileRef = E5BSH0014 /* bashism_rules.json */; };
 		E5BSH0005 /* bashism_test_vectors.json in Resources */ = {isa = PBXBuildFile; fileRef = E5BSH0015 /* bashism_test_vectors.json */; };
+		E5RCI0001 /* MinixRequestControlSFSymbolCatalog.txt in Resources */ = {isa = PBXBuildFile; fileRef = E5RCI0011 /* MinixRequestControlSFSymbolCatalog.txt */; };
 		E5C000001 /* OpenAIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C000011 /* OpenAIProvider.swift */; };
 		E5C000002 /* OpenAIAgentProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C000012 /* OpenAIAgentProvider.swift */; };
 		E5C000003 /* OpenAIModelsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C000013 /* OpenAIModelsAPI.swift */; };
@@ -167,6 +172,7 @@
 		E5D00009 /* URLBuilding.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D00019 /* URLBuilding.swift */; };
 		E5D00020 /* ProviderInstancesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D00030 /* ProviderInstancesView.swift */; };
 		E5D00021 /* ProviderInstanceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D00031 /* ProviderInstanceDetailView.swift */; };
+		E5MXRV001 /* MinixRequestCustomizationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5MXRV011 /* MinixRequestCustomizationViews.swift */; };
 		E5D00022 /* AddProviderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D00032 /* AddProviderView.swift */; };
 		E5D00023 /* ModelGroupsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D00033 /* ModelGroupsView.swift */; };
 		E5D00024 /* ModelGroupDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D00034 /* ModelGroupDetailView.swift */; };
@@ -281,6 +287,7 @@
 		E5L200SS2 /* SessionsOffload.m in Sources */ = {isa = PBXBuildFile; fileRef = E5L200SS1 /* SessionsOffload.m */; };
 		E5L200SS4 /* SessionsOffloadBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5L200SS3 /* SessionsOffloadBridge.swift */; };
 		E5LC00001 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = E5LC00002 /* Localizable.xcstrings */; };
+		E5REH0001 /* ExpressionCapabilityHelp.md in Resources */ = {isa = PBXBuildFile; fileRef = E5REH0010 /* ExpressionCapabilityHelp.md */; };
 		E5LD00001 /* ToolLoopDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5LD00003 /* ToolLoopDetector.swift */; };
 		E5LD00002 /* ToolLoopDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5LD00003 /* ToolLoopDetector.swift */; };
 		E5LOCK001 /* SessionLockStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5LOCK101 /* SessionLockStore.swift */; };
@@ -404,6 +411,7 @@
 		E5VMC0005 /* AIChatViewModel+Persistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5VMC0015 /* AIChatViewModel+Persistence.swift */; };
 		E5VMC0006 /* AIChatViewModel+BackgroundTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5VMC0016 /* AIChatViewModel+BackgroundTask.swift */; };
 		E5VMC0007 /* AIChatViewModel+ConcurrentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5VMC0017 /* AIChatViewModel+ConcurrentTools.swift */; };
+		E5MXVM001 /* AIChatViewModel+MinixRequestControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5MXVM011 /* AIChatViewModel+MinixRequestControls.swift */; };
 		E5VMD0001 /* MinisURLPathDecoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5VMD0011 /* MinisURLPathDecoding.swift */; };
 		E5VTS1001 /* VoiceTextSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7656F4130247E4002A3AC0C /* VoiceTextSanitizer.swift */; };
 		E5W000001 /* PortableRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5W000011 /* PortableRecord.swift */; };
@@ -469,6 +477,13 @@
 
 /* Begin PBXContainerItemProxy section */
 		AA8A56912F6FBB7A00A3E54E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E51000060 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E51000040;
+			remoteInfo = Minis;
+		};
+		BB1000130F700000000000AA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = E51000060 /* Project object */;
 			proxyType = 1;
@@ -655,6 +670,9 @@
 		E51000013 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E51000014 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		E52000011 /* LLMTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMTypes.swift; sourceTree = "<group>"; };
+		E5MXRE011 /* MinixRequestExpression.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinixRequestExpression.swift; sourceTree = "<group>"; };
+		E5MXRC011 /* MinixRequestControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinixRequestControls.swift; sourceTree = "<group>"; };
+		E5MXTL011 /* MinixThinkingLevelRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinixThinkingLevelRegistry.swift; sourceTree = "<group>"; };
 		E52000012 /* LLMError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMError.swift; sourceTree = "<group>"; };
 		E52000013 /* LLMProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMProvider.swift; sourceTree = "<group>"; };
 		E52000014 /* AnthropicProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnthropicProvider.swift; sourceTree = "<group>"; };
@@ -663,6 +681,7 @@
 		E52000018 /* AnthropicModelsAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnthropicModelsAPI.swift; sourceTree = "<group>"; };
 		E53000011 /* AIChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIChatViewModel.swift; sourceTree = "<group>"; };
 		E53000012 /* AIChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIChatView.swift; sourceTree = "<group>"; };
+		E5MXCR011 /* MinixChatRequestControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinixChatRequestControls.swift; sourceTree = "<group>"; };
 		E53000014 /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
 		E53000015 /* UsageStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageStatsView.swift; sourceTree = "<group>"; };
 		E53000016 /* CacheKeepAliveManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheKeepAliveManager.swift; sourceTree = "<group>"; };
@@ -758,6 +777,7 @@
 		E5D00019 /* URLBuilding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLBuilding.swift; sourceTree = "<group>"; };
 		E5D00030 /* ProviderInstancesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderInstancesView.swift; sourceTree = "<group>"; };
 		E5D00031 /* ProviderInstanceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderInstanceDetailView.swift; sourceTree = "<group>"; };
+		E5MXRV011 /* MinixRequestCustomizationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinixRequestCustomizationViews.swift; sourceTree = "<group>"; };
 		E5D00032 /* AddProviderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddProviderView.swift; sourceTree = "<group>"; };
 		E5D00033 /* ModelGroupsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelGroupsView.swift; sourceTree = "<group>"; };
 		E5D00034 /* ModelGroupDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelGroupDetailView.swift; sourceTree = "<group>"; };
@@ -909,6 +929,9 @@
 		E5L200SS1 /* SessionsOffload.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SessionsOffload.m; sourceTree = "<group>"; };
 		E5L200SS3 /* SessionsOffloadBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionsOffloadBridge.swift; sourceTree = "<group>"; };
 		E5LC00002 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		E5REH0011 /* en */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = en; path = en.lproj/ExpressionCapabilityHelp.md; sourceTree = "<group>"; };
+		E5REH0012 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = "zh-Hans"; path = "zh-Hans.lproj/ExpressionCapabilityHelp.md"; sourceTree = "<group>"; };
+		E5RCI0011 /* MinixRequestControlSFSymbolCatalog.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = MinixRequestControlSFSymbolCatalog.txt; path = Resources/MinixRequestControlSFSymbolCatalog.txt; sourceTree = "<group>"; };
 		E5LD00003 /* ToolLoopDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolLoopDetector.swift; sourceTree = "<group>"; };
 		E5LOCK101 /* SessionLockStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLockStore.swift; sourceTree = "<group>"; };
 		E5LOCK102 /* FaceIDProtectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceIDProtectionSettingsView.swift; sourceTree = "<group>"; };
@@ -1015,6 +1038,7 @@
 		E5VMC0015 /* AIChatViewModel+Persistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AIChatViewModel+Persistence.swift"; sourceTree = "<group>"; };
 		E5VMC0016 /* AIChatViewModel+BackgroundTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AIChatViewModel+BackgroundTask.swift"; sourceTree = "<group>"; };
 		E5VMC0017 /* AIChatViewModel+ConcurrentTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AIChatViewModel+ConcurrentTools.swift"; sourceTree = "<group>"; };
+		E5MXVM011 /* AIChatViewModel+MinixRequestControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AIChatViewModel+MinixRequestControls.swift"; sourceTree = "<group>"; };
 		E5VMD0011 /* MinisURLPathDecoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinisURLPathDecoding.swift; sourceTree = "<group>"; };
 		E5W000011 /* PortableRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortableRecord.swift; sourceTree = "<group>"; };
 		E5W000012 /* Syncable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Syncable.swift; sourceTree = "<group>"; };
@@ -1082,7 +1106,6 @@
 		E5EXC0001 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				ThinkingLevelTests.swift,
 			);
 			target = BB1000070F700000000000AA /* MinisTests */;
 		};
@@ -1281,12 +1304,14 @@
 				E5E000018 /* Minis.entitlements */,
 				E5PV00002 /* PrivacyInfo.xcprivacy */,
 				E5LC00002 /* Localizable.xcstrings */,
+				E5REH0010 /* ExpressionCapabilityHelp.md */,
 				E5IP00010 /* InfoPlist.strings */,
 				E5AS00010 /* AppShortcuts.strings */,
 				E5A000011 /* default_mount */,
 				E5U000012 /* KaTeX */,
 				E5V000012 /* AlternateIcons */,
 				E5D00060 /* models-dev-api.json */,
+				E5RCI0011 /* MinixRequestControlSFSymbolCatalog.txt */,
 				E5JB00014 /* jieba.dict.utf8 */,
 				E5VC0001B /* zh_background_wordfreq.txt */,
 				E5JB00015 /* hmm_model.utf8 */,
@@ -1331,6 +1356,9 @@
 			isa = PBXGroup;
 			children = (
 				E52000011 /* LLMTypes.swift */,
+				E5MXRE011 /* MinixRequestExpression.swift */,
+				E5MXRC011 /* MinixRequestControls.swift */,
+				E5MXTL011 /* MinixThinkingLevelRegistry.swift */,
 				E52000012 /* LLMError.swift */,
 				E5OARC030 /* OAuthRefreshCoordinator.swift */,
 				E5OARC031 /* OAuthRefreshSingleFlight.swift */,
@@ -1854,6 +1882,7 @@
 				E5VMC0015 /* AIChatViewModel+Persistence.swift */,
 				E5VMC0016 /* AIChatViewModel+BackgroundTask.swift */,
 				E5VMC0017 /* AIChatViewModel+ConcurrentTools.swift */,
+				E5MXVM011 /* AIChatViewModel+MinixRequestControls.swift */,
 				E53000014 /* ChatStore.swift */,
 				BB1000110F700000000000AA /* ContextPolicy.swift */,
 				E5FMI0011 /* FileMentionIndex.swift */,
@@ -1997,6 +2026,7 @@
 			isa = PBXGroup;
 			children = (
 				E53000012 /* AIChatView.swift */,
+				E5MXCR011 /* MinixChatRequestControls.swift */,
 				E5F200011 /* MarkdownPrepRegex.swift */,
 				E5F200012 /* MinisMediaViews.swift */,
 				E5F200013 /* AssistantBlockView.swift */,
@@ -2060,6 +2090,7 @@
 				E5QT00011 /* ModelQuickTestSheet.swift */,
 				E5D00036 /* OnboardingModelSelectionView.swift */,
 				E5D00031 /* ProviderInstanceDetailView.swift */,
+				E5MXRV011 /* MinixRequestCustomizationViews.swift */,
 				E5D00030 /* ProviderInstancesView.swift */,
 				E5SVP0031 /* ShadowVoiceProviderDetailView.swift */,
 				E5D00035 /* SessionModelPicker.swift */,
@@ -2153,6 +2184,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				BB1000140F700000000000AA /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				BB1000012F700000000000AA /* MinisTests */,
@@ -2343,12 +2375,14 @@
 				E51000003 /* Assets.xcassets in Resources */,
 				E5PV00001 /* PrivacyInfo.xcprivacy in Resources */,
 				E5LC00001 /* Localizable.xcstrings in Resources */,
+				E5REH0001 /* ExpressionCapabilityHelp.md in Resources */,
 				E5IP00001 /* InfoPlist.strings in Resources */,
 				E5AS00001 /* AppShortcuts.strings in Resources */,
 				E5Q000002 /* cl100k_base.tiktoken in Resources */,
 				E54300001 /* travel-planning-session.json in Resources */,
 				E54300002 /* test-data-health.json in Resources */,
 				E5D00050 /* models-dev-api.json in Resources */,
+				E5RCI0001 /* MinixRequestControlSFSymbolCatalog.txt in Resources */,
 				E5JB00003 /* jieba.dict.utf8 in Resources */,
 				E5VC0000C /* zh_background_wordfreq.txt in Resources */,
 				E5JB00004 /* hmm_model.utf8 in Resources */,
@@ -2501,6 +2535,9 @@
 				E5SHV0003 /* SharedFoldersSettingsView.swift in Sources */,
 				E5SHV0004 /* MountDetailView.swift in Sources */,
 				E52000001 /* LLMTypes.swift in Sources */,
+				E5MXRE001 /* MinixRequestExpression.swift in Sources */,
+				E5MXRC001 /* MinixRequestControls.swift in Sources */,
+				E5MXTL001 /* MinixThinkingLevelRegistry.swift in Sources */,
 				E52000002 /* LLMError.swift in Sources */,
 				E52000003 /* LLMProvider.swift in Sources */,
 				E5F00001 /* LLMProviderFactory.swift in Sources */,
@@ -2539,8 +2576,10 @@
 				E5VMC0005 /* AIChatViewModel+Persistence.swift in Sources */,
 				E5VMC0006 /* AIChatViewModel+BackgroundTask.swift in Sources */,
 				E5VMC0007 /* AIChatViewModel+ConcurrentTools.swift in Sources */,
+				E5MXVM001 /* AIChatViewModel+MinixRequestControls.swift in Sources */,
 				E5LD00001 /* ToolLoopDetector.swift in Sources */,
 				E53000002 /* AIChatView.swift in Sources */,
+				E5MXCR001 /* MinixChatRequestControls.swift in Sources */,
 				E5CAL0001 /* CookieAuditLogger.swift in Sources */,
 				E5F200001 /* MarkdownPrepRegex.swift in Sources */,
 				E5F200002 /* MinisMediaViews.swift in Sources */,
@@ -2702,6 +2741,7 @@
 				E5D00009 /* URLBuilding.swift in Sources */,
 				E5D00020 /* ProviderInstancesView.swift in Sources */,
 				E5D00021 /* ProviderInstanceDetailView.swift in Sources */,
+				E5MXRV001 /* MinixRequestCustomizationViews.swift in Sources */,
 				E5SVP0021 /* ShadowVoiceProviderDetailView.swift in Sources */,
 				E5D00022 /* AddProviderView.swift in Sources */,
 				E5KIMIUI1 /* KimiDeviceLoginSheet.swift in Sources */,
@@ -2872,6 +2912,11 @@
 			target = E51000040 /* Minis */;
 			targetProxy = AA8A56912F6FBB7A00A3E54E /* PBXContainerItemProxy */;
 		};
+		BB1000140F700000000000AA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E51000040 /* Minis */;
+			targetProxy = BB1000130F700000000000AA /* PBXContainerItemProxy */;
+		};
 		E5E000080 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = E5E000040 /* MinisShare */;
@@ -2914,6 +2959,15 @@
 			name = InfoPlist.strings;
 			sourceTree = "<group>";
 		};
+		E5REH0010 /* ExpressionCapabilityHelp.md */ = {
+			isa = PBXVariantGroup;
+			children = (
+				E5REH0011 /* en */,
+				E5REH0012 /* zh-Hans */,
+			);
+			name = ExpressionCapabilityHelp.md;
+			sourceTree = "<group>";
+		};
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
@@ -2929,7 +2983,7 @@
 					"$(inherited)",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.axel.minix.MinisUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2949,7 +3003,7 @@
 				DEVELOPMENT_TEAM = V3S982U9HM;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.axel.minix.MinisUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2981,7 +3035,7 @@
 					"$(SRCROOT)/../../deps/frameworks/FFmpeg.framework/Headers",
 					"$(SRCROOT)/Vendor/cppjieba/include",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.axel.minix.MinisTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -3010,7 +3064,7 @@
 					"$(SRCROOT)/../../deps/frameworks/FFmpeg.framework/Headers",
 					"$(SRCROOT)/Vendor/cppjieba/include",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.axel.minix.MinisTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";

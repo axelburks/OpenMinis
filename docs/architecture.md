@@ -136,11 +136,11 @@ Agent loop 逐轮:调 provider 流式出文本/思考/工具调用 → 执行工
 
 | 脚本 | 用途 | 触发时机 |
 |---|---|---|
-| `update-axel.sh` | 同步上游到 axel + 按需重编 deps + 验证([见 AGENTS.md](../AGENTS.md)) | 手动,同步上游时 |
+| `minix-sync.sh` | 同步上游到 minix + 按需重编 deps + 验证([见 AGENTS.md](../AGENTS.md)) | 手动,同步上游时 |
 | `gen_debug_skill.sh` / `gen_debug_skill_android.sh` | 生成 debug server 的 skill 文档(base64 嵌入) | Xcode/Gradle 构建阶段自动 |
 | `prepare_android_sandbox.sh` | 下载 Android 的 Alpine rootfs + proot 二进制 | 手动,Android native deps 构建 |
 | `prepare_rootfs.sh` / `install_alpine.sh` / `optimize_rootfs.sh` | QEMU 制作/优化 Alpine qcow2 镜像(rootfs 底层工具) | 极少,制作 rootfs 时手动 |
 | `update_models_dev.sh` | 更新内置 models.dev 模型注册表 JSON | 周期性手动 |
 | `symbolicate_hang.py` | 崩溃/卡顿日志符号化 | 调试时手动 |
 
-> 这些脚本的产物大多**会进 git**(如 models JSON、debug skill),官方跑过后同步 main 就自动带来,**无需在 update-axel.sh 里重复调用**。gen_debug_skill 已是构建期自动触发。
+> 这些脚本的产物大多**会进 git**(如 models JSON、debug skill),官方跑过后同步 main 就自动带来,**无需在 minix-sync.sh 里重复调用**。gen_debug_skill 已是构建期自动触发。

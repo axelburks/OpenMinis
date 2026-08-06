@@ -100,7 +100,7 @@ internal object ProviderDebugMethods {
                 // can verify persistence across restarts.
                 put("imageEndpointMode", inst.imageEndpointMode.name)
                 put("imageEndpointResolved", inst.imageEndpointResolved?.name ?: JSONObject.NULL)
-                put("customUserAgent", inst.customUserAgent ?: JSONObject.NULL)
+                put("customRequestHeaders", JSONArray(inst.customRequestHeaders))
                 put("createdAt", inst.createdAt)
                 put("hasCredential", hasKey)
                 put("modelEntryCount", entryCount)

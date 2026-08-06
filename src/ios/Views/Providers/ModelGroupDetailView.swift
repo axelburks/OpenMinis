@@ -25,26 +25,47 @@ struct ModelGroupDetailView: View {
         store.group(for: groupId)
     }
 
-    private func groupMaxThinkingLevel(_ group: ModelGroup) -> ThinkingLevel {
-        // [T-ios-group-thinking-picker-empty] The group's thinking-strength
-        // CEILING is the HIGHEST level any reasoning-capable member supports —
-        // `.max()`, not `.min()`. Using `.min()` was wrong twice over:
-        //   1. A non-reasoning member (GPT Image 2, effectiveMaxThinkingLevel ==
-        //      .off) dragged the ceiling to .off and emptied the Intensity picker
-        //      (`filter { $0 != .off && $0 <= maxLevel }` → zero rows), so the
-        //      "Enable Reasoning" toggle showed on with no strength selector.
-        //   2. Even among reasoning members it capped the group at the WEAKEST
-        //      model's ceiling — a group with [Opus .max, some .high model] would
-        //      only offer up to .high, hiding .max/.xhigh that Opus supports.
-        // Take the max over reasoning-capable members (exclude .off). The group's
-        // default level is later clamped per-model at request time
-        // (AgentProvider: min(thinkingLevel, model.catalogMaxThinkingLevel)), so
-        // offering the group's true ceiling here is safe. Fall back to .xhigh when
-        // no member reasons (the picker is only reached with reasoning enabled).
-        let levels = group.memberEntryIds
-            .compactMap { store.entry(for: $0)?.effectiveMaxThinkingLevel }
-            .filter { $0 != .off }
-        return levels.max() ?? .xhigh
+    private func groupThinkingDefinitions(
+        _ group: ModelGroup
+    ) -> [ThinkingLevelDefinition] {
+        var availableDefinitionIds = Set<String>()
+        for entryId in group.memberEntryIds {
+            guard let entry = store.entry(for: entryId) else { continue }
+            let builtInLevels = ThinkingLevel.availableLevels(
+                model: entry.model
+            )
+            availableDefinitionIds.formUnion(
+                ThinkingLevelRegistry.availableDefinitionIds(
+                    controls: entry.overrides.requestBodyControls ?? [],
+                    builtInLevels: builtInLevels
+                )
+            )
+        }
+        return ThinkingLevelRegistry.definitions.filter {
+            availableDefinitionIds.contains(
+                $0.definitionId
+            ) && $0.definitionId
+                != ThinkingLevelRegistry.offDefinitionId
+        }
+    }
+
+    private func initialGroupThinkingDefinitionId(
+        from definitions: [ThinkingLevelDefinition]
+    ) -> String? {
+        let availableDefinitionIds =
+            definitions.map(\.definitionId)
+        let mediumDefinitionId =
+            ThinkingLevelRegistry.definition(
+                forLevelId:
+                    ThinkingLevel.medium.rawValue
+            )?.definitionId
+            ?? ThinkingLevelRegistry.offDefinitionId
+        return ThinkingLevelRegistry
+            .resolvedDefinitionId(
+                mediumDefinitionId,
+                availableDefinitionIds:
+                    availableDefinitionIds
+            ) ?? availableDefinitionIds.first
     }
 
     var body: some View {
@@ -220,12 +241,27 @@ struct ModelGroupDetailView: View {
 
             // MARK: Session Defaults
             Section {
+                let thinkingDefinitions =
+                    groupThinkingDefinitions(group)
                 // Thinking
                 Toggle(isOn: Binding(
-                    get: { group.defaultThinkingLevel != nil },
+                    get: {
+                        guard let definitionId =
+                                group.defaultThinkingDefinitionId else {
+                            return false
+                        }
+                        return definitionId
+                            != ThinkingLevelRegistry
+                                .offDefinitionId
+                    },
                     set: { enabled in
                         var updated = group
-                        updated.defaultThinkingLevel = enabled ? .medium : nil
+                        updated.defaultThinkingDefinitionId =
+                            enabled
+                            ? initialGroupThinkingDefinitionId(
+                                from: thinkingDefinitions
+                            )
+                            : nil
                         store.updateGroup(updated)
                     }
                 )) {
@@ -240,22 +276,35 @@ struct ModelGroupDetailView: View {
                         Text("Enable Reasoning")
                     }
                 }
+                .disabled(thinkingDefinitions.isEmpty)
 
-                if group.defaultThinkingLevel != nil {
-                    let maxLevel = groupMaxThinkingLevel(group)
+                if let selectedId =
+                    group.defaultThinkingDefinitionId {
                     Picker("Intensity", selection: Binding(
-                        get: { group.defaultThinkingLevel ?? .medium },
-                        set: { level in
+                        get: {
+                            ThinkingLevelRegistry.resolvedDefinitionId(
+                                selectedId,
+                                availableDefinitionIds:
+                                    thinkingDefinitions.map(
+                                        \.definitionId
+                                    )
+                            ) ?? selectedId
+                        },
+                        set: { definitionId in
                             var updated = group
-                            updated.defaultThinkingLevel = min(level, maxLevel)
+                            updated.defaultThinkingDefinitionId =
+                                definitionId
                             store.updateGroup(updated)
                         }
                     )) {
-                        ForEach(ThinkingLevel.allCases.filter { $0 != .off && $0 <= maxLevel }, id: \.self) { level in
-                            Text(level.displayName).tag(level)
+                        ForEach(thinkingDefinitions) { definition in
+                            Text(definition.title)
+                                .tag(
+                                    definition.definitionId
+                                )
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                 }
 
                 // Context Limit
@@ -503,11 +552,18 @@ struct ModelGroupDetailView: View {
     }
 
     private func clampThinkingLevelIfNeeded(_ group: inout ModelGroup) {
-        guard let current = group.defaultThinkingLevel else { return }
-        let maxLevel = groupMaxThinkingLevel(group)
-        if current > maxLevel {
-            group.defaultThinkingLevel = maxLevel
+        guard let currentId =
+                group.defaultThinkingDefinitionId else {
+            return
         }
+        group.defaultThinkingDefinitionId =
+            ThinkingLevelRegistry.resolvedDefinitionId(
+                currentId,
+                availableDefinitionIds:
+                    groupThinkingDefinitions(group).map(
+                        \.definitionId
+                    )
+            )
     }
 
     /// Largest context window across the group's resolvable members. Uses

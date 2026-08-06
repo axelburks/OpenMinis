@@ -122,6 +122,7 @@ object VoiceCorrection {
     fun buildConversationContext(
         context: Context,
         messages: List<com.openminis.app.ui.chat.ChatMessage>,
+        sessionId: String? = null,
     ): ConversationContext {
         ensureInitialized(context)
         val seg = segment ?: return ConversationContext.EMPTY
@@ -129,7 +130,11 @@ object VoiceCorrection {
 
         val source = toSourceMessages(messages)
         if (source.isEmpty()) return ConversationContext.EMPTY
-        return CorrectionContextBuilder.build(source, seg, rnk)
+        return CorrectionContextBuilder.build(
+            source,
+            seg,
+            rnk,
+        ).copy(sessionId = sessionId)
     }
 
     /**

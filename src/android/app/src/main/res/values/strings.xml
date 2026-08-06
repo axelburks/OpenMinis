@@ -176,7 +176,7 @@
     <string name="mcp_form_command_placeholder">npx</string>
     <string name="mcp_form_args">Args (space-separated)</string>
     <string name="mcp_form_args_placeholder">-y @modelcontextprotocol/server-github</string>
-    <string name="mcp_form_env">Env (one per line, KEY=VALUE)</string>
+    <string name="mcp_form_env">Env (one per line, KEY:VALUE)</string>
     <string name="mcp_form_env_placeholder">GITHUB_TOKEN=$GITHUB_TOKEN</string>
     <!-- [T-mcp-startup-timeout] Optional STDIO startup/handshake timeout (seconds) -->
     <string name="mcp_form_startup_timeout">Startup timeout (seconds)</string>
@@ -705,7 +705,7 @@
     <string name="shizuku_state_need_permission">Authorization Required</string>
     <string name="shizuku_state_need_permission_subtitle">The service is running but Minis is not authorized.</string>
     <string name="shizuku_state_ready">Ready</string>
-    <string name="shizuku_ready_subtitle">version=%1$d, uid=%2$d</string>
+    <string name="shizuku_ready_subtitle">version=%1$d, uid:%2$d</string>
 
     <string name="shizuku_badge_not_installed">Not Installed</string>
     <string name="shizuku_badge_not_running">Stopped</string>
@@ -886,8 +886,10 @@
     <string name="provider_detail_use_a_static_bearer_token_instead_of_the">Use a static bearer token instead of the OAuth sign-in flow. </string>
     <string name="provider_detail_custom_api_base">Custom API Base</string>
     <string name="provider_detail_auto_append_v1">Auto-append /v1</string>
-    <string name="provider_detail_custom_user_agent">Custom User-Agent</string>
-    <string name="provider_detail_custom_user_agent_placeholder">Leave blank for default</string>
+    <string name="provider_detail_custom_request_headers">Custom Request Headers</string>
+    <string name="provider_detail_custom_request_headers_footer">One expression per line. Supports templates such as {{ provider.apiKey }}, {{ session.id }}, {{ headers.Authorization }} and {{ body.reasoning.summary }}.</string>
+    <string name="provider_detail_custom_request_body">Custom Request Body</string>
+    <string name="provider_detail_custom_request_body_footer">Provider-level body expressions are applied before model-level body expressions. Objects merge recursively; scalar values override.</string>
     <string name="provider_detail_save_url_settings">Save URL Settings</string>
     <string name="provider_detail_api_format">API Format</string>
     <string name="provider_detail_chat_completions">Chat Completions</string>
@@ -1200,6 +1202,7 @@
     <string name="slash_thinking_unsupported">Not supported by current model</string>
     <string name="slash_clear_subtitle">Clear all messages in this session</string>
     <string name="thinking_level_off">Off</string>
+    <string name="thinking_level_minimal">Minimal</string>
     <string name="thinking_level_low">Low</string>
     <string name="thinking_level_medium">Medium</string>
     <string name="thinking_level_high">High</string>
@@ -1209,6 +1212,107 @@
     <string name="thinking_level_ultra">Ultra</string>
     <!-- [T-android-thinking-badge-navbar] Title of the thinking-level sheet opened from the navbar badge. -->
     <string name="thinking_level_sheet_title">Thinking Intensity</string>
+    <string name="request_controls_title">Request Controls</string>
+    <string name="request_controls_empty">No request controls are configured for this model.</string>
+    <string name="request_customization_title">Request Customization</string>
+    <string name="request_customization_summary">Headers %1$d · Body %2$d · Controls %3$d</string>
+    <string name="request_customization_footer">One expression per line. Headers replace same-name defaults; body objects merge recursively and scalar values override.</string>
+    <string name="provider_request_customization_summary">%1$d headers · %2$d body expressions</string>
+    <string name="provider_request_customization_footer">Configure provider-level request headers and body expressions. Model customization is applied afterward.</string>
+    <string name="request_expression_help">Expression Help</string>
+    <string name="request_expression_help_title">Expression Help</string>
+    <string name="request_headers_title">Custom Request Headers</string>
+    <string name="request_body_title">Custom Request Body</string>
+    <string name="request_headers_placeholder">user-agent = \"Minix/1.0\"</string>
+    <string name="request_body_placeholder">temperature = 0.7</string>
+    <string name="request_control_toggle_placeholder">body.web_search = true</string>
+    <string name="request_control_option_placeholder">body.reasoning.effort = \"high\"</string>
+    <string name="request_expression_error_line">Expression error on line %1$d: %2$s</string>
+    <string name="request_expression_error_assignment">use key = value format</string>
+    <string name="request_expression_error_empty">value cannot be empty</string>
+    <string name="request_expression_error_delimiter">quotes, brackets, braces, template delimiters, or parentheses do not match</string>
+    <string name="request_expression_error_path">invalid field path</string>
+    <string name="request_expression_error_function">unsupported function</string>
+    <string name="request_expression_error_function_arguments">invalid function arguments</string>
+    <string name="request_expression_error_evaluation_limit">expression evaluation limit exceeded</string>
+    <string name="request_expression_error_template">unknown template variable or function</string>
+    <string name="request_controls_footer">Controls appear in the chat request-controls popup and apply expression payloads before each request.</string>
+    <string name="request_controls_none">No controls configured</string>
+    <string name="request_controls_add_preset">Add a preset below</string>
+    <string name="request_control_number">Control %1$d</string>
+    <string name="request_control_details">Control Details</string>
+    <string name="request_control_title">Title</string>
+    <string name="request_control_enabled">Enabled</string>
+    <string name="request_control_default_on">Default On</string>
+    <string name="request_control_payload_on">Payload When On</string>
+    <string name="request_control_toggle_footer">These expressions are applied only when the toggle is on. Use body. or headers. on the left side.</string>
+    <string name="request_control_presentation">Presentation</string>
+    <string name="request_control_slider">Slider</string>
+    <string name="request_control_slider_colors">Slider Colors</string>
+    <string name="request_control_slider_preview">Preview</string>
+    <string name="request_control_slider_low_color">Low Value Color</string>
+    <string name="request_control_slider_high_color">High Value Color</string>
+    <string name="request_control_slider_colors_footer">Tap a color to open the color picker. Values between the low and high colors blend smoothly.</string>
+    <string name="request_control_color_picker">Color Picker</string>
+    <string name="request_control_color_hue">Hue</string>
+    <string name="request_control_color_saturation">Saturation</string>
+    <string name="request_control_color_brightness">Brightness</string>
+    <string name="request_control_options">Options</string>
+    <string name="request_control_no_options">No options</string>
+    <string name="request_control_option_details">Option Details</string>
+    <string name="request_control_thinking_level">Thinking Level</string>
+    <string name="request_control_option_expression_count">%1$d expressions</string>
+    <string name="request_control_thinking_options_footer">Thinking options follow the app-level thinking level order. Change that order in Manage Thinking Levels.</string>
+    <string name="request_control_custom_options_footer">Custom option groups use this manual order.</string>
+    <string name="request_control_option_payload_footer">These expressions are applied when this option is selected. Use body. or headers. on the left side.</string>
+    <string name="request_control_option_number">Option %1$d</string>
+    <string name="request_control_level_id">Thinking Level ID</string>
+    <string name="request_control_level_id_unknown">Enter a registered thinking level ID.</string>
+    <string name="request_control_level_id_duplicate">Each thinking level can be used only once.</string>
+    <string name="thinking_level_id_invalid">Use only lowercase letters, numbers, and underscores.</string>
+    <string name="thinking_level_id_duplicate">This thinking level ID already exists.</string>
+    <string name="request_control_payload">Payload</string>
+    <string name="request_control_move_up">Move Up</string>
+    <string name="request_control_move_down">Move Down</string>
+    <string name="request_control_delete_option">Delete Option</string>
+    <string name="request_control_add_level">Add Thinking Level</string>
+    <string name="request_control_add_option">Add Option</string>
+    <string name="request_control_delete">Delete Control</string>
+    <string name="request_copy_model">Copy From Another Model</string>
+    <string name="request_copy_model_title">Copy From Model</string>
+    <string name="request_copy_model_empty">No other model has request customization.</string>
+    <string name="request_copy_model_summary">%1$d headers · %2$d body expressions · %3$d controls</string>
+    <string name="thinking_levels_manage">Manage Thinking Levels</string>
+    <string name="thinking_level_built_in">Built In</string>
+    <string name="thinking_levels_reorder_footer">Drag any handle to set the app-level order. Built-in levels cannot be edited or deleted.</string>
+    <string name="thinking_levels_unsaved_message">Save your thinking level changes before leaving?</string>
+    <string name="thinking_level_custom">Custom Level</string>
+    <string name="thinking_level_delete">Delete Level</string>
+    <string name="thinking_level_edit">Edit Custom Level</string>
+    <string name="thinking_level_delete_title">Delete Thinking Level?</string>
+    <string name="thinking_level_delete_referenced">This thinking level is used by %1$d settings. Deleting it keeps those references, which will automatically fall back to Off until the same definition is restored.</string>
+    <string name="thinking_level_add">Add Custom Level</string>
+    <string name="request_control_add">Add Request Control</string>
+    <string name="request_control_add_thinking">Add Thinking Intensity Control</string>
+    <string name="request_control_add_toggle">Add Custom Toggle</string>
+    <string name="request_control_add_group">Add Custom Option Group</string>
+    <string name="request_control_custom_toggle">Custom Toggle</string>
+    <string name="request_control_custom_group">Custom Options</string>
+    <string name="request_control_default_option">Default Option</string>
+    <string name="request_control_icon">Icon</string>
+    <string name="request_control_icon_search">Search icons</string>
+    <string name="request_control_icon_default">Use Default</string>
+    <string name="request_control_icon_no_results">No matching icons</string>
+    <string name="request_control_summary_toggle">%1$d expressions</string>
+    <string name="request_control_summary_group">%1$d options%2$s</string>
+    <string name="request_control_summary_thinking">Thinking Intensity · %1$d options%2$s</string>
+    <string name="request_control_summary_slider"> · Slider</string>
+    <string name="request_control_drag_to_reorder">Drag to reorder</string>
+    <string name="request_unsaved_title">Unsaved Changes</string>
+    <string name="request_unsaved_message">Save your request configuration before leaving?</string>
+    <string name="provider_request_unsaved_message">Save your provider request customization before leaving?</string>
+    <string name="request_unsaved_discard">Discard</string>
+    <string name="request_unsaved_continue">Continue Editing</string>
     <string name="model_picker_title">Choose Model</string>
     <string name="model_picker_done">Done</string>
     <string name="model_picker_search_placeholder">Search models</string>
