@@ -496,6 +496,10 @@ final class AnthropicAgentProvider: AgentProvider {
                     default: mediaType = .jpeg
                     }
                     return .image(.init(type: .base64, mediaType: mediaType, data: base64))
+                case .nativeItem:
+                    // [Minix] Server-side built-in tool items are Responses-family
+                    // specific; not sent to Anthropic. See AgentNativeItem.
+                    return nil
                 }
             }
             return MessageParameter.Message(role: role, content: .list(objects))

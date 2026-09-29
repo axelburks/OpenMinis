@@ -31,6 +31,8 @@ sealed class AgentStreamEvent {
     data class ThinkingDelta(val delta: String) : AgentStreamEvent()
     /** Accumulated opaque reasoning (DeepSeek/Kimi reasoning_content). */
     data class ReasoningContent(val content: String) : AgentStreamEvent()
+    /** [Minix] Provider-native Responses output item. */
+    data class NativeItem(val item: AgentNativeItem) : AgentStreamEvent()
     /** Stream ended with a structured stop reason. */
     data class Done(val stopReason: AgentStopReason) : AgentStreamEvent()
 }

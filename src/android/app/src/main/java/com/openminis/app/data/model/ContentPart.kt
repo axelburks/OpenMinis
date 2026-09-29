@@ -49,6 +49,11 @@ sealed class ContentPart {
     @Serializable
     @SerialName("toolResult")
     data class Result(val value: ToolResult) : ContentPart()
+
+    /** [Minix] Opaque provider-native Responses output item. */
+    @Serializable
+    @SerialName("nativeItem")
+    data class NativeItem(val value: AgentNativeItem) : ContentPart()
 }
 
 object ContentPartSerializer : JsonContentPolymorphicSerializer<ContentPart>(ContentPart::class) {
@@ -58,6 +63,7 @@ object ContentPartSerializer : JsonContentPolymorphicSerializer<ContentPart>(Con
             "mediaRef" -> ContentPart.Media.serializer()
             "toolUse" -> ContentPart.Tool.serializer()
             "toolResult" -> ContentPart.Result.serializer()
+            "nativeItem" -> ContentPart.NativeItem.serializer() // [Minix]
             else -> ContentPart.Text.serializer()
         }
 }

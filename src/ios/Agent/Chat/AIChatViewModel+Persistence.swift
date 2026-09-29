@@ -1361,6 +1361,9 @@ extension AIChatViewModel {
                     linuxPath: linuxPath
                 )
                 parts.append(.mediaRef(ref))
+            case .nativeItem(let item):
+                // [Minix] Persist provider-native items verbatim in message parts.
+                parts.append(.nativeItem(item))
             }
         }
 
@@ -1676,6 +1679,7 @@ extension AIChatViewModel {
                     case .toolUse(_, let name, _):     return "tool_use(\(name))"
                     case .toolResult(let id, _, _, _, _, _, _, _): return "tool_result(id=\(id.prefix(8)))"
                     case .imageData:                   return "imageData"
+                    case .nativeItem(let item):        return "native(\(item.type))" // [Minix]
                     }
                 } ?? "(empty)"
                 return "[\(absoluteIdx)] role=\(m.role) dbId=\(m.dbMessageId?.prefix(8) ?? "nil") \(preview)"

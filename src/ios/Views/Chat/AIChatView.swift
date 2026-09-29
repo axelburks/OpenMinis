@@ -2306,6 +2306,12 @@ struct AIChatView: View {
                     case .mediaRef(let ref):
                         partsJson.append(["type": "media", "mime": ref.mimeType,
                                           "file": ref.originalFileName ?? ref.relativePath])
+                    case .nativeItem(let item):
+                        // [Minix] Include provider-native items in copied session data.
+                        let raw = (try? JSONSerialization.jsonObject(
+                            with: Data(item.rawJSON.utf8))) ?? item.rawJSON
+                        partsJson.append(["type": "native_tool", "native_type": item.type,
+                                          "raw": raw])
                     }
                 }
                 var entry: [String: Any] = [

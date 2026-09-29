@@ -181,6 +181,10 @@ enum ContentPart: Codable, Hashable {
     case mediaRef(MediaRef)
     case toolUse(ToolUse)
     case toolResult(ToolResult)
+    /// [Minix] A server-side built-in tool item (web_search_call,
+    /// code_interpreter_call, shell_call, shell_call_output, …), stored verbatim
+    /// for display and replay.
+    case nativeItem(AgentNativeItem)
 
     // MARK: Codable
 
@@ -194,6 +198,7 @@ enum ContentPart: Codable, Hashable {
         case mediaRef
         case toolUse
         case toolResult
+        case nativeItem // [Minix]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -211,6 +216,10 @@ enum ContentPart: Codable, Hashable {
         case .toolResult(let tr):
             try container.encode(PartType.toolResult, forKey: .type)
             try container.encode(tr, forKey: .value)
+        case .nativeItem(let item):
+            // [Minix] Encode the complete provider-native item.
+            try container.encode(PartType.nativeItem, forKey: .type)
+            try container.encode(item, forKey: .value)
         }
     }
 
@@ -226,6 +235,9 @@ enum ContentPart: Codable, Hashable {
             self = .toolUse(try container.decode(ToolUse.self, forKey: .value))
         case .toolResult:
             self = .toolResult(try container.decode(ToolResult.self, forKey: .value))
+        case .nativeItem:
+            // [Minix] Restore the complete provider-native item.
+            self = .nativeItem(try container.decode(AgentNativeItem.self, forKey: .value))
         }
     }
 }
@@ -879,7 +891,8 @@ actor ChatStore {
                 flags |= partFlagHasText
             case .toolUse:
                 flags |= partFlagHasToolUse
-            case .mediaRef, .toolResult:
+            case .mediaRef, .toolResult, .nativeItem:
+                // [Minix] Native items do not change the existing text/tool-use flags.
                 break
             }
         }
@@ -1924,7 +1937,7 @@ actor ChatStore {
             return msg.parts.contains { part in
                 switch part {
                 case .text(let s): return !s.isEmpty
-                case .toolUse, .toolResult, .mediaRef: return true
+                case .toolUse, .toolResult, .mediaRef, .nativeItem: return true // [Minix]
                 }
             }
         }
@@ -3722,6 +3735,11 @@ extension Array where Element == ContentPart {
 
             case .toolResult(let tr):
                 objects.append(.toolResult(tr.toolUseId, tr.output, isError: !tr.success))
+
+            case .nativeItem:
+                // [Minix] Server-side built-in tool items are Responses-family specific;
+                // not sent to Anthropic. See AgentNativeItem.
+                break
             }
         }
 
@@ -3812,6 +3830,11 @@ extension Array where Element == ContentPart {
                 parts.append(GeminiConversation.functionResponsePart(
                     name: "", response: response
                 ))
+
+            case .nativeItem:
+                // [Minix] Server-side built-in tool items are Responses-family specific;
+                // not sent to Gemini. See AgentNativeItem.
+                break
             }
         }
 
@@ -3839,6 +3862,23 @@ extension RawMessage {
         /// Track the last known browser URL across tool blocks so actions like
         /// get_readable (which don't carry a url arg) can inherit it.
         var lastBrowserURL: String?
+
+        // [Minix] Restore built-in tool capsules BEFORE the message text, matching
+        // the live-stream order (server runs the tool, then writes its answer).
+        // Persisted `parts` cluster as [text…, toolUse…, nativeItem…] (see the
+        // persistence builder), so a naive in-order rebuild would drop these
+        // capsules AFTER the text. Pre-build the non-annotations native items
+        // here; the synthetic "annotations" item is an inline citation carrier
+        // and stays AFTER the text (rendered in the `.nativeItem` arm below).
+        if role == .assistant {
+            for part in parts {
+                if case .nativeItem(let item) = part, item.type != "annotations" {
+                    let block = AssistantBlock(kind: .nativeTool(type: item.type), content: item.prettyJSON, toolStatus: .success, toolUseId: item.id)
+                    block.toolInputArgs = item.prettyJSON
+                    blocks.append(block)
+                }
+            }
+        }
 
         for part in parts {
             switch part {
@@ -4034,6 +4074,16 @@ extension RawMessage {
                     if !textContent.isEmpty { textContent += "\n" }
                     textContent += tr.output
                 }
+
+            case .nativeItem(let item):
+                // [Minix] Non-annotations built-in items were pre-built BEFORE the
+                // text (see above). Here render only the synthetic "annotations"
+                // carrier — it stays AFTER the text as an inline citation
+                // reference. Method A: one capsule per item, no per-tool folding.
+                guard item.type == "annotations" else { break }
+                let block = AssistantBlock(kind: .nativeTool(type: item.type), content: item.prettyJSON, toolStatus: .success, toolUseId: item.id)
+                block.toolInputArgs = item.prettyJSON
+                blocks.append(block)
             }
         }
 
@@ -4144,6 +4194,9 @@ extension RawMessage {
                     }
                 }
                 agentParts.append(.toolResult(id: tr.toolUseId, name: "", content: tr.output, isError: !tr.success, imageData: imgData, imageMimeType: imgMime, imageLinuxPath: tr.mediaRef?.linuxPath))
+            case .nativeItem(let item):
+                // [Minix] Restore persisted provider-native items for replay.
+                agentParts.append(.nativeItem(item))
             }
         }
 

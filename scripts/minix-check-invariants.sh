@@ -442,7 +442,7 @@ forbid_regex \
     'requestBodyControls\.state\.model\.|private const val PREFIX[[:space:]]*=[[:space:]]*"model\."' \
     "src/ios/Providers/MinixRequestControls.swift" \
     "src/android/app/src/main/java/com/openminis/app/provider/MinixRequestCustomization.kt" \
-    "docs/minix/request-controls-technical.md"
+    "docs/minix/request-controls-tech.md"
 forbid_regex \
     "Request-control runtime storage does not retain per-model session keys" \
     'storageKey\([^)]*modelKey|sessionKey[[:space:]]*\+[[:space:]]*[".][[:space:]]*\+[[:space:]]*modelKey' \

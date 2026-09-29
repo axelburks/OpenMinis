@@ -289,7 +289,7 @@ internal fun ToolDetailSheet(
     val isLive = block.toolStatus == ToolBlockStatus.RUNNING ||
         block.toolStatus == ToolBlockStatus.STREAMING ||
         block.toolStatus == ToolBlockStatus.PENDING
-    val toolAccent = toolAccentColor(block.toolName)
+    val toolAccent = toolAccentColor(block) // [Minix] Native tools share one style.
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1129,7 +1129,7 @@ internal fun ToolDetailSheet(
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Icon(
-                                        toolIconFor(block.toolName),
+                                        toolIconFor(block), // [Minix]
                                         contentDescription = null,
                                         tint = toolAccent.copy(alpha = 0.3f),
                                         modifier = Modifier.size(40.dp),
@@ -1187,7 +1187,7 @@ internal fun ToolDetailSheet(
                     // Title + subtitle
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = toolTitleLabel(block.toolName),
+                            text = toolTitleLabel(block), // [Minix]
                             fontSize = 14.sp,
                             lineHeight = 16.sp,
                             fontWeight = FontWeight.SemiBold,

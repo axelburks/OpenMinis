@@ -259,6 +259,7 @@ extension AIChatViewModel {
         case .browserTool: toolName = "browser"
         case .readImageTool: toolName = "read_image"
         case .memoryTool: toolName = "memory"
+        case .nativeTool(let type): toolName = type // [Minix]
         case .info: toolName = "info"
         }
 

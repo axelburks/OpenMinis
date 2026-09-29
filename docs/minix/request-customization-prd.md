@@ -6,9 +6,9 @@
 - 平台：iOS、Android
 - 需求边界：服务商和模型的 Header、Body 自定义
 - 关联需求：
-  - [对应技术设计](provider-model-request-customization-technical.md)
-  - [自定义请求控制需求](request-controls-requirements.md)
-  - [表达式能力需求](request-expression-language-requirements.md)
+  - [对应技术设计](request-customization-tech.md)
+  - [自定义请求控制需求](request-controls-prd.md)
+  - [表达式能力需求](exp-lang-prd.md)
 - 数据原则：当前仍处于开发阶段，不兼容开发期旧字段和中间数据结构
 
 ## 2. 背景
@@ -132,7 +132,7 @@ metadata["session-id"] = session.id
 - `headers.<name>`
 - `body.<path>`
 
-完整语法和函数定义见 [表达式能力需求](request-expression-language-requirements.md)。
+完整语法和函数定义见 [表达式能力需求](exp-lang-prd.md)。
 
 ### 7.3 合并与删除
 

@@ -10,6 +10,9 @@ import org.json.JSONObject
 sealed class AgentContentPart {
     data class Text(val text: String) : AgentContentPart()
 
+    /** [Minix] Opaque provider-native Responses output item. */
+    data class NativeItem(val item: AgentNativeItem) : AgentContentPart()
+
     data class ToolUse(
         val id: String,
         val name: String,

@@ -614,7 +614,9 @@ internal fun buildFlatChatItems(
         }
 
         val blocks = message.toolBlocks
-        val toolPillBlocks = blocks.filter { it.kind == "tool_use" }
+        val toolPillBlocks = blocks.filter {
+            it.kind == "tool_use" || it.kind == "native_tool" // [Minix]
+        }
         val lastThinkingId = blocks.lastOrNull { it.kind == "thinking" }?.id
         // [T-android-thinking-auto-collapse] Id of the last block of ANY
         // kind — used to flip the trailing thinking block's auto-collapse

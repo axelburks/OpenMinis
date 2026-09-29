@@ -6,9 +6,9 @@
 
 关联设计：
 
-- [对应需求文档](provider-model-request-customization-requirements.md)
-- [自定义请求控制技术设计](request-controls-technical.md)
-- [表达式能力技术设计](request-expression-language-technical.md)
+- [对应需求文档](request-customization-prd.md)
+- [自定义请求控制技术设计](request-controls-tech.md)
+- [表达式能力技术设计](exp-lang-tech.md)
 
 ## 2. 模块边界
 

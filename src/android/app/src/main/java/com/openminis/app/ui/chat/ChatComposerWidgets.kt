@@ -673,7 +673,7 @@ private fun ToolPreviewThumbnail(
                 } else {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
-                            toolIconFor(block.toolName),
+                            toolIconFor(block), // [Minix]
                             contentDescription = null,
                             tint = toolAccent.copy(alpha = 0.6f),
                             modifier = Modifier.size(24.dp),
@@ -740,7 +740,7 @@ private fun ToolPreviewThumbnail(
                     }
                 } else {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(toolIconFor(block.toolName), contentDescription = null, tint = toolAccent.copy(alpha = 0.5f), modifier = Modifier.size(20.dp))
+                        Icon(toolIconFor(block), contentDescription = null, tint = toolAccent.copy(alpha = 0.5f), modifier = Modifier.size(20.dp)) // [Minix]
                     }
                 }
             }
@@ -812,7 +812,7 @@ internal fun FloatingToolStatusBar(
     val isRunning = block.toolStatus == ToolBlockStatus.RUNNING ||
         block.toolStatus == ToolBlockStatus.STREAMING ||
         block.toolStatus == ToolBlockStatus.PENDING
-    val toolAccent = toolAccentColor(block.toolName)
+    val toolAccent = toolAccentColor(block) // [Minix] Native tools share one style.
     val previewEnabled = LocalToolPreviewEnabled.current
 
     // iOS layout: ZStack(alignment: .bottomLeading)

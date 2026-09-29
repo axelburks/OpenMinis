@@ -23,10 +23,11 @@
 
 **定制领域**(类目稳定;**新需求归入已有领域,勿逐条往下堆行**。改到某领域的红线前先读对应 doc):
 - **与原版共存**:改 Bundle ID/`applicationId` → `com.axel.minix`、App Group/iCloud 容器、`minix://` 深链、可见文案 Minis→Minix;不覆盖原版 `com.openminis.app`。→ [coexistence.md](docs/minix/coexistence.md)
-- **请求自定义**:Provider/模型支持自定义 Header+Body,模型另有 Request Controls;自研表达式引擎(非 JS,独立于 `MinixRequestExpression.*`)。**红线**:不恢复原版专用 User-Agent 字段;OAuth 路径同样应用定制且之后不恢复默认。→ [请求自定义](docs/minix/provider-model-request-customization-requirements.md) · [表达式](docs/minix/request-expression-language-requirements.md)
-- **语义思考强度 & 聊天 Request Controls**:思考档位以不可变 `definitionId` 为持久引用;聊天弹层实现独立于原版(`MinixChatRequestControls.*`)。**红线**:不恢复按厂商/baseURL/model-id 的 thinking 注入分支。→ [Request Controls](docs/minix/request-controls-requirements.md)
+- **请求自定义**:Provider/模型支持自定义 Header+Body,模型另有 Request Controls;自研表达式引擎(非 JS,独立于 `MinixRequestExpression.*`)。**红线**:不恢复原版专用 User-Agent 字段;OAuth 路径同样应用定制且之后不恢复默认。→ [请求自定义](docs/minix/request-customization-prd.md) · [表达式](docs/minix/exp-lang-prd.md)
+- **语义思考强度 & 聊天 Request Controls**:思考档位以不可变 `definitionId` 为持久引用;聊天弹层实现独立于原版(`MinixChatRequestControls.*`)。**红线**:不恢复按厂商/baseURL/model-id 的 thinking 注入分支。→ [Request Controls](docs/minix/request-controls-prd.md)
+- **内置工具中立管线**:服务端内置工具项以中立类型 `AgentNativeItem` 原样采集/展示/回传,详见文档。→ [内置工具](docs/minix/builtin-tools-prd.md)
 
-⚠️ **改到上述领域**(Provider 请求构建、thinking 默认注入、配置持久化、模型 fallback、聊天输入弹层)→ 先跑 `./scripts/minix-check-invariants.sh`,再跑相关真机单测/UI 测试。**不得用新命名绕过守卫来恢复被禁行为。**
+⚠️ **改到上述领域**(Provider 请求构建/输出解析、thinking 默认注入、配置持久化、模型 fallback、聊天输入弹层、内置工具采集与回传)→ 先跑 `./scripts/minix-check-invariants.sh`,再跑相关真机单测/UI 测试。**不得用新命名绕过守卫来恢复被禁行为。**
 
 ---
 
@@ -49,6 +50,7 @@
 ## 4. 工作约定
 
 - **改动最小化**:只改必要处、遵循既有风格,不顺手重构无关代码;发现无关问题单独提出。
+- **代码及注释**:逻辑独立时可适当拆分出 `Minix*` 文件，少量接线/分支不强拆。内联修改官方文件时，每个独立逻辑块至少一处 `[Minix]` 注释，连续多行共享一处即可。
 - **双端对称**:跨端功能默认 iOS + Android 两侧对称(可先改 iOS 验证);Android 代码大量标 `Mirrors iOS ...`,先查对端实现。
 - **调试**:iOS 内建 DebugServer,见 [debug-server-api.md](docs/specs/debug-server-api.md)。
 
@@ -59,4 +61,4 @@
 - **架构/实现细节**(Provider 抽象层、消息格式、thinking 适配、沙箱、offload、双端对称表、scripts 说明)→ [architecture.md](docs/architecture.md)
 - **构建全流程** → [BUILDING.md](BUILDING.md);**发布** → [release.md](docs/minix/release.md)
 - **接口规范** → `docs/specs/`(minis-url-scheme / ios-sandbox-ish-summary / debug-server-api)
-- **Minix 定制文档** → `docs/minix/`(共存 · 请求自定义 · Request Controls · 表达式,各含需求与技术设计)
+- **Minix 定制文档** → `docs/minix/`(共存 · 请求自定义 · Request Controls · 表达式 · 内置工具,各含需求与技术设计)

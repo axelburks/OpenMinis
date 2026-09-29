@@ -3400,7 +3400,10 @@ fun ChatScreen(
                                 // state, same rule as Retry on the user bubble).
                                 // safeMutate tears down the selection toolbar
                                 // before the truncation reshuffles the list.
-                                onRerunFromHere = if (!isStreaming) ({
+                                onRerunFromHere = if (
+                                    !isStreaming &&
+                                    item.block.kind == "tool_use" // [Minix] Native items are server-executed records.
+                                ) ({
                                     coroutineScope.launch {
                                         tracedScrollToItem("RERUN-FROM-TOOL", 0, 0)
                                     }

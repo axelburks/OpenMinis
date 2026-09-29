@@ -6,9 +6,9 @@
 - 平台：iOS、Android
 - 需求边界：模型 Request Controls、思考档位、聊天选择入口
 - 关联需求：
-  - [对应技术设计](request-controls-technical.md)
-  - [服务商与模型请求头、请求体自定义需求](provider-model-request-customization-requirements.md)
-  - [表达式能力需求](request-expression-language-requirements.md)
+  - [对应技术设计](request-controls-tech.md)
+  - [服务商与模型请求头、请求体自定义需求](request-customization-prd.md)
+  - [表达式能力需求](exp-lang-prd.md)
 
 ## 2. 背景
 
@@ -131,7 +131,7 @@ headers.Authorization = delete()
 - `headers.`
 - `headers[...]`
 
-语法、函数和类型规则见 [表达式能力需求](request-expression-language-requirements.md)。
+语法、函数和类型规则见 [表达式能力需求](exp-lang-prd.md)。
 
 ## 8. 默认思考强度行为
 

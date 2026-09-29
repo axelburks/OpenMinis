@@ -339,6 +339,8 @@ final class AssistantBlock: Identifiable, ObservableObject {
             return (!path.isEmpty && name != "/" && name.contains(".")) ? name : "Read image"
         case .memoryTool(let action):
             return action.isEmpty ? "Memory" : action
+        case .nativeTool(let type):
+            return type // [Minix]
         case .info:
             return ""
         }
@@ -355,6 +357,9 @@ enum AssistantBlockKind: Equatable {
     case browserTool(action: String)
     case readImageTool(path: String)
     case memoryTool(action: String)
+    /// [Minix] Server-side built-in tool (web_search_call, code_interpreter_call,
+    /// shell_call, shell_call_output, …). `type` is the raw provider item type.
+    case nativeTool(type: String)
     case info
 }
 
@@ -419,4 +424,3 @@ struct InputAttachment: Identifiable {
         )
     }
 }
-

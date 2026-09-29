@@ -13,9 +13,9 @@
   - 模型 Body
   - 模型 Request Controls
 - 关联需求：
-  - [对应技术设计](request-expression-language-technical.md)
-  - [服务商与模型请求头、请求体自定义需求](provider-model-request-customization-requirements.md)
-  - [自定义请求控制需求](request-controls-requirements.md)
+  - [对应技术设计](exp-lang-tech.md)
+  - [服务商与模型请求头、请求体自定义需求](request-customization-prd.md)
+  - [自定义请求控制需求](request-controls-prd.md)
 
 ## 2. 命名与定位
 

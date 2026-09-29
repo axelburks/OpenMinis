@@ -67,6 +67,49 @@ enum AgentContentPart: @unchecked Sendable {
     /// `linuxPath` — same semantics as above. Used for user attachments
     /// and read_image results that don't ride through .toolResult.
     case imageData(data: Data, mimeType: String, linuxPath: String? = nil)
+    /// [Minix] A server-side built-in tool item (web_search_call,
+    /// code_interpreter_call, shell_call, shell_call_output, …) captured
+    /// verbatim from the provider response. See `AgentNativeItem`.
+    case nativeItem(AgentNativeItem)
+}
+
+/// [Minix] A server-side built-in tool item captured verbatim from a provider response
+/// (e.g. Responses API `web_search_call`, `code_interpreter_call`, `shell_call`,
+/// `shell_call_output`). Persisted whole (`rawJSON`) so it can be displayed and
+/// echoed back on later turns.
+///
+/// Unlike `ReasoningEcho`, a native item carries no model-bound encrypted
+/// payload, so it is safe to round-trip across models **within the same
+/// provider family** (gated on `providerKind` only, not `modelId`). Verified on
+/// device: cross-model replay of built-in items succeeds; only reasoning
+/// `encrypted_content` must be stripped on model switches.
+struct AgentNativeItem: Codable, Hashable, Sendable {
+    /// Provider item type, e.g. "web_search_call".
+    let type: String
+    /// Server-side item id (ws_/ci_/sh_/sho_/…). nil if the provider omits one.
+    let id: String?
+    /// Item status, e.g. "completed". Kept on replay: Volcengine ark requires it
+    /// on replayed items while OpenAI tolerates it, so it is echoed back as-is.
+    let status: String?
+    /// The item's complete original structure as a JSON string. Round-tripped
+    /// verbatim so future built-in tools need no model changes.
+    let rawJSON: String
+
+    /// [Minix] `rawJSON` re-serialized for human reading: indented and with
+    /// slashes un-escaped (so URLs read `https://…` not `https:\/\/…`). Keys
+    /// sorted for stable ordering. Display-only — `rawJSON` stays verbatim for
+    /// persistence and replay. Falls back to `rawJSON` if it isn't valid JSON
+    /// (e.g. the synthetic "annotations" item is a JSON array, still handled).
+    var prettyJSON: String {
+        guard let data = rawJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(
+                  withJSONObject: obj,
+                  options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let str = String(data: pretty, encoding: .utf8)
+        else { return rawJSON }
+        return str
+    }
 }
 
 /// Native reasoning payload captured from the provider response, used to
@@ -144,6 +187,11 @@ enum AgentStreamEvent: @unchecked Sendable {
     /// for in-memory multi-turn replay. Cross-model isolation rules live on
     /// `ReasoningEcho`.
     case reasoningEcho(ReasoningEcho)
+    /// [Minix] A server-side built-in tool item captured verbatim (web_search_call,
+    /// code_interpreter_call, shell_call, shell_call_output, …). First emitted
+    /// as an `output_item.added` placeholder for UI ordering, then re-emitted
+    /// from `response.completed` with the full include-gated result fields.
+    case nativeItem(AgentNativeItem)
     /// Response finished.
     case done(stopReason: AgentStopReason)
 }

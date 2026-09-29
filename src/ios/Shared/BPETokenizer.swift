@@ -69,6 +69,9 @@ final class BPETokenizer: @unchecked Sendable {
             return total + 4 // overhead for tool_result structure
         case .imageData(let data, _, _):
             return countImageTokens(data)
+        case .nativeItem(let item):
+            // [Minix] Count the unrestricted raw provider-native payload.
+            return countTokens(item.rawJSON) + 4
         }
     }
 

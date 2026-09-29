@@ -2816,7 +2816,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 }
             case .imageData:
                 hasNonToolPayload = true
-            case .toolUse, .toolResult:
+            case .toolUse, .toolResult, .nativeItem:
+                // [Minix] Provider-native items are tool payloads, not visible text.
                 continue
             }
         }
@@ -3246,6 +3247,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             case .toolUse(let id, let name, _): return "TU(\(name),\(id.prefix(8)))"
             case .toolResult(let id, _, _, _, _, _, _, _): return "TR(\(id.prefix(8)))"
             case .imageData: return "image"
+            case .nativeItem(let item): return "native(\(item.type))" // [Minix]
             }
         }
         AppLogger(category: "PairDiag").info("[PairDiag] subcut removes entry[\(entryIdx)].parts[\(partIdx)...]: [\(removedParts.joined(separator: ", "))]")
@@ -3889,6 +3891,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 case .browserTool: return "browser"
                 case .readImageTool: return "readImage"
                 case .memoryTool: return "memory"
+                case .nativeTool(let type): return "native:\(type)" // [Minix]
                 case .info: return "info"
                 }
             }()
@@ -4559,6 +4562,9 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                         partSummaries.append("tool_result(\(name), id:\(id.prefix(20)), \(content.count)ch\(errTag)\(imgTag)): head=\"\(head)\(content.count > 200 ? "..." : "")\"" + (tail.isEmpty ? "" : " tail=\"...\(tail)\""))
                     case .imageData(_, let mime, _):
                         partSummaries.append("image(\(mime))")
+                    case .nativeItem(let item):
+                        // [Minix] Include provider-native items in request diagnostics.
+                        partSummaries.append("native(\(item.type), \(item.rawJSON.count)ch)")
                     }
                 }
                 AgentRequestTrace.shared.step("agentHistory[\(i)]", detail: "\(msg.role.rawValue): \(partSummaries.joined(separator: " | "))")
@@ -4989,6 +4995,12 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             }
             for tu in toolEntries {
                 assistantParts.append(.toolUse(id: tu.id, name: tu.name, input: tu.args))
+            }
+            // [Minix] Server-side built-in tool items (web_search_call, etc.) captured
+            // from this turn's terminal response. Persisted verbatim and
+            // replayed within the same provider family. See AgentNativeItem.
+            for item in streamResult.nativeItems {
+                assistantParts.append(.nativeItem(item))
             }
             self.prevCommittedBlockCount = self.committedBlockCount
             committedBlockCount = allBlocks.count

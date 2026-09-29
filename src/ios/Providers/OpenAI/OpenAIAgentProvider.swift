@@ -24,6 +24,29 @@ final class OpenAIAgentProvider: AgentProvider {
     /// AND same model id.
     static let responsesAPIProviderKind: String = "openai-responses"
 
+    /// [Minix] Output item types NOT captured as generic native items — each
+    /// already has a dedicated pipeline: `message` (text + annotations),
+    /// `reasoning` (ReasoningEcho), `function_call` (.toolUse). Every OTHER
+    /// server-side output item is captured verbatim (catch-all), so future
+    /// built-in tools need no code change to store / display / replay. See
+    /// AgentNativeItem.
+    static let nativeItemCaptureSkipTypes: Set<String> = [
+        "message",
+        "reasoning",
+        "function_call",
+    ]
+
+    /// [Minix] Native item types that are NOT standalone input items on replay —
+    /// their payload rides back inside the assistant message's output_text.
+    /// Currently just the synthetic "annotations" carrier (web_search
+    /// url_citation, file_citation, …). A blacklist (not whitelist): new
+    /// built-in tools replay as standalone items by default, matching the
+    /// Responses API's round-trip design. A missing entry fails loudly (API 400)
+    /// rather than silently dropping the model's memory of a past turn.
+    static let inlineCarrierTypes: Set<String> = [
+        "annotations",
+    ]
+
     let provider: OpenAIProvider
 
     var name: String { provider.name }
@@ -594,6 +617,31 @@ final class OpenAIAgentProvider: AgentProvider {
                                 let combinedId = Self.combineResponsesAPIIds(callId: callId, fcId: itemId)
                                 functionCallAccum[itemId] = (callId: callId, name: name, json: "")
                                 continuation.yield(.contentBlockStart(.toolUse(id: combinedId, name: name)))
+                            } else if let item = event["item"] as? [String: Any],
+                               let itemType = item["type"] as? String,
+                               !Self.nativeItemCaptureSkipTypes.contains(itemType) {
+                                // [Minix] Built-in tool item announced — emit a
+                                // placeholder native item NOW so the UI inserts
+                                // its capsule at the correct position (before the
+                                // message text, which streams later). The item is
+                                // still a shell at this point (result fields fill
+                                // in by response.completed); the terminal capture
+                                // re-emits the SAME id with the complete rawJSON,
+                                // and the UI back-fills that capsule in place. If
+                                // the provider omits an id we can't correlate the
+                                // two — skip the placeholder and let the terminal
+                                // capture append it (position falls back to
+                                // end-of-turn, same as before this optimization).
+                                if let itemId = item["id"] as? String, !itemId.isEmpty,
+                                   let data = try? JSONSerialization.data(withJSONObject: item),
+                                   let rawJSON = String(data: data, encoding: .utf8) {
+                                    continuation.yield(.nativeItem(AgentNativeItem(
+                                        type: itemType,
+                                        id: itemId,
+                                        status: item["status"] as? String ?? "in_progress",
+                                        rawJSON: rawJSON
+                                    )))
+                                }
                             }
 
                         case "response.failed":
@@ -701,6 +749,66 @@ final class OpenAIAgentProvider: AgentProvider {
                                     )
                                     continuation.yield(.reasoningEcho(echo))
                                 }
+                            }
+
+                            // [Minix] Capture server-side output items verbatim
+                            // (catch-all). Everything except message / reasoning
+                            // / function_call — which have dedicated pipelines —
+                            // is stored whole as a generic AgentNativeItem: the
+                            // terminal output array is the only place where
+                            // include-gated result fields are guaranteed
+                            // complete. Serialized raw for display + cross-model
+                            // replay within the Responses family. Because it's a
+                            // catch-all, future built-in tools store / display /
+                            // replay with zero code change. See AgentNativeItem.
+                            for item in outputItems {
+                                guard let itemType = item["type"] as? String,
+                                      !Self.nativeItemCaptureSkipTypes.contains(itemType) else { continue }
+                                guard let data = try? JSONSerialization.data(withJSONObject: item),
+                                      let rawJSON = String(data: data, encoding: .utf8) else { continue }
+                                let native = AgentNativeItem(
+                                    type: itemType,
+                                    id: item["id"] as? String,
+                                    status: item["status"] as? String,
+                                    rawJSON: rawJSON
+                                )
+                                continuation.yield(.nativeItem(native))
+                            }
+
+                            // [Minix] Capture assistant-message annotations
+                            // (web_search url_citation, file_citation, …). Unlike
+                            // the items
+                            // above, annotations are NOT a standalone input item
+                            // — on replay they ride back inside the assistant
+                            // text's output_text (`annotations`), the only place
+                            // the Responses input schema accepts them (verified
+                            // in the API docs: InputItemList accepts
+                            // ResponseOutputMessage whose output_text carries
+                            // annotations). Captured VERBATIM and in order (no
+                            // dedup, all types) so replay preserves every
+                            // annotation and its start/end anchors. Wrapped in a
+                            // synthetic AgentNativeItem (type "annotations") so it
+                            // rides the same capture / persistence / restore
+                            // pipeline as the items above; on replay it's an
+                            // inline carrier (see inlineCarrierTypes).
+                            var annotations: [[String: Any]] = []
+                            for item in outputItems where (item["type"] as? String) == "message" {
+                                for part in (item["content"] as? [[String: Any]]) ?? [] {
+                                    for ann in (part["annotations"] as? [[String: Any]]) ?? [] {
+                                        annotations.append(ann)
+                                    }
+                                }
+                            }
+                            if !annotations.isEmpty,
+                               let data = try? JSONSerialization.data(withJSONObject: annotations),
+                               let rawJSON = String(data: data, encoding: .utf8) {
+                                let native = AgentNativeItem(
+                                    type: "annotations",
+                                    id: nil,
+                                    status: nil,
+                                    rawJSON: rawJSON
+                                )
+                                continuation.yield(.nativeItem(native))
                             }
                             // Usage
                             if let usage {
@@ -1025,7 +1133,9 @@ final class OpenAIAgentProvider: AgentProvider {
                         switch part {
                         case .text(let s): return !s.isEmpty
                         case .toolUse, .imageData: return true
-                        case .toolResult: return false
+                        // [Minix] Native built-in items are dropped by the ChatCompletions
+                        // converter, so they don't count as echoable content here.
+                        case .toolResult, .nativeItem: return false
                         }
                     }
                     if !hasEcho { continue }
@@ -1320,6 +1430,35 @@ final class OpenAIAgentProvider: AgentProvider {
     private func convertMessagesResponsesAPI(_ messages: [AgentMessage]) -> [[String: Any]] {
         var result: [[String: Any]] = []
         for msg in messages {
+            // [Minix] Assistant-message annotations captured this turn (synthetic
+            // "annotations" nativeItem — web_search url_citation, file_citation,
+            // …). They are NOT a standalone input item — they must ride back
+            // inside the assistant text's output_text (`annotations`). Pre-scan
+            // the parts so the `.text` branch below can re-attach them, then the
+            // `.nativeItem` branch skips the synthetic carrier itself (it's an
+            // inline carrier — see inlineCarrierTypes). See the `.text` /
+            // `.nativeItem` arms.
+            var pendingAnnotations: [[String: Any]] = []
+            var lastTextPartIdx: Int = -1
+            if msg.role == .assistant {
+                for (idx, part) in msg.parts.enumerated() {
+                    switch part {
+                    case .text:
+                        lastTextPartIdx = idx
+                    case .nativeItem(let item) where item.type == "annotations":
+                        if pendingAnnotations.isEmpty,
+                           let data = item.rawJSON.data(using: .utf8),
+                           let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
+                            pendingAnnotations = arr
+                        }
+                    default:
+                        break
+                    }
+                }
+                // No text to hang annotations on — drop them (nothing to attach
+                // to; a bare annotations array is not a valid input item).
+                if lastTextPartIdx < 0 { pendingAnnotations = [] }
+            }
             // Replay native reasoning items at the head of this assistant turn.
             // Order matters: Responses API rejects reasoning items that appear
             // after function_call items belonging to the same turn. Cross-model
@@ -1348,11 +1487,73 @@ final class OpenAIAgentProvider: AgentProvider {
                     }
                 }
             }
+            // [Minix] First pass — replay this turn's built-in tool items
+            // (web_search_call, code_interpreter_call, shell_call, …) verbatim,
+            // BEFORE the assistant message and function_call emitted below. The
+            // server runs these while producing its answer (e.g. search, then
+            // answer), so they belong ahead of the text; a function_call is the
+            // turn's CLOSING action — the client executes it and returns a
+            // function_call_output on the NEXT turn — so it must stay AFTER the
+            // message. Being in this converter already means the Responses
+            // family, so no per-model gate is needed: unlike reasoning these
+            // items carry no model-bound encrypted payload and round-trip safely
+            // across models (verified on device).
+            //
+            // Keep the `status` field: Volcengine ark REQUIRES it on replayed
+            // items and 400s without it (MissingParameter `input.status`), while
+            // OpenAI tolerates its presence — emit it always, no per-vendor
+            // branch (verified by replaying captured requests against both).
+            //
+            // Blacklist skip: the synthetic "annotations" carrier is NOT a
+            // standalone input item — its payload rides back inside the final
+            // assistant text's output_text (the `.text` branch below). A
+            // blacklist (not whitelist) means future built-in tools replay by
+            // default; a missing entry 400s loudly rather than silently dropping
+            // the turn from the model's memory.
             for part in msg.parts {
+                guard case .nativeItem(let item) = part else { continue }
+                guard !Self.inlineCarrierTypes.contains(item.type) else { continue }
+                if let data = item.rawJSON.data(using: .utf8),
+                   let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    result.append(dict)
+                }
+            }
+            for (partIdx, part) in msg.parts.enumerated() {
                 switch part {
                 case .text(let text):
                     let role = msg.role == .user ? "user" : "assistant"
-                    result.append(["role": role, "content": text])
+                    if msg.role == .assistant, !pendingAnnotations.isEmpty, partIdx == lastTextPartIdx {
+                        // [Minix] web_search / file_search produced annotations
+                        // this turn. The Responses input schema accepts a full
+                        // ResponseOutputMessage whose output_text carries
+                        // `annotations` — the simple string content form has
+                        // nowhere to put them. Re-attach verbatim to the FINAL
+                        // assistant text (the answer segment the annotations
+                        // belong to; earlier text parts are intermediate
+                        // commentary) so the model keeps its own citations
+                        // (fidelity: preserve the response's output items).
+                        // Annotations carry no model-bound payload, so — like the
+                        // built-in items — no per-model gate is needed; being in
+                        // this converter already means the Responses family.
+                        //
+                        // `status: "completed"` is REQUIRED: Volcengine ark
+                        // rejects a replayed message item without it (400
+                        // MissingParameter `input.status`), while OpenAI tolerates
+                        // its presence — so we always emit it (verified on both
+                        // endpoints; no per-vendor branch).
+                        result.append([
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [[
+                                "type": "output_text",
+                                "text": text,
+                                "annotations": pendingAnnotations,
+                            ]],
+                        ])
+                    } else {
+                        result.append(["role": role, "content": text])
+                    }
 
                 case .toolUse(let id, let name, let input):
                     let argsStr = (try? JSONSerialization.data(withJSONObject: input)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -1421,6 +1622,12 @@ final class OpenAIAgentProvider: AgentProvider {
                             ],
                         ])
                     }
+
+                case .nativeItem:
+                    // [Minix] Already replayed in the first pass above (built-in
+                    // tool items are emitted BEFORE the message so the wire order
+                    // is reasoning → built-in items → message → function_call).
+                    break
                 }
             }
         }

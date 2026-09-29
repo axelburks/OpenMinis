@@ -654,6 +654,7 @@ class AnthropicProvider(
                                 })
                             })
                         }
+                        is AgentContentPart.NativeItem -> Unit // [Minix] Responses-family only.
                     }
                 }
                 obj.put("content", contentArray)

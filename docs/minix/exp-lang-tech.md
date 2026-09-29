@@ -23,9 +23,9 @@ source
 
 关联设计：
 
-- [对应需求文档](request-expression-language-requirements.md)
-- [服务商与模型请求头、请求体自定义技术设计](provider-model-request-customization-technical.md)
-- [自定义请求控制技术设计](request-controls-technical.md)
+- [对应需求文档](exp-lang-prd.md)
+- [服务商与模型请求头、请求体自定义技术设计](request-customization-tech.md)
+- [自定义请求控制技术设计](request-controls-tech.md)
 
 ## 2. 实现文件
 

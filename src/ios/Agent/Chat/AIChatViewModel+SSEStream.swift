@@ -50,6 +50,10 @@ extension AIChatViewModel {
         /// to the dynamic-window size before being sent as one coherent batch.
         var pendingSpeakBuffer: String = ""
         var toolEntries: [ToolEntry] = []
+        /// [Minix] Server-side built-in tool items (web_search_call, code_interpreter_call,
+        /// shell_call, shell_call_output, …) captured verbatim from the terminal
+        /// response event, in server output order. Persisted and replayed.
+        var nativeItems: [AgentNativeItem] = []
         var stopReason: AgentStopReason? = nil
         var turnUsage: TokenUsage = TokenUsage()
         /// Reasoning content from thinking models — must be stored and echoed back.
@@ -838,6 +842,59 @@ extension AIChatViewModel {
                 // In-memory only; replayed by convertMessagesResponsesAPI on
                 // the next request when model id matches. See ReasoningEcho.
                 result.reasoningEcho = echo
+
+            case .nativeItem(let item):
+                // [Minix] Server-side built-in tool item. Two events arrive per
+                // item: a PLACEHOLDER at output_item.added (shell rawJSON, so the
+                // capsule appears at the right spot — before the message text
+                // that streams later) and the COMPLETE item at response.completed
+                // (full rawJSON incl. include-gated result fields). Both carry the
+                // same id.
+                //
+                // Persistence: de-dupe by id so nativeItems holds one COMPLETE
+                // entry per item (terminal replaces placeholder). annotations
+                // carry no id and are emitted once (terminal only), so they just
+                // append.
+                if let id = item.id, let idx = result.nativeItems.firstIndex(where: { $0.id == id }) {
+                    result.nativeItems[idx] = item
+                } else {
+                    result.nativeItems.append(item)
+                }
+                // UI: back-fill the existing capsule (matched by id) or append a
+                // new one. Method A — every native item gets its own capsule, no
+                // per-tool special-casing (shell_call and shell_call_output each
+                // render standalone). The capsule shows prettyJSON (indented,
+                // slashes un-escaped) for readability; rawJSON stays verbatim in
+                // nativeItems for persistence / replay.
+                let prettyContent = item.prettyJSON
+                let toolStatus: ToolBlockStatus = {
+                    switch item.status {
+                    case "completed", nil: return .success
+                    default: return .running
+                    }
+                }()
+                await MainActor.run {
+                    guard msgIdx < messages.count else { return }
+                    if let id = item.id,
+                       let blkIdx = messages[msgIdx].blocks.firstIndex(where: {
+                           if case .nativeTool = $0.kind { return $0.toolUseId == id }
+                           return false
+                       }) {
+                        let blk = messages[msgIdx].blocks[blkIdx]
+                        blk.content = prettyContent
+                        blk.toolInputArgs = prettyContent
+                        blk.toolStatus = toolStatus
+                        return
+                    }
+                    let blk = AssistantBlock(
+                        kind: .nativeTool(type: item.type),
+                        content: prettyContent,
+                        toolStatus: toolStatus,
+                        toolUseId: item.id
+                    )
+                    blk.toolInputArgs = prettyContent
+                    messages[msgIdx].blocks.append(blk)
+                }
 
             case .usage(let u):
                 result.turnUsage.add(u)

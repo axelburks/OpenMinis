@@ -21,6 +21,9 @@ sealed class LLMStreamChunk {
     data class ToolInputDelta(val id: String, val accumulated: String) : LLMStreamChunk()
     data class ToolCallComplete(val id: String, val name: String, val args: JSONObject) : LLMStreamChunk()
 
+    /** [Minix] Provider-native Responses output item, including early placeholders. */
+    data class NativeItem(val item: AgentNativeItem) : LLMStreamChunk()
+
     /**
      * [T-codex-gpt-image2-oauth-android] A model-generated media attachment
      * (e.g. an image from the Codex image_generation tool). Carried through the

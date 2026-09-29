@@ -181,6 +181,10 @@ final class AntigravityAgentProvider: AgentProvider {
                 case .imageData(let data, let mimeType, _):
                     let base64 = data.base64EncodedString()
                     parts.append(["inlineData": ["mimeType": mimeType, "data": base64]])
+                case .nativeItem:
+                    // [Minix] Server-side built-in tool items are Responses-family
+                    // specific; not sent here. See AgentNativeItem.
+                    continue
                 }
             }
 

@@ -2,6 +2,7 @@ package com.openminis.app.provider.openai
 
 import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.data.model.AgentNativeItem
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMediaAttachment
@@ -123,6 +124,16 @@ class OpenAIProvider private constructor(
     )
 
     companion object {
+        /** [Minix] Output item types with dedicated parsing paths. */
+        private val NATIVE_ITEM_CAPTURE_SKIP_TYPES = setOf(
+            "message",
+            "reasoning",
+            "function_call",
+        )
+
+        /** [Minix] Native carriers replayed inside an assistant message. */
+        private val INLINE_CARRIER_TYPES = setOf("annotations")
+
         /**
          * [T-android-thinking-level-arch] Codex OAuth client version advertised
          * in the Version / User-Agent headers. Bumped 0.142.3 → 0.144.1 to
@@ -820,6 +831,26 @@ class OpenAIProvider private constructor(
                                     send(LLMStreamChunk.ToolUseStart(combined, name))
                                     responsesToolCalls[itemId]?.started = true
                                 }
+                            } else if (
+                                itemType.isNotEmpty() &&
+                                itemType !in NATIVE_ITEM_CAPTURE_SKIP_TYPES
+                            ) {
+                                // [Minix] Insert a provider-native placeholder before
+                                // text starts streaming. response.completed re-emits
+                                // the same id with the authoritative full payload.
+                                val itemId = item.optString("id", "")
+                                if (itemId.isNotEmpty()) {
+                                    send(
+                                        LLMStreamChunk.NativeItem(
+                                            AgentNativeItem(
+                                                type = itemType,
+                                                id = itemId,
+                                                status = item.optString("status", "in_progress"),
+                                                rawJSON = item.toString(),
+                                            ),
+                                        ),
+                                    )
+                                }
                             }
                         }
                         type == "response.function_call_arguments.delta" -> {
@@ -938,6 +969,57 @@ class OpenAIProvider private constructor(
                                     "OpenAIProvider",
                                     "[T321] Responses finish_reason=$finishReason status=$status service_tier=$serviceTier contentLen=$contentLen reasoningLen=$reasoningLen toolCallAccumulators=${responsesToolCalls.size}"
                                 )
+                            }
+                            // [Minix] response.completed is the authoritative
+                            // source for provider-native output fields. Capture
+                            // every item without a dedicated pipeline, then
+                            // aggregate message annotations into one inline
+                            // carrier for persistence and exact replay.
+                            val output = resp?.optJSONArray("output")
+                            if (output != null) {
+                                for (i in 0 until output.length()) {
+                                    val item = output.optJSONObject(i) ?: continue
+                                    val itemType = item.optString("type", "")
+                                    if (itemType.isEmpty() ||
+                                        itemType in NATIVE_ITEM_CAPTURE_SKIP_TYPES
+                                    ) {
+                                        continue
+                                    }
+                                    send(
+                                        LLMStreamChunk.NativeItem(
+                                            AgentNativeItem(
+                                                type = itemType,
+                                                id = item.optString("id", "").ifEmpty { null },
+                                                status = item.optString("status", "").ifEmpty { null },
+                                                rawJSON = item.toString(),
+                                            ),
+                                        ),
+                                    )
+                                }
+
+                                val annotations = JSONArray()
+                                for (i in 0 until output.length()) {
+                                    val message = output.optJSONObject(i) ?: continue
+                                    if (message.optString("type") != "message") continue
+                                    val content = message.optJSONArray("content") ?: continue
+                                    for (j in 0 until content.length()) {
+                                        val partAnnotations = content.optJSONObject(j)
+                                            ?.optJSONArray("annotations") ?: continue
+                                        for (k in 0 until partAnnotations.length()) {
+                                            annotations.put(partAnnotations.get(k))
+                                        }
+                                    }
+                                }
+                                if (annotations.length() > 0) {
+                                    send(
+                                        LLMStreamChunk.NativeItem(
+                                            AgentNativeItem(
+                                                type = "annotations",
+                                                rawJSON = annotations.toString(),
+                                            ),
+                                        ),
+                                    )
+                                }
                             }
                             resp?.optJSONObject("usage")?.let { usage ->
                                 sawUsageBlock = true
@@ -2356,14 +2438,52 @@ class OpenAIProvider private constructor(
             if (msg.contentParts.isNotEmpty()) {
                 when (msg.role) {
                     LLMMessage.Role.ASSISTANT -> {
+                        // [Minix] Replay standalone built-in items before the
+                        // assistant message. The synthetic annotations carrier
+                        // is attached to output_text below instead of emitted as
+                        // an invalid standalone input item.
+                        val nativeParts = msg.contentParts
+                            .filterIsInstance<AgentContentPart.NativeItem>()
+                        val annotations = nativeParts
+                            .firstOrNull { it.item.type == "annotations" }
+                            ?.item
+                            ?.rawJSON
+                            ?.let { raw ->
+                                runCatching { JSONArray(raw) }.getOrNull()
+                            }
+                        for (nativePart in nativeParts) {
+                            if (nativePart.item.type in INLINE_CARRIER_TYPES) continue
+                            runCatching { JSONObject(nativePart.item.rawJSON) }
+                                .getOrNull()
+                                ?.let { input.put(it) }
+                        }
+
                         val textParts = msg.contentParts.filterIsInstance<AgentContentPart.Text>()
                         if (textParts.isNotEmpty()) {
                             val text = textParts.joinToString("") { it.text }
                             if (text.isNotEmpty()) {
-                                input.put(JSONObject().apply {
-                                    put("role", "assistant")
-                                    put("content", text)
-                                })
+                                // [Minix] Annotations require the structured
+                                // assistant-message input shape and status.
+                                if (annotations != null && annotations.length() > 0) {
+                                    input.put(JSONObject().apply {
+                                        put("type", "message")
+                                        put("role", "assistant")
+                                        put("status", "completed")
+                                        put(
+                                            "content",
+                                            JSONArray().put(JSONObject().apply {
+                                                put("type", "output_text")
+                                                put("text", text)
+                                                put("annotations", annotations)
+                                            }),
+                                        )
+                                    })
+                                } else {
+                                    input.put(JSONObject().apply {
+                                        put("role", "assistant")
+                                        put("content", text)
+                                    })
+                                }
                             }
                         }
                         for (tu in msg.contentParts.filterIsInstance<AgentContentPart.ToolUse>()) {

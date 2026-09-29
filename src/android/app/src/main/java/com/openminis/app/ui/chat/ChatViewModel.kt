@@ -28,6 +28,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.db.CompactMarkerEntity
 import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.data.model.AgentNativeItem
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -2429,6 +2430,12 @@ class ChatViewModel(
                     }
                     is AgentContentPart.ImageData -> {
                         append(role).append(" [image: ").append(part.mimeType).append("]\n")
+                    }
+                    is AgentContentPart.NativeItem -> {
+                        // [Minix] Preserve a bounded summary hint without
+                        // parsing provider-specific fields.
+                        append(role).append(" [native:").append(part.item.type).append("]: ")
+                            .append(part.item.rawJSON.take(500)).append('\n')
                     }
                 }
             }
@@ -5639,6 +5646,10 @@ class ChatViewModel(
                     is AgentContentPart.ImageData -> {
                         imageTokens += BPETokenizer.countImageTokens(part.data)
                     }
+                    is AgentContentPart.NativeItem -> {
+                        // [Minix] Native JSON contributes to request context.
+                        totalChars += part.item.rawJSON.length
+                    }
                 }
             }
         }
@@ -5658,6 +5669,7 @@ class ChatViewModel(
                 (part.imageData?.let { BPETokenizer.countImageTokens(it) } ?: 0)
         }
         is AgentContentPart.ImageData -> BPETokenizer.countImageTokens(part.data)
+        is AgentContentPart.NativeItem -> BPETokenizer.countTokens(part.item.rawJSON) // [Minix]
     }
 
     /**
@@ -5784,6 +5796,7 @@ class ChatViewModel(
                         candidates.add(OffloadCandidate(msgIdx, partIdx, tokens, part.data.size, synthId, "image"))
                     }
                     is AgentContentPart.Text -> Unit
+                    is AgentContentPart.NativeItem -> Unit // [Minix] Never offload protocol items.
                 }
             }
         }
@@ -5851,6 +5864,7 @@ class ChatViewModel(
                     )
                 }
                 is AgentContentPart.Text -> null
+                is AgentContentPart.NativeItem -> null // [Minix] Preserve exact replay payload.
             }
 
             if (newPart == null) continue
@@ -6063,6 +6077,8 @@ class ChatViewModel(
             var lastUsage: LLMUsage? = null
             val maxTokens = dynamicMaxTokens(provider, lastContextTokens)
             val toolCalls = mutableListOf<Triple<String, String, JSONObject>>() // id, name, args
+            // [Minix] Provider-native built-in tool items for this assistant turn.
+            val nativeItems = mutableListOf<AgentNativeItem>()
 
             // [T-dedupe-toolcallid 03fbcbfd] Per-turn dedupe of tool_call_id.
             // Some upstream OpenAI-compatible gateways occasionally emit
@@ -6423,6 +6439,61 @@ class ChatViewModel(
                             }
                         }
                     }
+                    is LLMStreamChunk.NativeItem -> {
+                        // [Minix] The added-event placeholder and terminal item
+                        // share an id. Replace persisted state and update the
+                        // existing capsule in place; id-less annotations are
+                        // terminal-only and append after the answer text.
+                        val item = chunk.item
+                        val existingItemIndex = item.id?.let { id ->
+                            nativeItems.indexOfFirst { it.id == id }
+                        } ?: -1
+                        if (existingItemIndex >= 0) {
+                            nativeItems[existingItemIndex] = item
+                        } else {
+                            nativeItems.add(item)
+                        }
+
+                        val prettyJSON = item.prettyJSON
+                        val status = when (item.status) {
+                            "completed", null -> ToolBlockStatus.SUCCESS
+                            else -> ToolBlockStatus.RUNNING
+                        }
+                        val existingBlockIndex = item.id?.let { id ->
+                            allToolBlocks.indexOfFirst {
+                                it.kind == "native_tool" && it.id == id
+                            }
+                        } ?: -1
+                        if (existingBlockIndex >= 0) {
+                            allToolBlocks[existingBlockIndex] =
+                                allToolBlocks[existingBlockIndex].copy(
+                                    content = prettyJSON,
+                                    toolArgs = prettyJSON,
+                                    toolStatus = status,
+                                )
+                        } else {
+                            allToolBlocks.add(
+                                AssistantBlock(
+                                    id = item.id ?: "native_${turn}_${nativeItems.lastIndex}",
+                                    kind = "native_tool",
+                                    content = prettyJSON,
+                                    toolStatus = status,
+                                    toolTitle = item.type,
+                                    toolName = item.type,
+                                    toolArgs = prettyJSON,
+                                    startTimeMs = System.currentTimeMillis(),
+                                ),
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            updateAssistantMessage(
+                                assistantId,
+                                accumulatedText + turnTextSb.toString(),
+                                true,
+                                allToolBlocks,
+                            )
+                        }
+                    }
                     is LLMStreamChunk.Usage -> {
                         lastUsage = chunk.usage
                         // Update context token count for next turn's dynamicMaxTokens()
@@ -6585,6 +6656,7 @@ class ChatViewModel(
                         turnTextBlockIdx = -1
                         turnThinking.clear()
                         toolCalls.clear()
+                        nativeItems.clear() // [Minix] Discard failed-attempt placeholders.
                         // T94 fix 2 + T256: throttle bookkeeping is per-stream
                         // attempt; reset alongside the partial-block rollback so
                         // the next attempt's first delta fires through immediately
@@ -6703,6 +6775,7 @@ class ChatViewModel(
                         turnTextBlockIdx = -1
                         turnThinking.clear()
                         toolCalls.clear()
+                        nativeItems.clear() // [Minix] Retry starts a fresh native-item set.
                         // loop continues — will retry collect with currentProvider
                     } else {
                         // All fallbacks exhausted. Surface the trail of tried
@@ -6739,6 +6812,10 @@ class ChatViewModel(
             for ((id, name, args) in toolCalls) {
                 assistantParts.add(AgentContentPart.ToolUse(id, name, args))
             }
+            // [Minix] Persist/replay terminal native items after the existing
+            // text and client-tool clusters; wire ordering is restored by the
+            // Responses converter.
+            nativeItems.forEach { assistantParts.add(AgentContentPart.NativeItem(it)) }
 
             // Map toolUseId -> input JSON string for persistence (accumulated across turns)
             toolCalls.forEach { (id, _, args) -> allToolInputs[id] = args.toString() }
@@ -6762,7 +6839,9 @@ class ChatViewModel(
             // provider) returns a turn with no visible text AND no tool calls.
             // Log only; UI behavior unchanged. Pair with OpenAIProvider SSE
             // logs to triage server-empty vs parser-drop vs swallowed-exception.
-            if (turnText.isEmpty() && toolCalls.isEmpty()) {
+            if (turnText.isEmpty() && toolCalls.isEmpty() &&
+                nativeItems.isEmpty() // [Minix]
+            ) {
                 AppLogger.warning(
                     TAG_STREAM,
                     "empty turn detected: turn=$turn finishReason=$turnFinishReason " +
@@ -6777,7 +6856,12 @@ class ChatViewModel(
                 withContext(Dispatchers.Main) {
                     updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
                 }
-                val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
+                val turnParts = buildTurnParts( // [Minix] Include native payloads.
+                    allToolBlocks,
+                    turnStartBlockIndex,
+                    toolInputMap,
+                    nativeItems,
+                )
                 val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
                 persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta)
                 // [T-error-persist-android] Empty-response hint: the model ended a
@@ -6787,8 +6871,13 @@ class ChatViewModel(
                 // compaction; otherwise suggest retry/switch. setInlineError
                 // attaches + persists onto the (empty) assistant row so the hint
                 // survives a reload too.
+                // [Minix] A native capsule is visible assistant content.
                 val hasVisibleContent = accumulatedText.isNotBlank() ||
-                    allToolBlocks.any { it.kind == "tool_use" || (it.kind == "text" && it.content.isNotBlank()) }
+                    allToolBlocks.any {
+                        it.kind == "tool_use" ||
+                            it.kind == "native_tool" || // [Minix]
+                            (it.kind == "text" && it.content.isNotBlank())
+                    }
                 val finishedCleanly = turnFinishReason == null ||
                     turnFinishReason == "stop" || turnFinishReason == "end_turn"
                 if (!hasVisibleContent && finishedCleanly) {
@@ -6862,7 +6951,12 @@ class ChatViewModel(
             // the list reflects exactly what the model just emitted. Mirrors
             // iOS overlaying the live VM's last message over the DB value.
             run {
-                val livePreviewParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
+                val livePreviewParts = buildTurnParts( // [Minix]
+                    allToolBlocks,
+                    turnStartBlockIndex,
+                    toolInputMap,
+                    nativeItems,
+                )
                 val liveMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
                 if (livePreviewParts.isNotEmpty()) {
                     chatRepository.updateSessionPreview(
@@ -7100,7 +7194,12 @@ class ChatViewModel(
             // Persist the assistant+tools turn (with full input JSON and thinking).
             // Capture the persisted DB id so we can back-fill agentHistory's last
             // assistant entry — compact-marker boundary resolution depends on it.
-            val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
+            val turnParts = buildTurnParts( // [Minix] Persist native payloads.
+                allToolBlocks,
+                turnStartBlockIndex,
+                toolInputMap,
+                nativeItems,
+            )
             val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
             val assistantDbId = persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta)
             if (assistantDbId != null) {
@@ -7926,26 +8025,36 @@ class ChatViewModel(
         allToolBlocks: List<AssistantBlock>,
         turnStartBlockIndex: Int,
         toolCallInputs: Map<String, String>,
+        nativeItems: List<AgentNativeItem> = emptyList(), // [Minix]
     ): List<AgentContentPart> {
-        if (turnStartBlockIndex >= allToolBlocks.size) return emptyList()
+        // [Minix] Native blocks deliberately use their raw source list below.
         val out = mutableListOf<AgentContentPart>()
-        for (i in turnStartBlockIndex until allToolBlocks.size) {
-            val block = allToolBlocks[i]
-            when (block.kind) {
-                "text" -> if (block.content.isNotEmpty()) {
-                    out.add(AgentContentPart.Text(block.content))
+        if (turnStartBlockIndex < allToolBlocks.size) { // [Minix]
+            for (i in turnStartBlockIndex until allToolBlocks.size) {
+                val block = allToolBlocks[i]
+                when (block.kind) {
+                    "text" -> if (block.content.isNotEmpty()) {
+                        out.add(AgentContentPart.Text(block.content))
+                    }
+                    "tool_use" -> {
+                        val name = block.toolName
+                        if (name.isBlank()) continue
+                        val inputStr = toolCallInputs[block.id] ?: "{}"
+                        val inputJson = try {
+                            JSONObject(inputStr)
+                        } catch (_: Exception) {
+                            JSONObject()
+                        }
+                        out.add(AgentContentPart.ToolUse(block.id, name, inputJson))
+                    }
+                    // Native items are appended from their raw source below.
+                    // "thinking" / "info" are not persisted in parts.
+                    else -> Unit
                 }
-                "tool_use" -> {
-                    val name = block.toolName
-                    if (name.isBlank()) continue
-                    val inputStr = toolCallInputs[block.id] ?: "{}"
-                    val inputJson = try { JSONObject(inputStr) } catch (_: Exception) { JSONObject() }
-                    out.add(AgentContentPart.ToolUse(block.id, name, inputJson))
-                }
-                // "thinking" / "info" → not persisted in parts
-                else -> { /* skip */ }
             }
         }
+        // [Minix] Keep raw provider payloads, not pretty UI block content.
+        nativeItems.forEach { out.add(AgentContentPart.NativeItem(it)) }
         return out
     }
 
@@ -7990,6 +8099,15 @@ class ChatViewModel(
                     val pageURL = meta?.browserURL ?: ""
                     val imgPath = meta?.imageFilePath ?: ""
                     append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":null}}""")
+                }
+                is AgentContentPart.NativeItem -> {
+                    // [Minix] Reuse parts_json; no database migration required.
+                    val item = part.item
+                    val id = item.id?.let { escapeJson(it) } ?: "null"
+                    val status = item.status?.let { escapeJson(it) } ?: "null"
+                    append(
+                        """{"type":"nativeItem","value":{"type":${escapeJson(item.type)},"id":$id,"status":$status,"rawJSON":${escapeJson(item.rawJSON)}}}""",
+                    )
                 }
                 else -> { /* tool_result is persisted via persistToolResultMessage */ }
             }
@@ -9649,6 +9767,18 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             try {
                 val array = org.json.JSONArray(entity.partsJson)
                 var textBlockCounter = 0
+                // [Minix] parts_json clusters native items after text/toolUse.
+                // Rebuild non-annotation capsules first so reload matches the
+                // live order: built-in tool -> answer -> annotations.
+                if (entity.role == "assistant") {
+                    for (i in 0 until array.length()) {
+                        val obj = array.optJSONObject(i) ?: continue
+                        if (obj.optString("type") != "nativeItem") continue
+                        val item = parseNativeItem(obj.optJSONObject("value")) ?: continue
+                        if (item.type == "annotations") continue
+                        blocks.add(nativeItemBlock(item, "native_restored_${entity.id}_$i"))
+                    }
+                }
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
                     when (obj.optString("type")) {
@@ -9710,6 +9840,20 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                                 browserURL = pageURL,
                                 imageFilePath = imgPath,
                             ))
+                        }
+                        "nativeItem" -> {
+                            // [Minix] Non-annotation items were prebuilt above.
+                            // Annotations remain after text on restored UI.
+                            if (entity.role != "assistant") continue
+                            val item = parseNativeItem(obj.optJSONObject("value")) ?: continue
+                            if (item.type == "annotations") {
+                                blocks.add(
+                                    nativeItemBlock(
+                                        item,
+                                        "native_restored_${entity.id}_$i",
+                                    ),
+                                )
+                            }
                         }
                         "mediaRef" -> {
                             if (entity.role != "user") continue
@@ -9826,6 +9970,36 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
     private data class ToolResultData(val output: String, val success: Boolean)
 
+    /** [Minix] Decode a native item from the existing parts_json envelope. */
+    private fun parseNativeItem(value: JSONObject?): AgentNativeItem? {
+        value ?: return null
+        val type = value.optString("type", "")
+        val rawJSON = value.optString("rawJSON", "")
+        if (type.isEmpty() || rawJSON.isEmpty()) return null
+        return AgentNativeItem(
+            type = type,
+            id = if (value.isNull("id")) null else value.optString("id", "").ifEmpty { null },
+            status = if (value.isNull("status")) {
+                null
+            } else {
+                value.optString("status", "").ifEmpty { null }
+            },
+            rawJSON = rawJSON,
+        )
+    }
+
+    /** [Minix] One generic capsule for every provider-native item type. */
+    private fun nativeItemBlock(item: AgentNativeItem, fallbackId: String) =
+        AssistantBlock(
+            id = item.id ?: fallbackId,
+            kind = "native_tool",
+            content = item.prettyJSON,
+            toolStatus = ToolBlockStatus.SUCCESS,
+            toolTitle = item.type,
+            toolName = item.type,
+            toolArgs = item.prettyJSON,
+        )
+
     private fun MessageEntity.toLLMMessage(): LLMMessage {
         val r = if (role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
         val contentParts = mutableListOf<AgentContentPart>()
@@ -9877,6 +10051,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             content = v.optString("output", ""),
                             isError = !v.optBoolean("success", true),
                         ))
+                    }
+                    "nativeItem" -> {
+                        // [Minix] Restore provider-native Responses history.
+                        parseNativeItem(obj.optJSONObject("value"))?.let {
+                            contentParts.add(AgentContentPart.NativeItem(it))
+                        }
                     }
                     "mediaRef" -> {
                         // T128: load persisted user-message images so the model

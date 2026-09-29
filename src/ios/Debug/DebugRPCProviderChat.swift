@@ -861,6 +861,15 @@ enum DebugRPCChat {
                             "status": result.status ?? (result.success ? "success" : "failed"),
                         ])
                     }
+                case .nativeItem(let item):
+                    // [Minix] Surface provider-native tool items in debug responses.
+                    if includeTools {
+                        toolCalls.append([
+                            "id": item.id ?? "",
+                            "name": item.type,
+                            "native": String(item.rawJSON.prefix(2000)),
+                        ])
+                    }
                 }
             }
             var dict: [String: Any] = [

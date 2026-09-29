@@ -331,7 +331,9 @@ internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? =
         // Render blocks in original order — text, thinking, and tool calls interleaved
         // exactly as they arrived in the stream (each assistant turn may contain multiple
         // text ↔ tool_use transitions, which must be preserved for coherent reading).
-        val toolPillBlocks = message.toolBlocks.filter { it.kind == "tool_use" }
+        val toolPillBlocks = message.toolBlocks.filter {
+            it.kind == "tool_use" || it.kind == "native_tool" // [Minix]
+        }
         val lastThinkingId = message.toolBlocks.lastOrNull { it.kind == "thinking" }?.id
         // [T-android-thinking-auto-collapse] Mirror the FlatChatItem path's
         // `isLastBlockOverall` so the legacy renderer's ThinkingBlock also
@@ -637,8 +639,8 @@ internal fun ToolCallPill(
         block.toolStatus == ToolBlockStatus.TIMEOUT
     val isCancelled = block.toolStatus == ToolBlockStatus.CANCELLED
 
-    val toolAccent = toolAccentColor(block.toolName)
-    val toolIcon = toolIconFor(block.toolName)
+    val toolAccent = toolAccentColor(block) // [Minix] Native tools share one style.
+    val toolIcon = toolIconFor(block) // [Minix]
 
     // Icon color: tool color when running/done, error/cancel colors on failure
     val iconTint = when {

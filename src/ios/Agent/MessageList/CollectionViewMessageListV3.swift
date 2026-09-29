@@ -211,6 +211,7 @@ private struct BridgedAssistantBlockV3: View {
         case .browserTool: return "assistantBrowserBlock"
         case .readImageTool: return "assistantReadImageBlock"
         case .memoryTool: return "assistantMemoryBlock"
+        case .nativeTool: return "assistantNativeToolBlock" // [Minix]
         case .info: return "assistantInfoBlock"
         }
     }

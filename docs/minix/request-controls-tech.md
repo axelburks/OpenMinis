@@ -2,7 +2,7 @@
 
 关联需求：
 
-- [对应需求文档](request-controls-requirements.md)
+- [对应需求文档](request-controls-prd.md)
 
 ## 1. 架构概览
 
@@ -13,7 +13,7 @@ Request Controls 由四层组成：
 3. 每个会话或草稿的当前模型运行快照
 4. 聊天 UI 与请求编排
 
-表达式语法由 [表达式能力技术设计](request-expression-language-technical.md) 定义，请求 Header、Body 的基础编排由 [服务商与模型请求头、请求体自定义技术设计](provider-model-request-customization-technical.md) 定义。
+表达式语法由 [表达式能力技术设计](exp-lang-tech.md) 定义，请求 Header、Body 的基础编排由 [服务商与模型请求头、请求体自定义技术设计](request-customization-tech.md) 定义。
 
 ## 2. 核心文件
 

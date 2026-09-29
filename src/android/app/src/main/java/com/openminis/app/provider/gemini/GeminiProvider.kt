@@ -289,6 +289,7 @@ class GeminiProvider(
                                 put("data", Base64.encodeToString(part.data, Base64.NO_WRAP))
                             }))
                         }
+                        is AgentContentPart.NativeItem -> Unit // [Minix] Responses-family only.
                     }
                 }
             } else {

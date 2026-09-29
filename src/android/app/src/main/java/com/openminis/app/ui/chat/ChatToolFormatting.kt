@@ -9,6 +9,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.ui.graphics.Color
 
@@ -75,6 +76,14 @@ internal fun toolIconFor(toolName: String) = when (toolName) {
     else -> Icons.Default.Build
 }
 
+/** [Minix] Unified appearance for every provider-native built-in tool. */
+internal fun toolAccentColor(block: AssistantBlock): Color =
+    if (block.kind == "native_tool") Color(0xFF8E8E93) else toolAccentColor(block.toolName)
+
+/** [Minix] Storage is distinct from the generic Build icon used by MCP/unknown tools. */
+internal fun toolIconFor(block: AssistantBlock) =
+    if (block.kind == "native_tool") Icons.Default.Storage else toolIconFor(block.toolName)
+
 // Helper: tool display name for "Minis is using X"
 internal fun toolDisplayName(toolName: String): String = when (toolName) {
     "shell_execute" -> "terminal"
@@ -104,6 +113,14 @@ internal fun toolTitleLabel(toolName: String): String = when (toolName) {
     "web_search" -> "Minis is using Search"
     else -> "Minis is using ${toolDisplayName(toolName)}"
 }
+
+/** [Minix] Native labels stay equal to the provider's raw type. */
+internal fun toolTitleLabel(block: AssistantBlock): String =
+    if (block.kind == "native_tool") {
+        "Minis is using ${block.toolName}"
+    } else {
+        toolTitleLabel(block.toolName)
+    }
 
 // Helper: format duration (iOS: < 1s → "0.1s", < 60s → "45s", >= 60s → "2m 10s")
 internal fun formatToolDuration(ms: Long): String {

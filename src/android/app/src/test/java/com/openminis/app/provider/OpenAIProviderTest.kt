@@ -1,5 +1,8 @@
 package com.openminis.app.provider
 
+import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.data.model.AgentNativeItem
+import com.openminis.app.data.model.ContentPart
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -10,15 +13,18 @@ import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RequestBodyControl
+import com.openminis.app.data.model.contentPartJson
 import com.openminis.app.provider.openai.OpenAIProvider
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -566,6 +572,221 @@ class OpenAIProviderTest {
         val usageChunks = chunks.filterIsInstance<LLMStreamChunk.Usage>()
         assertEquals(1, usageChunks.size)
         assertEquals(50, usageChunks[0].usage.cacheReadInputTokens)
+    }
+
+    @Test
+    fun testResponsesNativeItems_capturePlaceholderTerminalAndAnnotations_BitsUT() = runBlocking {
+        // [Minix] Generic catch-all capture: no web-search-specific parser.
+        provider = OpenAIProvider(
+            apiKey = "test-key",
+            model = LLMModel.gpt4oMini,
+            basePath = server.url("/").toString().trimEnd('/'),
+            useResponsesAPI = true,
+        )
+        val placeholder = JSONObject()
+            .put("type", "web_search_call")
+            .put("id", "ws_1")
+            .put("status", "in_progress")
+        val completedItem = JSONObject(placeholder.toString())
+            .put("status", "completed")
+            .put("action", JSONObject().put("type", "search").put("query", "Minix"))
+        val annotation = JSONObject()
+            .put("type", "url_citation")
+            .put("url", "https://example.com/source")
+            .put("title", "Source")
+            .put("start_index", 0)
+            .put("end_index", 6)
+        val message = JSONObject()
+            .put("type", "message")
+            .put(
+                "content",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "output_text")
+                        .put("text", "answer")
+                        .put("annotations", JSONArray().put(annotation)),
+                ),
+            )
+        val completed = JSONObject()
+            .put("type", "response.completed")
+            .put(
+                "response",
+                JSONObject()
+                    .put("status", "completed")
+                    .put("output", JSONArray().put(completedItem).put(message)),
+            )
+        val sseBody = buildString {
+            appendLine(
+                "data: ${JSONObject()
+                    .put("type", "response.output_item.added")
+                    .put("item", placeholder)}",
+            )
+            appendLine()
+            appendLine(
+                "data: ${JSONObject()
+                    .put("type", "response.output_text.delta")
+                    .put("delta", "answer")}",
+            )
+            appendLine()
+            appendLine("data: $completed")
+            appendLine()
+            appendLine("data: [DONE]")
+            appendLine()
+        }
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(sseBody),
+        )
+
+        val chunks = provider.streamMessage(
+            listOf(LLMMessage(LLMMessage.Role.USER, "question")),
+            null,
+            1024,
+        ).toList()
+
+        val nativeItems = chunks.filterIsInstance<LLMStreamChunk.NativeItem>()
+            .map { it.item }
+        assertEquals(3, nativeItems.size)
+        assertEquals("in_progress", nativeItems[0].status)
+        assertEquals("completed", nativeItems[1].status)
+        assertEquals("Minix", JSONObject(nativeItems[1].rawJSON).getJSONObject("action").getString("query"))
+        assertEquals("annotations", nativeItems[2].type)
+        assertEquals(
+            "https://example.com/source",
+            JSONArray(nativeItems[2].rawJSON).getJSONObject(0).getString("url"),
+        )
+    }
+
+    @Test
+    fun testResponsesNativeItems_replayBeforeMessageAndFunctionCall_BitsUT() = runBlocking {
+        // [Minix] Native output items keep status and annotations stay inline.
+        provider = OpenAIProvider(
+            apiKey = "test-key",
+            model = LLMModel.gpt4oMini,
+            basePath = server.url("/").toString().trimEnd('/'),
+            useResponsesAPI = true,
+        )
+        val terminal = JSONObject()
+            .put("type", "web_search_call")
+            .put("id", "ws_1")
+            .put("status", "completed")
+            .put("action", JSONObject().put("type", "search").put("query", "Minix"))
+        val annotations = JSONArray().put(
+            JSONObject()
+                .put("type", "url_citation")
+                .put("url", "https://example.com/source")
+                .put("title", "Source")
+                .put("start_index", 0)
+                .put("end_index", 6),
+        )
+        val responseCompleted = JSONObject()
+            .put("type", "response.completed")
+            .put(
+                "response",
+                JSONObject()
+                    .put("status", "completed")
+                    .put("output", JSONArray()),
+            )
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: $responseCompleted\n\ndata: [DONE]\n\n"),
+        )
+
+        provider.streamMessage(
+            listOf(
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = "question",
+                    contentParts = listOf(AgentContentPart.Text("question")),
+                ),
+                LLMMessage(
+                    role = LLMMessage.Role.ASSISTANT,
+                    content = "answer",
+                    contentParts = listOf(
+                        AgentContentPart.Text("answer"),
+                        AgentContentPart.NativeItem(
+                            AgentNativeItem(
+                                type = "web_search_call",
+                                id = "ws_1",
+                                status = "completed",
+                                rawJSON = terminal.toString(),
+                            ),
+                        ),
+                        AgentContentPart.NativeItem(
+                            AgentNativeItem(
+                                type = "annotations",
+                                rawJSON = annotations.toString(),
+                            ),
+                        ),
+                        AgentContentPart.ToolUse(
+                            "call_1|fc_1",
+                            "next_step",
+                            JSONObject().put("value", 1),
+                        ),
+                    ),
+                ),
+            ),
+            null,
+            1024,
+        ).toList()
+
+        val requestBody = JSONObject(server.takeRequest().body.readUtf8())
+        val input = requestBody.getJSONArray("input")
+        assertEquals("web_search_call", input.getJSONObject(1).getString("type"))
+        assertEquals("completed", input.getJSONObject(1).getString("status"))
+        assertEquals("message", input.getJSONObject(2).getString("type"))
+        assertEquals("completed", input.getJSONObject(2).getString("status"))
+        assertEquals(
+            "https://example.com/source",
+            input.getJSONObject(2)
+                .getJSONArray("content")
+                .getJSONObject(0)
+                .getJSONArray("annotations")
+                .getJSONObject(0)
+                .getString("url"),
+        )
+        assertEquals("function_call", input.getJSONObject(3).getString("type"))
+    }
+
+    @Test
+    fun testResponsesNativeItems_persistedEnvelopePreservesRawJSON_BitsUT() {
+        // [Minix] Mirrors ChatViewModel's existing parts_json envelope.
+        val rawJSON =
+            """{"z":1,"url":"https:\/\/example.com\/source","a":{"value":2}}"""
+        val persisted = JSONObject()
+            .put("type", "nativeItem")
+            .put(
+                "value",
+                JSONObject()
+                    .put("type", "web_search_call")
+                    .put("id", "ws_1")
+                    .put("status", "completed")
+                    .put("rawJSON", rawJSON),
+            )
+            .toString()
+
+        val decoded = contentPartJson.decodeFromString<ContentPart>(persisted)
+            as ContentPart.NativeItem
+
+        assertEquals(rawJSON, decoded.value.rawJSON)
+        assertEquals("ws_1", decoded.value.id)
+    }
+
+    @Test
+    fun testResponsesNativeItems_prettyJSONIsStableAndReadable_BitsUT() {
+        // [Minix] Formatting is display-only; rawJSON remains untouched.
+        val item = AgentNativeItem(
+            type = "web_search_call",
+            rawJSON =
+                """{"z":1,"url":"https:\/\/example.com\/source","a":{"value":2}}""",
+        )
+
+        assertTrue(item.prettyJSON.contains("\n"))
+        assertTrue(item.prettyJSON.indexOf("\"a\"") < item.prettyJSON.indexOf("\"z\""))
+        assertTrue(item.prettyJSON.contains("https://example.com/source"))
+        assertFalse(item.prettyJSON.contains("\\/"))
     }
 
     // -- Error handling --

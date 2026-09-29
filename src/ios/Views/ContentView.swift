@@ -3015,6 +3015,9 @@ struct ContentView: View {
                     case .mediaRef:
                         cleanParts.append(["type": "media", "note": "image/file attachment"])
                         summary.attachmentCount += 1
+                    case .nativeItem(let item):
+                        // [Minix] Preserve provider-native item identity in JSON exports.
+                        cleanParts.append(["type": "native_tool", "native_type": item.type])
                     }
                 }
 
@@ -3120,6 +3123,9 @@ struct ContentView: View {
                     case .mediaRef:
                         parts.append("[Attachment]")
                         summary.attachmentCount += 1
+                    case .nativeItem(let item):
+                        // [Minix] Preserve provider-native item identity in text exports.
+                        parts.append("[\(item.type)]")
                     }
                 }
                 let body = parts.joined(separator: "\n")
@@ -5410,4 +5416,3 @@ private struct ForceSyncToastBanner: View {
         .frame(maxWidth: 480)
     }
 }
-

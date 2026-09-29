@@ -66,6 +66,13 @@ struct AssistantBlockView: View {
             ToolCapsuleView(block: block, icon: "brain.head.profile", accentColor: .pink,
                             commandStartTime: commandStartTime, onStop: onStop,
                             toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
+        case .nativeTool:
+            // [Minix] Render every provider-native item with the unified capsule style.
+            ToolCapsuleView(block: block,
+                            icon: AssistantBlockView.nativeToolIcon,
+                            accentColor: AssistantBlockView.nativeToolColor,
+                            commandStartTime: commandStartTime, onStop: onStop,
+                            toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
         case .info:
             let allLines = block.content.components(separatedBy: "\n").filter { !$0.isEmpty }
             // Separate reason lines (⚠️) from the final switched line (✅)
@@ -127,6 +134,12 @@ struct AssistantBlockView: View {
         .fixedSize(horizontal: false, vertical: true)
         .modifier(MinisOpenURLHandler())
     }
+}
+
+extension AssistantBlockView {
+    /// [Minix] Unified appearance for provider-side built-in tool capsules.
+    static let nativeToolIcon = "server.rack"
+    static let nativeToolColor: Color = .gray
 }
 
 // MARK: - Shimmer Overlay (continuous diagonal shine via offset animation)
@@ -242,6 +255,7 @@ struct ToolCapsuleView: View {
         case .browserTool:   toolName = "browser_use"
         case .readImageTool: toolName = "read_image"
         case .memoryTool:    toolName = "memory"
+        case .nativeTool(let type): toolName = type // [Minix]
         case .text, .thinking, .info: toolName = "unknown"
         }
 

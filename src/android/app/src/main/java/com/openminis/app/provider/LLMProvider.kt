@@ -145,6 +145,7 @@ fun Flow<LLMStreamChunk>.failOnSilentEmptyCompletion(providerName: String): Flow
             is LLMStreamChunk.ToolUseStart,
             is LLMStreamChunk.ToolInputDelta,
             is LLMStreamChunk.ToolCallComplete,
+            is LLMStreamChunk.NativeItem, // [Minix]
             is LLMStreamChunk.MediaAttachment -> sawContent = true
             is LLMStreamChunk.Finished -> if (chunk.stopReason != null) sawFinishReason = true
             else -> {}

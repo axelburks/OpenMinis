@@ -161,6 +161,9 @@ struct ChatMessageRow: View {
                 parts.append("Image: \(path)")
             case .memoryTool(let action):
                 parts.append("Memory: \(action)\n\(block.content)")
+            case .nativeTool(let type):
+                // [Minix] Server-side built-in tool capsule → plain-text export.
+                parts.append(block.content.isEmpty ? type : "\(type)\n\(block.content)")
             case .thinking:
                 if !block.content.isEmpty { parts.append("[Thinking]\n\(block.content)") }
             case .info:
@@ -699,11 +702,9 @@ struct ChatMessageRow: View {
             case .text: return !block.content.isEmpty
             case .thinking: return true
             case .info: return true
-            case .shellTool, .fileReadTool, .fileWriteTool, .fileEditTool, .browserTool, .readImageTool, .memoryTool: return true
+            case .shellTool, .fileReadTool, .fileWriteTool, .fileEditTool, .browserTool, .readImageTool, .memoryTool, .nativeTool: return true // [Minix]
             }
         }
     }
 
 }
-
-

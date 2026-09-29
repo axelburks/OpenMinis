@@ -863,6 +863,9 @@ extension AIChatViewModel {
                     lines.append("[Result\(isError ? " ERROR" : "")] \(name): \(preview)")
                 case .imageData:
                     lines.append("[\(role)] [Image attached]")
+                case .nativeItem(let item):
+                    // [Minix] Preserve the provider-native item type in compact summaries.
+                    lines.append("[Tool] \(item.type)")
                 }
             }
         }

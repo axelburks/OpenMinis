@@ -346,6 +346,10 @@ extension AIChatViewModel {
                     imageTokens += it
                     msgImgTok += it
                     partKind = "img"
+                case .nativeItem(let item):
+                    // [Minix] Include provider-native payloads in context diagnostics.
+                    partChars = item.rawJSON.count
+                    partKind = "native:\(item.type)"
                 }
                 msgChars += partChars
                 totalChars += partChars
@@ -482,6 +486,11 @@ extension AIChatViewModel {
 
                 case .text:
                     continue
+
+                case .nativeItem:
+                    // [Minix] Keep built-in tool items intact for verbatim replay;
+                    // payload size is intentionally unrestricted. See AgentNativeItem.
+                    continue
                 }
             }
         }
@@ -544,6 +553,10 @@ extension AIChatViewModel {
                 agentHistory[candidate.msgIdx].parts[candidate.partIdx] = .text(stub)
 
             case .text:
+                continue
+
+            case .nativeItem:
+                // [Minix] Never collected as an offload candidate; unreachable here.
                 continue
             }
 

@@ -303,6 +303,67 @@ private struct CopyableURLCapsule: View {
     }
 }
 
+/// [Minix] Read-only JSON viewer for server-side built-in tool items.
+/// A single UITextView allows selection across the whole payload, while
+/// TextKit keeps large JSON scrollable without creating one SwiftUI Text per
+/// chunk. Link detection routes through SwiftUI's openURL environment, which
+/// ToolLiveSheet overrides to present its in-app link preview.
+private struct NativeJSONTextView: UIViewRepresentable {
+    let text: String
+    @Environment(\.openURL) private var openURL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(openURL: openURL)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView(usingTextLayoutManager: true)
+        textView.delegate = context.coordinator
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.backgroundColor = .clear
+        textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.textColor = .label
+        textView.textContainerInset = UIEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.dataDetectorTypes = [.link]
+        textView.linkTextAttributes = [
+            .foregroundColor: UIColor.systemBlue,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
+        textView.alwaysBounceVertical = true
+        textView.showsVerticalScrollIndicator = true
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        context.coordinator.openURL = openURL
+        let sanitized = sanitizeForDisplay(text.isEmpty ? " " : text)
+        if textView.text != sanitized {
+            textView.text = sanitized
+        }
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var openURL: OpenURLAction
+
+        init(openURL: OpenURLAction) {
+            self.openURL = openURL
+        }
+
+        func textView(
+            _ textView: UITextView,
+            shouldInteractWith URL: URL,
+            in characterRange: NSRange,
+            interaction: UITextItemInteraction
+        ) -> Bool {
+            guard interaction == .invokeDefaultAction else { return true }
+            openURL(URL)
+            return false
+        }
+    }
+}
+
 /// Full-screen live sheet — Manus-style layout with nav bar, live content, and bottom status/navigation.
 struct ToolLiveSheet: View {
     let toolBlocks: [AssistantBlock]
@@ -697,6 +758,8 @@ struct ToolLiveSheet: View {
             return "read_image(\(truncateParam(path)))"
         case .memoryTool(let action):
             return "\(truncateParam(action))"
+        case .nativeTool(let type):
+            return type // [Minix]
         case .info:
             return ""
         }
@@ -716,6 +779,7 @@ struct ToolLiveSheet: View {
         case .browserTool: Image(systemName: "globe")
         case .readImageTool: Image(systemName: "photo")
         case .memoryTool: Image(systemName: "brain.head.profile")
+        case .nativeTool: Image(systemName: AssistantBlockView.nativeToolIcon) // [Minix]
         case .info: Image(systemName: "arrow.triangle.2.circlepath")
         case .text: Image(systemName: "text.alignleft")
         case .thinking: Image("ThinkingIcon")
@@ -739,6 +803,9 @@ struct ToolLiveSheet: View {
             case .memoryTool:
                 let content = memoryWriteContentFromArgs() ?? block.content
                 memoryEditorContent(content, action: memoryActionName(), isStreaming: true)
+            case .nativeTool:
+                // [Minix] Provider-native payloads use the selectable JSON viewer.
+                nativeJSONContent
             default: textContent
             }
         } else if let snap = currentSnapshot {
@@ -773,8 +840,39 @@ struct ToolLiveSheet: View {
             case .memoryTool:
                 let content = memoryWriteContentFromArgs() ?? block.content
                 memoryEditorContent(content, action: memoryActionName(), resultText: block.content)
+            case .nativeTool:
+                // [Minix] Provider-native payloads use the selectable JSON viewer.
+                nativeJSONContent
             default:
                 textContent
+            }
+        }
+    }
+
+    /// [Minix] Built-in tool raw JSON: selectable as one document and with tappable
+    /// http(s) links. Kept separate from textContent's chunked SwiftUI Text
+    /// renderer because chunk boundaries prevent cross-document selection.
+    private var nativeJSONContent: some View {
+        GeometryReader { geo in
+            let cardWidth = geo.size.width - 24
+            let cardMinHeight = cardWidth * 3.0 / 4.0
+            VStack(alignment: .leading, spacing: 0) {
+                if !contentHeader.isEmpty {
+                    Text(contentHeader)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(ChatColors.secondaryText)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, 8)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+
+                NativeJSONTextView(text: block.content)
+                    .frame(maxWidth: .infinity, minHeight: cardMinHeight, maxHeight: .infinity)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 16)
             }
         }
     }
@@ -1984,6 +2082,7 @@ struct ToolLiveSheet: View {
         case .browserTool: return "Minis is using Browser"
         case .readImageTool: return "Minis is reading Image"
         case .memoryTool: return "Minis is using Memory"
+        case .nativeTool(let type): return "Minis is using \(type)" // [Minix]
         case .info: return "Minis"
         case .text: return "Minis"
         case .thinking: return "Minis"
@@ -2017,6 +2116,7 @@ struct ToolLiveSheet: View {
         case .browserTool: return .blue
         case .readImageTool: return .purple
         case .memoryTool: return .pink
+        case .nativeTool: return AssistantBlockView.nativeToolColor // [Minix]
         case .info: return .secondary
         case .text: return .primary
         case .thinking: return .blue
@@ -2357,6 +2457,7 @@ private struct ToolPreviewThumbnail: View {
         case .browserTool: return .blue
         case .readImageTool: return .purple
         case .memoryTool: return .pink
+        case .nativeTool: return AssistantBlockView.nativeToolColor // [Minix]
         case .info: return .secondary
         case .text: return .primary
         case .thinking: return .blue
