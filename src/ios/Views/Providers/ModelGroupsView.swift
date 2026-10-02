@@ -8,6 +8,11 @@ struct ModelGroupsView: View {
     @State private var showAddAgentModels = false
     @State private var showAddAgentGroups = false
     @State private var forceSyncToast: String?
+    /// [T-provider-group-swipe-actions] Swipe-to-edit / swipe-to-delete targets.
+    /// Edit pushes the same detail screen the row taps into; delete is held here
+    /// until the confirmation alert is answered.
+    @State private var editingGroupId: String?
+    @State private var pendingDeleteGroup: ModelGroup?
     @AppStorage("cloudSync.v2.enabled") private var iCloudSyncEnabled: Bool = false
 
     var body: some View {
@@ -39,8 +44,33 @@ struct ModelGroupsView: View {
                         } label: {
                             GroupRow(group: group)
                         }
+                        // [T-provider-group-swipe-actions] Explicit swipe
+                        // actions REPLACE the previous `.onDelete`, which gave
+                        // a swipe-to-delete with NO confirmation: a group can
+                        // be a default/voice/vision target and removing it
+                        // silently clears those pointers (see
+                        // ProviderConfigStore.removeGroup), so one careless
+                        // swipe could reconfigure routing with no undo.
+                        // Reordering is unaffected — `.onMove` stays, and UIKit
+                        // arbitrates horizontal vs vertical drags itself.
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingDeleteGroup = group
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            Button {
+                                editingGroupId = group.id
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            .tint(.blue)
+                        }
                     }
                     .onMove(perform: moveGroups)
+                    // Retained so the EditButton's red-minus delete still
+                    // exists; it now routes through `pendingDeleteGroup` and
+                    // therefore asks for confirmation like the swipe does.
                     .onDelete(perform: deleteGroups)
                 } header: {
                     HStack {
@@ -86,10 +116,18 @@ struct ModelGroupsView: View {
                         ),
                         voiceDirection: .output
                     )
+                    GroupSlotPicker(
+                        label: "Vision Input",
+                        selection: Binding(
+                            get: { store.visionGroupId },
+                            set: { store.visionGroupId = $0 }
+                        ),
+                        isVision: true
+                    )
                 } header: {
                     Text("Defaults")
                 } footer: {
-                    Text("Primary is used for main agent tasks. Sub is used for lightweight tasks like title generation. Voice Input/Output pick a group whose audio-capable models drive speech-to-text and text-to-speech; if none is set, the offline System voice is used.")
+                    Text("Primary is used for main agent tasks. Sub is used for lightweight tasks like title generation. Voice Input/Output pick a group whose audio-capable models drive speech-to-text and text-to-speech; if none is set, the offline System voice is used. Vision Input picks a group whose image-capable models describe images when the chat model cannot see them itself; if none is set, models without vision cannot read images at all.")
                 }
             }
 
@@ -116,14 +154,14 @@ struct ModelGroupsView: View {
                         showCreateGroup = true
                         newGroupName = ""
                     } label: {
-                        Label(String(localized: "New Group"), systemImage: "plus")
+                        Label(AppLocalized("New Group"), systemImage: "plus")
                     }
                     if #available(iOS 17.0, *), iCloudSyncEnabled {
                         Divider()
                         Button {
                             Task { await forceSyncGroups() }
                         } label: {
-                            Label(String(localized: "Force iCloud Sync"),
+                            Label(AppLocalized("Force iCloud Sync"),
                                   systemImage: "arrow.triangle.2.circlepath.icloud")
                         }
                     }
@@ -145,6 +183,35 @@ struct ModelGroupsView: View {
             }
         }
         .animation(.spring(response: 0.3), value: forceSyncToast)
+        // [T-provider-group-swipe-actions] Swipe-Edit reuses the row's own
+        // destination.
+        //
+        // [T-swipe-edit-white-screen] Value-driven: the destination is built
+        // from the id captured at push time rather than re-read from
+        // `editingGroupId`, which could read back empty mid-swipe-retraction
+        // and push a blank, inescapable screen. See SwipeEditDestination.swift.
+        .swipeEditDestination(item: $editingGroupId) { id in
+            ModelGroupDetailView(groupId: id)
+        }
+        // Names the group and spells out the consequence the store actually
+        // has: removeGroup clears any default / voice / vision pointer aimed
+        // at it, which is not obvious from "delete a group".
+        .alert(
+            AppLocalized("Delete Group"),
+            isPresented: Binding(
+                get: { pendingDeleteGroup != nil },
+                set: { if !$0 { pendingDeleteGroup = nil } }
+            ),
+            presenting: pendingDeleteGroup
+        ) { group in
+            Button("Delete", role: .destructive) {
+                store.removeGroup(group.id)
+                pendingDeleteGroup = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteGroup = nil }
+        } message: { group in
+            Text("Delete \"\(group.name)\"? Any default, voice, or vision selection pointing at this group will be cleared. The models themselves are not deleted.")
+        }
         .alert("New Group", isPresented: $showCreateGroup) {
             TextField("Group name", text: $newGroupName)
             Button("Create") { createGroup() }
@@ -167,11 +234,17 @@ struct ModelGroupsView: View {
         }
     }
 
+    /// [T-provider-group-swipe-actions] Edit-mode (red minus) deletion.
+    ///
+    /// Kept wired to `.onDelete` so the EditButton path kicks off the SAME
+    /// confirmation the swipe does, instead of deleting outright as it used to.
+    /// Only the first offset is honoured because the alert names one group;
+    /// the list has no multi-select delete, so an IndexSet here is always a
+    /// single row in practice.
     private func deleteGroups(at offsets: IndexSet) {
         let groups = store.modelGroups
-        for index in offsets {
-            store.removeGroup(groups[index].id)
-        }
+        guard let index = offsets.first, groups.indices.contains(index) else { return }
+        pendingDeleteGroup = groups[index]
     }
 
     private func moveGroups(from source: IndexSet, to destination: Int) {
@@ -184,7 +257,7 @@ struct ModelGroupsView: View {
     private func forceSyncGroups() async {
         _ = await ForceSyncHelper.markProvidersDirty()
         await ForceSyncHelper.bidirectionalSync(recordTypes: ["ProviderConfig", "ProviderConfigV2"])
-        forceSyncToast = String(localized: "Syncing model groups via iCloud")
+        forceSyncToast = AppLocalized("Syncing model groups via iCloud")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             forceSyncToast = nil
         }
@@ -207,7 +280,7 @@ private struct GroupRow: View {
 
     private var memberSummary: String {
         let entries = group.memberEntryIds.compactMap { store.entry(for: $0) }
-        if entries.isEmpty { return String(localized: "No models") }
+        if entries.isEmpty { return AppLocalized("No models") }
         let names = entries.prefix(3).map(\.model.displayName)
         let suffix = entries.count > 3 ? " +\(entries.count - 3)" : ""
         return names.joined(separator: ", ") + suffix
@@ -250,35 +323,35 @@ private struct GroupRow: View {
         case .videoOutput:
             Image(systemName: "video.badge.plus")
                 .font(.caption).foregroundStyle(.tint)
-                .accessibilityLabel(String(localized: "Video generation"))
+                .accessibilityLabel(AppLocalized("Video generation"))
         case .imageOutput:
             Image(systemName: "photo.badge.plus")
                 .font(.caption).foregroundStyle(.tint)
-                .accessibilityLabel(String(localized: "Image generation"))
+                .accessibilityLabel(AppLocalized("Image generation"))
         case .audioOutput:
             Image(systemName: "speaker.wave.2")
                 .font(.caption).foregroundStyle(.tint)
-                .accessibilityLabel(String(localized: "Speech output"))
+                .accessibilityLabel(AppLocalized("Speech output"))
         case .audioInput:
             Image(systemName: "waveform.badge.mic")
                 .font(.caption).foregroundStyle(.secondary)
-                .accessibilityLabel(String(localized: "Speech transcription"))
+                .accessibilityLabel(AppLocalized("Speech transcription"))
         case .videoInput:
             Image(systemName: "video")
                 .font(.caption).foregroundStyle(.secondary)
-                .accessibilityLabel(String(localized: "Video input"))
+                .accessibilityLabel(AppLocalized("Video input"))
         case .imageInput:
             Image(systemName: "photo")
                 .font(.caption).foregroundStyle(.secondary)
-                .accessibilityLabel(String(localized: "Image input"))
+                .accessibilityLabel(AppLocalized("Image input"))
         case .pdfInput:
             Image(systemName: "doc")
                 .font(.caption).foregroundStyle(.secondary)
-                .accessibilityLabel(String(localized: "PDF input"))
+                .accessibilityLabel(AppLocalized("PDF input"))
         case .textOutput:
             Image(systemName: "text.alignleft")
                 .font(.caption).foregroundStyle(.secondary)
-                .accessibilityLabel(String(localized: "Text generation"))
+                .accessibilityLabel(AppLocalized("Text generation"))
         default:
             EmptyView()
         }
@@ -296,11 +369,16 @@ private struct GroupRow: View {
                     modalityIcon(modality)
                 }
                 Spacer()
+                // AppLocalized, not a bare literal: `badge` takes a `String`,
+                // so `Text(text)` inside it is the runtime-value initializer
+                // and performs NO table lookup. A literal here renders English
+                // in every locale — caught on device in id, but it affected
+                // all of them equally.
                 if isPrimaryDefault {
-                    badge("Primary", color: .blue)
+                    badge(AppLocalized("Primary"), color: .blue)
                 }
                 if isSubDefault {
-                    badge("Sub", color: .orange)
+                    badge(AppLocalized("Sub"), color: .orange)
                 }
             }
 
@@ -315,14 +393,14 @@ private struct GroupRow: View {
                     Text("·")
                         .font(.caption)
                         .foregroundStyle(.quaternary)
-                    Text(group.fallbackStrategy == .always ? String(localized: "Always") : String(localized: "Default"))
+                    Text(group.fallbackStrategy == .always ? AppLocalized("Always") : AppLocalized("Default"))
                         .font(.caption)
                         .foregroundStyle(group.fallbackStrategy == .always ? .orange : .secondary)
                 }
                 Text("·")
                     .font(.caption)
                     .foregroundStyle(.quaternary)
-                Text(String(localized: "\(group.memberEntryIds.count) models"))
+                Text(AppLocalized("\(group.memberEntryIds.count) models"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

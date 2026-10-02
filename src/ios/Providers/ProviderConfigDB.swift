@@ -38,6 +38,14 @@ actor ProviderConfigDB {
     private let dbURL: URL
     private var db: OpaquePointer?
 
+    /// [T-icloud-agentloop-wipe] Set by the most recent `dumpProviderConfig()`
+    /// when the local-only agent-loop table could not be READ. The dumped
+    /// config then carries `[]` for those fields, which is indistinguishable
+    /// from a genuine empty selection — so any caller about to write that
+    /// config back (notably the inbound-sync replace path) must check this and
+    /// skip, or it will erase the user's agent-loop choice. (OpenMinis#98.)
+    private(set) var agentLoopReadFailed = false
+
     // MARK: - Init / schema
 
     init(url: URL? = nil) throws {
@@ -87,6 +95,14 @@ actor ProviderConfigDB {
         // columns were added without changing this pre-existing DB's version.
         Self.ensureInstanceLateColumns(db: db)
         Self.ensureGroupTombstoneColumns(db: db)
+        // [T-icloud-agentloop-wipe] Same reasoning: provider_agent_loop_ids was
+        // created ONLY inside the `current < 1` block, so a DB that reached this
+        // version by another route has no such table and every agent-loop
+        // read/write against it fails silently.
+        Self.ensureAgentLoopTable(db: db)
+        // [T-thinking-rules-phase2] Same unconditional placement and same reason: a DB
+        // already at the current user_version must still gain this table.
+        Self.ensureThinkingRulesTable(db: db)
 
         if current >= schemaVersion {
             logger.info("[v3] schema up-to-date at version \(current)")
@@ -516,31 +532,71 @@ actor ProviderConfigDB {
     /// leaves the prior contents intact. Per-row updated_at defaults to
     /// the legacy `userModifiedAt` if present, otherwise the per-row
     /// createdAt, otherwise `now`.
-    func bulkReplace(from config: ProviderConfig) {
+    /// - Parameter preserveLocalOnlyStateIfEmpty: guard for the INBOUND-SYNC
+    ///   caller only. See the agent-loop block below — the guard must NOT be on
+    ///   for a user-initiated save, because clearing every agent-loop model is a
+    ///   legitimate action that also funnels through here via `save()`.
+    func bulkReplace(from config: ProviderConfig, preserveLocalOnlyStateIfEmpty: Bool = false) {
         guard let db else { return }
         let now = Date().timeIntervalSince1970
 
         Self.exec(db: db, "BEGIN IMMEDIATE")
-        Self.exec(db: db, "DELETE FROM provider_model_groups")
-        Self.exec(db: db, "DELETE FROM provider_model_entries")
-        Self.exec(db: db, "DELETE FROM provider_instances")
+        // [T-icloud-sync-tier3-row-level] Synced tables (instances, entries,
+        // groups) are no longer wiped and rewritten. The old shape —
+        // `DELETE FROM` all three, then INSERT OR REPLACE every row with
+        // `updated_at = now` — meant that ANY save re-stamped EVERY row:
+        // measured 1005/1013 entry rows sharing one timestamp, and a single
+        // provider import re-pushing 23 unchanged instances (server:
+        // conflict=8). Last-writer-wins on such a timestamp compares "who
+        // saved last", not "what changed". Now each row is compared against
+        // its stored content (secrets and extras excluded — this path never
+        // carries them) and upserted only when different, keeping its stored
+        // `updated_at` otherwise; rows absent from the snapshot are deleted
+        // explicitly. Callers see the same "snapshot wins" result; only the
+        // timestamps become honest. The four local-only tables below keep
+        // their delete-and-rewrite shape — they do not sync.
+        let storedInst = Dictionary(uniqueKeysWithValues: loadAllInstanceRows().compactMap { r in (r["id"] as? String).map { ($0, r) } })
+        let storedEntry = Dictionary(uniqueKeysWithValues: loadAllEntryRows().compactMap { r in (r["id"] as? String).map { ($0, r) } })
+        let storedGroup = Dictionary(uniqueKeysWithValues: loadAllGroupRows().compactMap { r in (r["id"] as? String).map { ($0, r) } })
+        var instChanged = 0, entryChanged = 0, groupChanged = 0
+
         Self.exec(db: db, "DELETE FROM provider_local_kv")
         Self.exec(db: db, "DELETE FROM provider_session_bindings")
         Self.exec(db: db, "DELETE FROM provider_session_inference_configs")
-        Self.exec(db: db, "DELETE FROM provider_agent_loop_ids")
+        let incomingAgentLoop = config.agentLoopModelEntryIds.count + config.agentLoopGroupIds.count
+        let existingAgentLoop = preserveLocalOnlyStateIfEmpty ? agentLoopRowCount() : 0
+        let preserveAgentLoop = preserveLocalOnlyStateIfEmpty && incomingAgentLoop == 0 && existingAgentLoop > 0
+        if preserveAgentLoop {
+            logger.warning("[v3] bulkReplace PRESERVING agent-loop ids: incoming=0 existing=\(existingAgentLoop) — refusing to erase the user's selection (OpenMinis#98 defect 2)")
+        } else {
+            Self.exec(db: db, "DELETE FROM provider_agent_loop_ids")
+        }
 
-        // Instances (with inline secret_blob — actual secret material
-        // still lives in Keychain; the blob is populated by S5 when
-        // the v3 sync-emit path packages it for upload. Migration
-        // only seeds the metadata; secret_blob is left NULL until a
-        // mutate happens or the v3 builder runs once.).
+        // Instances
         for (idx, inst) in config.instances.enumerated() {
+            let providerType = inst.unknownProviderTypeRaw ?? inst.providerType.rawValue
+            if let r = storedInst[inst.id],
+               (r["label"] as? String) == inst.label,
+               (r["provider_type"] as? String) == providerType,
+               (r["credential_type"] as? String) == inst.credentialType.rawValue,
+               (r["custom_base_url"] as? String) == inst.customBaseURL,
+               ((r["append_v1_suffix"] as? Int) ?? ((r["append_v1_suffix"] as? Bool) == true ? 1 : 0)) == (inst.appendV1Suffix ? 1 : 0),
+               (r["image_endpoint_mode"] as? String) == inst.imageEndpointMode.rawValue,
+               (r["image_endpoint_resolved"] as? String) == inst.imageEndpointResolved?.rawValue,
+               ((r["is_enabled"] as? Int) ?? ((r["is_enabled"] as? Bool) == true ? 1 : 0)) == (inst.isEnabled ? 1 : 0),
+               (r["sort_order"] as? Int) == idx,
+               (r["request_customization_json"] as? String) == Self.encodeProviderRequestCustomization(
+                   headers: inst.customRequestHeaders,
+                   body: inst.customRequestBody
+               ),
+               ((r["azure_mode"] as? Int) ?? ((r["azure_mode"] as? Bool) == true ? 1 : 0)) == (inst.azureMode ? 1 : 0) {
+                continue   // identical — keep the stored row and its updated_at
+            }
+            instChanged += 1
             upsertInstanceRow(
                 id: inst.id,
                 label: inst.label,
-                // Preserve the original raw type for unsupported (newer-build)
-                // instances so we never overwrite it with the sentinel string.
-                providerType: inst.unknownProviderTypeRaw ?? inst.providerType.rawValue,
+                providerType: providerType,
                 credentialType: inst.credentialType.rawValue,
                 customBaseURL: inst.customBaseURL,
                 appendV1Suffix: inst.appendV1Suffix,
@@ -548,53 +604,73 @@ actor ProviderConfigDB {
                 imageEndpointResolved: inst.imageEndpointResolved?.rawValue,
                 isEnabled: inst.isEnabled,
                 sortOrder: idx,
-                secretBlob: nil,
-                secretKind: nil,
-                secretUpdatedAt: nil,
+                secretBlob: storedInst[inst.id]?["secret_blob"] as? String,
+                secretKind: storedInst[inst.id]?["secret_kind"] as? String,
+                secretUpdatedAt: storedInst[inst.id]?["secret_updated_at"] as? Double,
                 createdAt: inst.createdAt.timeIntervalSince1970,
                 updatedAt: now,
-                extrasJson: nil,
-                requestCustomizationJson: Self.encodeProviderRequestCustomization(headers: inst.customRequestHeaders, body: inst.customRequestBody),
+                extrasJson: storedInst[inst.id]?["extras_json"] as? String,
+                requestCustomizationJson: Self.encodeProviderRequestCustomization(
+                    headers: inst.customRequestHeaders,
+                    body: inst.customRequestBody
+                ),
                 azureMode: inst.azureMode
             )
         }
+        let keepInst = Set(config.instances.map(\.id))
+        for id in storedInst.keys where !keepInst.contains(id) { deleteInstanceRow(id: id) }
 
-        // Entries. baseModel + overrides go in as JSON columns so the
-        // row layout doesn't need to track every LLMModel/Overrides
-        // field individually (those evolve independently).
+        // Entries
         for (idx, entry) in config.modelEntries.enumerated() {
             let baseJSON = (try? Self.jsonString(entry.baseModel)) ?? "{}"
-            let overridesJSON: String?
-            if entry.overrides.isEmpty {
-                overridesJSON = nil
-            } else {
-                overridesJSON = try? Self.jsonString(entry.overrides)
+            let overridesJSON: String? = entry.overrides.isEmpty ? nil : (try? Self.jsonString(entry.overrides))
+            let userMod = entry.userModifiedAt?.timeIntervalSince1970
+            if let r = storedEntry[entry.uuid],
+               (r["provider_instance_id"] as? String) == entry.providerInstanceId,
+               (r["base_model_json"] as? String) == baseJSON,
+               (r["overrides_json"] as? String) == overridesJSON,
+               ((r["is_custom"] as? Int) ?? ((r["is_custom"] as? Bool) == true ? 1 : 0)) == (entry.isCustom ? 1 : 0),
+               ((r["is_hidden"] as? Int) ?? ((r["is_hidden"] as? Bool) == true ? 1 : 0)) == (entry.isHidden ? 1 : 0),
+               (r["user_modified_at"] as? Double) == userMod,
+               (r["sort_order"] as? Int) == idx {
+                continue
             }
+            entryChanged += 1
             upsertEntryRow(
-                // [T-provider-entry-composite-key] DB primary key stays the
-                // random uuid (NOT entry.id, which is now the composite key).
-                // Keeping the uuid in the id column means old group/binding
-                // references (also uuids) still match the row, downgrade is
-                // safe, and compositeKey lives only in memory + as the sync
-                // record key (computed). Writing entry.id here was the bug that
-                // put composite keys into the DB and orphaned every uuid
-                // reference.
                 id: entry.uuid,
                 providerInstanceId: entry.providerInstanceId,
                 baseModelJson: baseJSON,
                 overridesJson: overridesJSON,
                 isCustom: entry.isCustom,
                 isHidden: entry.isHidden,
-                userModifiedAt: entry.userModifiedAt?.timeIntervalSince1970,
+                userModifiedAt: userMod,
                 sortOrder: idx,
-                updatedAt: entry.userModifiedAt?.timeIntervalSince1970 ?? now,
-                extrasJson: nil
+                updatedAt: now,
+                extrasJson: storedEntry[entry.uuid]?["extras_json"] as? String
             )
         }
+        let keepEntry = Set(config.modelEntries.map(\.uuid))
+        for id in storedEntry.keys where !keepEntry.contains(id) { deleteEntryRow(id: id) }
 
-        // Groups. memberEntryIds → JSON array column.
+        // Groups
         for (idx, group) in config.modelGroups.enumerated() {
             let memberJSON = (try? Self.jsonString(group.memberEntryIds)) ?? "[]"
+            let removedJSON = Self.encodeMemberTimestamps(group.removedMembers)
+            let addedJSON = Self.encodeMemberTimestamps(group.addedMembers)
+            if let r = storedGroup[group.id],
+               (r["name"] as? String) == group.name,
+               (r["strategy"] as? String) == group.strategy.rawValue,
+               (r["fallback_strategy"] as? String) == group.fallbackStrategy.rawValue,
+               (r["default_thinking_level"] as? String) == group.defaultThinkingLevel?.rawValue,
+               (r["context_limit_tokens"] as? Int) == group.contextLimitTokens,
+               (r["context_limit_remembered"] as? Int) == group.lastContextLimitTokens,
+               (r["member_entry_ids_json"] as? String) == memberJSON,
+               (r["sort_order"] as? Int) == idx,
+               ((r["removed_members_json"] as? String) ?? "{}") == removedJSON,
+               ((r["added_members_json"] as? String) ?? "{}") == addedJSON {
+                continue
+            }
+            groupChanged += 1
             upsertGroupRow(
                 id: group.id,
                 name: group.name,
@@ -607,11 +683,14 @@ actor ProviderConfigDB {
                 memberEntryIdsJson: memberJSON,
                 sortOrder: idx,
                 updatedAt: now,
-                extrasJson: nil,
-                removedMembersJson: Self.encodeMemberTimestamps(group.removedMembers),
-                addedMembersJson: Self.encodeMemberTimestamps(group.addedMembers)
+                extrasJson: storedGroup[group.id]?["extras_json"] as? String,
+                removedMembersJson: removedJSON,
+                addedMembersJson: addedJSON
             )
         }
+        let keepGroup = Set(config.modelGroups.map(\.id))
+        for id in storedGroup.keys where !keepGroup.contains(id) { deleteGroupRow(id: id) }
+        logger.info("[v3] bulkReplace row-level: changed inst=\(instChanged) entry=\(entryChanged) group=\(groupChanged) of \(config.instances.count)/\(config.modelEntries.count)/\(config.modelGroups.count)")
 
         // Per-device fields — never synced.
         if let v = config.defaultPrimaryGroupId {
@@ -627,6 +706,10 @@ actor ProviderConfigDB {
         if let v = config.voiceOutputGroupId {
             setLocalKVRow("voiceOutputGroupId", value: v)
         }
+        // Vision group selector — per-device, same as the voice group ids.
+        if let v = config.visionGroupId {
+            setLocalKVRow("visionGroupId", value: v)
+        }
         for (sid, binding) in config.sessionBindings {
             if let json = try? Self.jsonString(binding) {
                 upsertSessionBindingRow(sessionId: sid, bindingJson: json, updatedAt: now)
@@ -637,11 +720,16 @@ actor ProviderConfigDB {
                 upsertSessionInferenceConfigRow(sessionId: sid, configJson: json, updatedAt: now)
             }
         }
-        for (idx, eid) in config.agentLoopModelEntryIds.enumerated() {
-            insertAgentLoopIdRow(kind: "entry", targetId: eid, sortOrder: idx)
-        }
-        for (idx, gid) in config.agentLoopGroupIds.enumerated() {
-            insertAgentLoopIdRow(kind: "group", targetId: gid, sortOrder: idx)
+        // Skipped entirely when the guard above kept the existing rows —
+        // re-inserting an empty list would be a no-op, but stepping over it
+        // keeps the "preserve" branch obviously side-effect-free.
+        if !preserveAgentLoop {
+            for (idx, eid) in config.agentLoopModelEntryIds.enumerated() {
+                insertAgentLoopIdRow(kind: "entry", targetId: eid, sortOrder: idx)
+            }
+            for (idx, gid) in config.agentLoopGroupIds.enumerated() {
+                insertAgentLoopIdRow(kind: "group", targetId: gid, sortOrder: idx)
+            }
         }
 
         Self.exec(db: db, "COMMIT")
@@ -794,10 +882,24 @@ actor ProviderConfigDB {
         let defaultSub = localKV("defaultSubGroupId")
         let bindings = loadAllSessionBindings()
         let inferCfgs = loadAllSessionInferenceConfigs()
-        let agentLoopEntries = loadAgentLoopIds(kind: "entry")
-        let agentLoopGroups = loadAgentLoopIds(kind: "group")
+        // [T-icloud-agentloop-wipe] nil means the READ failed, not "empty".
+        // dumpProviderConfig has no in-memory state to fall back to, so it still
+        // yields `[]` — but it records the failure on `agentLoopReadFailed` so
+        // the condition is observable (and logged by loadAgentLoopIds) rather
+        // than silently indistinguishable from a genuinely empty selection.
+        //
+        // The actual protection against the wipe lives in bulkReplace's
+        // `preserveLocalOnlyStateIfEmpty` guard, which refuses to delete
+        // non-empty on-disk rows for an empty INBOUND config regardless of why
+        // the list came back empty.
+        let agentLoopEntriesRead = loadAgentLoopIds(kind: "entry")
+        let agentLoopGroupsRead = loadAgentLoopIds(kind: "group")
+        agentLoopReadFailed = (agentLoopEntriesRead == nil || agentLoopGroupsRead == nil)
+        let agentLoopEntries = agentLoopEntriesRead ?? []
+        let agentLoopGroups = agentLoopGroupsRead ?? []
         let voiceInputGroup = localKV("voiceInputGroupId")
         let voiceOutputGroup = localKV("voiceOutputGroupId")
+        let visionGroup = localKV("visionGroupId")
 
         return ProviderConfig(
             instances: instances,
@@ -810,6 +912,7 @@ actor ProviderConfigDB {
             agentLoopGroupIds: agentLoopGroups,
             voiceInputGroupId: voiceInputGroup,
             voiceOutputGroupId: voiceOutputGroup,
+            visionGroupId: visionGroup,
             sessionInferenceConfigs: inferCfgs
         )
     }
@@ -1343,11 +1446,110 @@ actor ProviderConfigDB {
         return result
     }
 
-    private func loadAgentLoopIds(kind: String) -> [String] {
-        guard let db else { return [] }
+    /// [T-icloud-agentloop-wipe] Row count of the local-only agent-loop table.
+    /// Returns 0 when the table is missing or unreadable — callers use this
+    /// only to decide whether an empty inbound list would DESTROY something, so
+    /// failing to 0 is the safe direction (it just skips the preserve guard and
+    /// behaves as before).
+    private func agentLoopRowCount() -> Int {
+        guard let db else { return 0 }
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        guard sqlite3_prepare_v2(db, "SELECT target_id FROM provider_agent_loop_ids WHERE kind = ? ORDER BY sort_order ASC", -1, &stmt, nil) == SQLITE_OK else { return [] }
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM provider_agent_loop_ids", -1, &stmt, nil) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// [T-icloud-agentloop-wipe] Idempotent creation backstop.
+    ///
+    /// `provider_agent_loop_ids` was only ever created inside the `if current < 1`
+    /// migration block, with no `ensure…` counterpart — the exact shape of the
+    /// documented add-column trap in this file, where a table that exists only
+    /// in a version-gated branch goes missing on a DB that skipped that branch
+    /// and every read/write against it then fails silently. Called on open so
+    /// the table is guaranteed present regardless of migration history.
+    static func ensureAgentLoopTable(db: OpaquePointer) {
+        exec(db: db, """
+            CREATE TABLE IF NOT EXISTS provider_agent_loop_ids (
+                kind       TEXT NOT NULL,
+                target_id  TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                PRIMARY KEY (kind, target_id)
+            )
+        """)
+    }
+
+    /// [T-thinking-rules-phase2] User-authored thinking rules, one row per rule.
+    ///
+    /// A SEPARATE TABLE rather than a column on `provider_instances`, for three reasons:
+    ///   1. It is a one-to-many relation with an explicit order — exactly what the other
+    ///      ordered local-only state (`provider_agent_loop_ids`) already models this way.
+    ///   2. `bulkReplace` DELETEs the seven config tables and rewrites them from an
+    ///      inbound sync payload. This table is deliberately NOT in that list, so a
+    ///      provider-config sync from another device cannot wipe rules the peer's build
+    ///      does not know about — the failure mode that erased agent-loop selections in
+    ///      OpenMinis#98 and cost days to characterise.
+    ///   3. Adding a column would have to be written into BOTH the `CREATE TABLE` DDL and
+    ///      an idempotent ensure*, and forgetting either half is precisely how
+    ///      `custom_user_agent` made every provider vanish. A new table has one
+    ///      creation site and no such asymmetry.
+    ///
+    /// Called unconditionally on every open, BEFORE the version-gated early return, for
+    /// the same reason the three ensures above it are: a DB already at the current
+    /// user_version would otherwise skip creation entirely and every read/write against
+    /// this table would fail silently.
+    ///
+    /// `wire_format_json` stores the encoded `ThinkingWireFormat`; keeping it as JSON
+    /// rather than exploding it into typed columns means adding a wire-format case later
+    /// is a pure code change with no migration.
+    static func ensureThinkingRulesTable(db: OpaquePointer) {
+        exec(db: db, """
+            CREATE TABLE IF NOT EXISTS provider_thinking_rules (
+                id                TEXT PRIMARY KEY,
+                instance_id       TEXT NOT NULL,
+                sort_order        INTEGER NOT NULL,
+                scope_kind        TEXT NOT NULL,
+                scope_pattern     TEXT,
+                wire_format_json  TEXT NOT NULL,
+                echo_field        TEXT,
+                echo_timing       TEXT,
+                label             TEXT NOT NULL DEFAULT '',
+                is_builtin        INTEGER NOT NULL DEFAULT 0,
+                created_at        REAL NOT NULL DEFAULT 0,
+                updated_at        REAL NOT NULL DEFAULT 0
+            )
+        """)
+        // Ordered reads are the hot path (every request resolves rules for one instance).
+        exec(db: db, """
+            CREATE INDEX IF NOT EXISTS idx_thinking_rules_instance
+            ON provider_thinking_rules (instance_id, sort_order)
+        """)
+    }
+
+    /// [T-icloud-agentloop-wipe] Returns nil when the READ ITSELF failed, and
+    /// `[]` only for a successful scan that found no rows.
+    ///
+    /// This distinction is load-bearing. `provider_agent_loop_ids` is local-only
+    /// state, but every inbound V3 provider record triggers a whole-config
+    /// replace (`dumpProviderConfig` → `applyMergedConfigFromSync` →
+    /// `bulkReplace`), and `bulkReplace` DELETEs this table before rewriting it
+    /// from `config.agentLoopModelEntryIds`. When this function swallowed a
+    /// prepare failure as `[]`, that empty list round-tripped into the DELETE
+    /// and silently erased the user's agent-loop selection — indistinguishable
+    /// from "the user really had none". Callers now preserve their in-memory
+    /// state on nil instead. (OpenMinis#98 defect 2.)
+    private func loadAgentLoopIds(kind: String) -> [String]? {
+        guard let db else {
+            logger.error("[AgentLoopIds] read FAILED (db not open) kind=\(kind) — preserving in-memory state")
+            return nil
+        }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT target_id FROM provider_agent_loop_ids WHERE kind = ? ORDER BY sort_order ASC", -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            logger.error("[AgentLoopIds] read FAILED (prepare) kind=\(kind) err=\(msg) — preserving in-memory state")
+            return nil
+        }
         sqlite3_bind_text(stmt, 1, kind, -1, Self.SQLITE_TRANSIENT)
         var result: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1453,4 +1655,280 @@ actor ProviderConfigDB {
 
 enum ProviderConfigDBError: Error {
     case openFailed(path: String, code: Int32)
+}
+
+// MARK: - Thinking rules (Phase 2 §2)
+
+extension ProviderConfigDB {
+
+    /// User-authored rules for one provider instance, in evaluation order.
+    ///
+    /// Returns `[]` for "this instance has no custom rules" — the default state for every
+    /// existing user. Unlike `loadAgentLoopIds`, a read failure ALSO returns `[]` rather
+    /// than nil, and that is safe here for a specific reason: this list is only ever
+    /// PREPENDED to the built-in registry. An empty result degrades to "built-in
+    /// behaviour", which is exactly the pre-Phase-2 behaviour, so a failed read can
+    /// never erase anything or change a request shape. Nothing writes back what it read,
+    /// so there is no round-trip that could turn an empty read into a deletion — the
+    /// mechanism behind OpenMinis#98.
+    func loadThinkingRules(instanceId: String) -> [ThinkingRule] {
+        guard let db else { return [] }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = """
+            SELECT id, scope_kind, scope_pattern, wire_format_json, echo_field, echo_timing, label
+            FROM provider_thinking_rules
+            WHERE instance_id = ? AND is_builtin = 0
+            ORDER BY sort_order ASC
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            logger.error("[ThinkingRules] read FAILED (prepare) instance=\(instanceId) — falling back to built-ins only")
+            return []
+        }
+        sqlite3_bind_text(stmt, 1, instanceId, -1, Self.SQLITE_TRANSIENT)
+        var out: [ThinkingRule] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = Self.text(stmt, 0)
+            let scope = ThinkingRule.Scope.fromPersisted(
+                kind: Self.text(stmt, 1),
+                pattern: sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : Self.text(stmt, 2)
+            )
+            let json = Self.text(stmt, 3)
+            guard let data = json.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let fmt = ThinkingWireFormat.fromPersistedJSON(obj) else {
+                // A rule written by a NEWER build, or corrupted. Skip this ROW only —
+                // never fail the whole read, or one bad row would disable every rule.
+                logger.warning("[ThinkingRules] skipping unreadable rule id=\(id) json=\(json.prefix(120))")
+                continue
+            }
+            let echo = ReasoningEchoPolicy.fromPersisted(
+                field: sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : Self.text(stmt, 4),
+                timing: sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : Self.text(stmt, 5)
+            )
+            out.append(ThinkingRule(kind: .custom, scope: scope, wireFormat: fmt,
+                                    reasoningEcho: echo, label: Self.text(stmt, 6), id: id))
+        }
+        return out
+    }
+
+    /// Insert or update one rule. `sortOrder` is the caller's position in the list.
+    @discardableResult
+    func upsertThinkingRule(_ rule: ThinkingRule, instanceId: String, sortOrder: Int) -> Bool {
+        guard let db else { return false }
+        let payload = rule.wireFormat?.persistedJSON ?? ThinkingWireFormat.omitEverything.persistedJSON
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return false }
+
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = """
+            INSERT INTO provider_thinking_rules
+                (id, instance_id, sort_order, scope_kind, scope_pattern, wire_format_json,
+                 echo_field, echo_timing, label, is_builtin, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                    COALESCE((SELECT created_at FROM provider_thinking_rules WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                instance_id = excluded.instance_id,
+                sort_order = excluded.sort_order,
+                scope_kind = excluded.scope_kind,
+                scope_pattern = excluded.scope_pattern,
+                wire_format_json = excluded.wire_format_json,
+                echo_field = excluded.echo_field,
+                echo_timing = excluded.echo_timing,
+                label = excluded.label,
+                updated_at = excluded.updated_at
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            logger.error("[ThinkingRules] upsert FAILED (prepare) id=\(rule.id)")
+            return false
+        }
+        let now = Date().timeIntervalSince1970
+        sqlite3_bind_text(stmt, 1, rule.id, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, instanceId, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 3, Int32(sortOrder))
+        sqlite3_bind_text(stmt, 4, rule.scope.persistedKind, -1, Self.SQLITE_TRANSIENT)
+        if let p = rule.scope.persistedPattern {
+            sqlite3_bind_text(stmt, 5, p, -1, Self.SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 5)
+        }
+        sqlite3_bind_text(stmt, 6, json, -1, Self.SQLITE_TRANSIENT)
+        if let e = rule.reasoningEcho {
+            sqlite3_bind_text(stmt, 7, e.fieldName, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 8, e.persistedTiming, -1, Self.SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 7)
+            sqlite3_bind_null(stmt, 8)
+        }
+        sqlite3_bind_text(stmt, 9, rule.label, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 10, rule.id, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_double(stmt, 11, now)
+        sqlite3_bind_double(stmt, 12, now)
+        let ok = sqlite3_step(stmt) == SQLITE_DONE
+        if !ok { logger.error("[ThinkingRules] upsert FAILED (step) id=\(rule.id)") }
+        return ok
+    }
+
+    @discardableResult
+    func deleteThinkingRule(id: String) -> Bool {
+        guard let db else { return false }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "DELETE FROM provider_thinking_rules WHERE id = ?", -1, &stmt, nil) == SQLITE_OK else { return false }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.SQLITE_TRANSIENT)
+        return sqlite3_step(stmt) == SQLITE_DONE
+    }
+
+    // MARK: - V3 sync support (T-icloud-thinking-rules-sync)
+
+    /// The owning instance of a rule, needed by the delete path: `markDirty` is
+    /// keyed by rule id alone, but the caller must know which instance's cache to
+    /// refresh. Read BEFORE deleting the row.
+    func thinkingRuleInstanceId(id: String) -> String? {
+        guard let db else { return nil }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT instance_id FROM provider_thinking_rules WHERE id = ?", -1, &stmt, nil) == SQLITE_OK else { return nil }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return Self.text(stmt, 0)
+    }
+
+    /// One rule as a raw column dictionary, for the sync builder.
+    ///
+    /// Returns `wire_format_json` as the STORED STRING rather than a decoded
+    /// `ThinkingWireFormat`. That is deliberate and is what makes the wire format
+    /// forward-compatible: a rule written by a newer build using a `kind` this build
+    /// has never heard of is copied through byte-for-byte instead of being dropped or
+    /// coerced. Decoding happens only where the rule is USED (`loadThinkingRules`),
+    /// which already skips unreadable rows one at a time.
+    func thinkingRuleRow(id: String) -> [String: Any]? {
+        guard let db else { return nil }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = """
+            SELECT id, instance_id, sort_order, scope_kind, scope_pattern, wire_format_json,
+                   echo_field, echo_timing, label, created_at, updated_at
+            FROM provider_thinking_rules
+            WHERE id = ? AND is_builtin = 0
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        var row: [String: Any] = [
+            "id": Self.text(stmt, 0),
+            "instance_id": Self.text(stmt, 1),
+            "sort_order": Int(sqlite3_column_int(stmt, 2)),
+            "scope_kind": Self.text(stmt, 3),
+            "wire_format_json": Self.text(stmt, 5),
+            "label": Self.text(stmt, 8),
+            "created_at": sqlite3_column_double(stmt, 9),
+            "updated_at": sqlite3_column_double(stmt, 10),
+        ]
+        if sqlite3_column_type(stmt, 4) != SQLITE_NULL { row["scope_pattern"] = Self.text(stmt, 4) }
+        if sqlite3_column_type(stmt, 6) != SQLITE_NULL { row["echo_field"] = Self.text(stmt, 6) }
+        if sqlite3_column_type(stmt, 7) != SQLITE_NULL { row["echo_timing"] = Self.text(stmt, 7) }
+        return row
+    }
+
+    /// LWW-guarded upsert from an inbound synced record, mirroring
+    /// `upsertInstanceFromInbound`: skip when the local row is newer or equal.
+    ///
+    /// Takes `wireFormatJson` as an opaque string for the forward-compatibility
+    /// reason described on `thinkingRuleRow`. `is_builtin` is hardcoded to 0 — built-in
+    /// rules are code constants that each device computes for itself and must never
+    /// arrive over the wire, so an inbound record can only ever create a custom rule.
+    @discardableResult
+    func upsertThinkingRuleFromInbound(
+        id: String, instanceId: String, sortOrder: Int,
+        scopeKind: String, scopePattern: String?, wireFormatJson: String,
+        echoField: String?, echoTiming: String?, label: String,
+        createdAt: Double, updatedAt: Double
+    ) -> Bool {
+        guard let db else { return false }
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT updated_at FROM provider_thinking_rules WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, id, -1, Self.SQLITE_TRANSIENT)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                let localTs = sqlite3_column_double(stmt, 0)
+                sqlite3_finalize(stmt)
+                if localTs >= updatedAt { return false }
+            } else {
+                sqlite3_finalize(stmt)
+            }
+        }
+        stmt = nil
+        defer { sqlite3_finalize(stmt) }
+        let sql = """
+            INSERT INTO provider_thinking_rules
+                (id, instance_id, sort_order, scope_kind, scope_pattern, wire_format_json,
+                 echo_field, echo_timing, label, is_builtin, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                instance_id = excluded.instance_id,
+                sort_order = excluded.sort_order,
+                scope_kind = excluded.scope_kind,
+                scope_pattern = excluded.scope_pattern,
+                wire_format_json = excluded.wire_format_json,
+                echo_field = excluded.echo_field,
+                echo_timing = excluded.echo_timing,
+                label = excluded.label,
+                updated_at = excluded.updated_at
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            logger.error("[ThinkingRules] inbound upsert FAILED (prepare) id=\(id)")
+            return false
+        }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, instanceId, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 3, Int32(sortOrder))
+        sqlite3_bind_text(stmt, 4, scopeKind, -1, Self.SQLITE_TRANSIENT)
+        if let p = scopePattern { sqlite3_bind_text(stmt, 5, p, -1, Self.SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 5) }
+        sqlite3_bind_text(stmt, 6, wireFormatJson, -1, Self.SQLITE_TRANSIENT)
+        if let e = echoField { sqlite3_bind_text(stmt, 7, e, -1, Self.SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 7) }
+        if let t = echoTiming { sqlite3_bind_text(stmt, 8, t, -1, Self.SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 8) }
+        sqlite3_bind_text(stmt, 9, label, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_double(stmt, 10, createdAt)
+        sqlite3_bind_double(stmt, 11, updatedAt)
+        let ok = sqlite3_step(stmt) == SQLITE_DONE
+        if !ok { logger.error("[ThinkingRules] inbound upsert FAILED (step) id=\(id)") }
+        return ok
+    }
+
+    /// Every custom rule id across all instances — used to enumerate what needs
+    /// backfilling onto the sync queue for users who authored rules before sync existed.
+    func allCustomThinkingRuleIds() -> [String] {
+        guard let db else { return [] }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT id FROM provider_thinking_rules WHERE is_builtin = 0", -1, &stmt, nil) == SQLITE_OK else { return [] }
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW { out.append(Self.text(stmt, 0)) }
+        return out
+    }
+
+    /// Rewrite the whole ordering for one instance after a drag-reorder.
+    @discardableResult
+    func reorderThinkingRules(instanceId: String, orderedIds: [String]) -> Bool {
+        guard let db else { return false }
+        Self.exec(db: db, "BEGIN IMMEDIATE")
+        for (idx, id) in orderedIds.enumerated() {
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE provider_thinking_rules SET sort_order = ? WHERE id = ? AND instance_id = ?", -1, &stmt, nil) == SQLITE_OK else {
+                Self.exec(db: db, "ROLLBACK")
+                return false
+            }
+            sqlite3_bind_int(stmt, 1, Int32(idx))
+            sqlite3_bind_text(stmt, 2, id, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, instanceId, -1, Self.SQLITE_TRANSIENT)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                Self.exec(db: db, "ROLLBACK")
+                return false
+            }
+        }
+        Self.exec(db: db, "COMMIT")
+        return true
+    }
 }

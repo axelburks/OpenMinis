@@ -70,6 +70,9 @@ final class MigrationEngine {
 
     /// Cap on consecutive phase failures before declaring `failed`.
     private let maxConsecutiveFailures = 5
+    /// [T-icloud-migration-suspended-ui] Set when a phase defers, cleared the
+    /// moment one completes. Drives `ProgressSummary.isSuspended`.
+    fileprivate static let suspendedKey = "cloudSync.v2.migrationSuspended"
 
     /// Re-entrancy guard. The migration can be kicked from two places that
     /// may overlap: the launch path (SyncV2Bootstrap.startIfEnabled) and the
@@ -112,6 +115,17 @@ final class MigrationEngine {
         /// unknown.
         let v1ZoneRemaining: Int?
         let lastError: String?
+        /// [T-icloud-migration-suspended-ui] True when the phase deferred and
+        /// nothing is actively driving the migration until the next cold start.
+        ///
+        /// `status` alone cannot express this: a deferral deliberately leaves it
+        /// `.inProgress` (it is not a failure), so the sheet rendered "in
+        /// progress" over a frozen counter and an ETA that assumed active
+        /// pushing. That combination is exactly what OpenMinis#141 reported as
+        /// "stuck" — the migration was suspended by design, but nothing on
+        /// screen said so, and the one action that would have resumed it
+        /// (relaunching the app) was the one the user had no reason to take.
+        let isSuspended: Bool
     }
 
     /// Cancel an in-progress migration. Drops the priority=1 backlog from
@@ -125,15 +139,22 @@ final class MigrationEngine {
         let dropped = await ChatStore.shared.clearMigrationBacklog()
         SyncV2Bootstrap.setMigrationRequested(false)
         UserDefaults.standard.set(dropped, forKey: "cloudSync.v2.migrationCanceledRemaining")
-        // Stop the historical backlog scan: clear the cursor so the
-        // next launch's kick returns immediately, and ask the running
-        // pagination loop to bail out at its next checkpoint via the
-        // ChatStore-side cancel flag. Without this, runHistoricalBacklogScan
-        // keeps walking older sessions and re-staging priority=1 dirty
-        // rows, which immediately undoes the clearMigrationBacklog()
-        // call above — the user sees migration "still running" because
-        // it really is.
-        UserDefaults.standard.set(0.0, forKey: "cloudSync.v2.backlogScanCursorAt")
+        // Stop the historical backlog scan: ask the running pagination loop to
+        // bail out at its next checkpoint via the ChatStore-side cancel flag.
+        // Without this, runHistoricalBacklogScan keeps walking older sessions
+        // and re-staging priority=1 dirty rows, which immediately undoes the
+        // clearMigrationBacklog() call above — the user sees migration "still
+        // running" because it really is.
+        //
+        // [T-icloud-migration-restage-storm] The cursor is deliberately LEFT
+        // ALONE. It used to be zeroed here, and zero means "fully drained" to
+        // runHistoricalBacklogScan (`guard cursor > 0`). That was survivable
+        // only because requestMigration then cleared the cursor and the
+        // Phase-A guard, re-staging the entire corpus — the very storm that
+        // made this migration unable to converge. Now that retry PRESERVES
+        // both, zeroing here would instead make Phase B believe it had
+        // finished and silently skip every session older than the cancel
+        // point. Cancelling stops the scan; it must not erase where it got to.
         UserDefaults.standard.set(true, forKey: "cloudSync.v2.backlogScanCanceled")
         // Mark migration state as a non-error stop so progressSummary
         // returns nil and the Migration section disappears.
@@ -161,8 +182,23 @@ final class MigrationEngine {
         // means "drained" to runHistoricalBacklogScan, but Phase A
         // will set a fresh cursor at the recent-window boundary.
         UserDefaults.standard.set(false, forKey: "cloudSync.v2.backlogScanCanceled")
-        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.initialBacklogMarked")
-        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.backlogScanCursorAt")
+        // [T-icloud-migration-restage-storm] Deliberately NOT clearing
+        // `initialBacklogMarked` or `backlogScanCursorAt` any more.
+        //
+        // Clearing them made every Cancel→Retry re-run Phase A from scratch and
+        // rewind Phase B to the start of history, re-marking the ENTIRE local
+        // corpus dirty. Users watched the record count climb by thousands per
+        // round and the migration could never converge — the reason OpenMinis#154
+        // was filed ("keeps adding thousands of records when cancelling ... and
+        // restarting"). Under CloudKit throttling that is unwinnable: each retry
+        // enqueues more than the window can drain.
+        //
+        // Preserving both is safe because neither is the record of what still
+        // needs pushing. Anything genuinely un-pushed is still dirty (cancel only
+        // drops the priority=1 backlog rows, and Phase B resumes from its saved
+        // cursor), and `sync_pushed_records` remains the authority on what has
+        // already been saved to iCloud. A full re-stage is still available
+        // deliberately via resetMigrationProgress().
         // Rewind any failed-state phase so the engine retries from a
         // safe earlier checkpoint instead of immediately re-failing the
         // last phase. v1ZoneDelete's C4 safeguard can permanently abort
@@ -182,6 +218,50 @@ final class MigrationEngine {
         }
         UserDefaults.standard.set(MigrationStatus.pending.rawValue, forKey: statusKey)
         logger.info("[SyncMigration] migration requested by user — state reset to retry-safe checkpoint")
+    }
+
+    /// [T-icloud-migration-reset] Throw away all LOCAL migration progress so the
+    /// next attempt starts from a clean slate. OpenMinis#154's actual request.
+    ///
+    /// Clears: the phase/status state machine, the pushed-record ledger, both
+    /// backlog staging guards, and the derived progress counters — i.e. every
+    /// piece of local bookkeeping that can leave a migration wedged in a state
+    /// no retry escapes (a mismatched `41 / 14` counter, a phase that keeps
+    /// re-entering the same failing check).
+    ///
+    /// IMPORTANT — this is NOT "delete my iCloud data". Nothing on the server is
+    /// touched: records already uploaded stay, and the v1 zone is untouched
+    /// (that is the separate, irreversible "Force Delete V1 Zone" action). The
+    /// worst case here is re-uploading records iCloud already has, which
+    /// CloudKit absorbs as no-op saves. Keeping the destructive and
+    /// non-destructive resets clearly apart matters: #154's reporter had already
+    /// been pushed into the irreversible one by a stuck migration.
+    ///
+    /// Does not start a migration — the caller decides whether to re-request.
+    func resetMigrationProgress() async {
+        let clearedBacklog = await ChatStore.shared.clearMigrationBacklog()
+        let clearedPushed = await ChatStore.shared.clearAllPushedRecords()
+
+        // Phase/progress state is a file, not a default.
+        try? FileManager.default.removeItem(at: stateURL)
+        UserDefaults.standard.removeObject(forKey: statusKey)
+        // Staging guards: cleared HERE (unlike requestMigration, which now
+        // preserves them) because a full reset is exactly when re-staging the
+        // whole corpus is the intended behaviour.
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.initialBacklogMarked")
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.backlogScanCursorAt")
+        UserDefaults.standard.set(false, forKey: "cloudSync.v2.backlogScanCanceled")
+        // Derived counters — stale values here are what produce impossible
+        // readouts like "41 / 14 (100%)" after the local corpus shrinks.
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.pushedCumulative")
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.v1RecordsDeleted")
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.v1RecordsDeletePending")
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.estimatedExtraSessionFiles")
+        UserDefaults.standard.removeObject(forKey: "cloudSync.v2.migrationCanceledRemaining")
+        UserDefaults.standard.removeObject(forKey: Self.suspendedKey)
+        SyncV2Bootstrap.setMigrationRequested(false)
+
+        logger.warning("[SyncMigration] migration progress RESET by user — droppedBacklog=\(clearedBacklog) clearedPushedLedger=\(clearedPushed); server-side data untouched")
     }
 
     /// True when the user explicitly canceled an in-progress migration
@@ -276,9 +356,18 @@ final class MigrationEngine {
             forKey: "cloudSync.v2.estimatedExtraSessionFiles")
         let skillCount = await MainActor.run { SkillStore.shared.skills.count }
         let envItemCount = await MainActor.run { EnvVarStore.shared.entries.count }
-        let pushTotal = baseline.sessions + baseline.messages
+        let rawPushTotal = baseline.sessions + baseline.messages
             + baseline.compactMarkers + baseline.singletons
             + estimatedFiles + skillCount + envItemCount
+        // [T-icloud-migration-progress-overflow] The numerator is CUMULATIVE
+        // (records ever saved to iCloud, from sync_pushed_records) while the
+        // denominator is a LIVE local row count. Delete conversations mid-
+        // migration and the denominator collapses below the numerator —
+        // OpenMinis#154 shipped a screenshot reading "41 / 14 (100%)" after the
+        // user cleared everything trying to make the migration finish.
+        // Clamping keeps the readout coherent; it does not paper over a stall,
+        // because the phase/status lines next to it still show where it is.
+        let pushTotal = max(rawPushTotal, pushDone)
         logger.info("[SyncMigration] progressSummary inputs: cumulativePushEvents=\(cumulative) pushedUnique=\(pushedUnique) v1RecordsDeleted=\(v1Del) v2DirtyRemaining=\(v2Dirty) baseline(sess=\(baseline.sessions) msg=\(baseline.messages) cm=\(baseline.compactMarkers) singl=\(baseline.singletons)) skills=\(skillCount) envItems=\(envItemCount) estFiles=\(estimatedFiles) → pushDone=\(pushDone) pushTotal=\(pushTotal)")
         let v1Deleted = UserDefaults.standard.integer(forKey: "cloudSync.v2.v1RecordsDeleted")
         let v1Pending = UserDefaults.standard.integer(forKey: "cloudSync.v2.v1RecordsDeletePending")
@@ -306,7 +395,8 @@ final class MigrationEngine {
             pushDone: pushDone, pushTotal: pushTotal,
             v1Deleted: v1Deleted, v1DeletePending: v1Pending,
             v1ZoneTotalAtStart: v1Total, v1ZoneRemaining: v1Remaining,
-            lastError: state?.lastError
+            lastError: state?.lastError,
+            isSuspended: UserDefaults.standard.bool(forKey: Self.suspendedKey)
         )
     }
 
@@ -439,6 +529,9 @@ final class MigrationEngine {
                 state = try await runPhase(state)
                 state.phaseFailureCount = 0
                 saveState(state)
+                // A phase completed — the migration is demonstrably moving
+                // again, so drop any stale suspended marker.
+                UserDefaults.standard.set(false, forKey: Self.suspendedKey)
             } catch let mErr as MigrationError {
                 if case .deferredUntilNextLaunch(let n) = mErr {
                     // Not a failure — phase made progress but didn't
@@ -447,6 +540,11 @@ final class MigrationEngine {
                     state.lastUpdatedAt = Date()
                     state.lastError = nil
                     saveState(state)
+                    // [T-icloud-migration-suspended-ui] Record that nothing is
+                    // driving the migration any more, so the sheet can say
+                    // "suspended — reopen the app to continue" instead of
+                    // showing an active-looking status over a frozen counter.
+                    UserDefaults.standard.set(true, forKey: Self.suspendedKey)
                     logger.info("[SyncMigration] phase=\(state.phase.rawValue) deferred: \(n) records remain — suspending until next launch")
                     return
                 }
@@ -607,6 +705,41 @@ final class MigrationEngine {
         // smaller than local, abort and leave v1 zone intact for next
         // migration attempt.
         let localSessions = await ChatStore.shared.allSessionIds().count
+
+        // [T-icloud-v1delete-count-deadlock] With no local sessions the
+        // safeguard has nothing left to protect — its threshold below is
+        // `max(0, localSessions / 2)` == 0, so ANY count it manages to read
+        // would pass. Yet the cloud-count query still runs first, and when
+        // CloudKit throttles it that query fails, the guard throws, the phase
+        // never advances, and the retry hits the same throttle: a permanent
+        // loop with nothing being guarded. OpenMinis#154 sat here for five
+        // days — the user even deleted every conversation trying to finish the
+        // migration, which made it strictly worse (localSessions → 0) because
+        // the blocker was the QUERY, not the data volume.
+        //
+        // Skip the round trip entirely in that case. This is not a weakening:
+        // a zero-threshold check cannot reject anything.
+        if localSessions == 0 {
+            // One guard before taking the shortcut: `allSessionIds()` returns
+            // an empty array on a SQL prepare failure too, so "0 sessions" can
+            // also mean "the local DB was unreadable this launch" (the
+            // pre-first-unlock / corrupt-DB case ProviderConfigStore's
+            // RebootGuard exists for). Deleting the v1 zone on THAT reading
+            // would destroy the cloud copy of data that is merely unreadable
+            // right now. Verify the store is actually healthy and genuinely
+            // empty by asking for a count that a broken DB cannot fake.
+            let messageCount = await ChatStore.shared.countBacklogBaseline().messages
+            guard messageCount == 0 else {
+                logger.error("[SyncMigration] phase=v1ZoneDelete: 0 sessions but \(messageCount) messages — local store looks INCONSISTENT (unreadable DB?); refusing the no-local-sessions shortcut")
+                throw MigrationError.deferredUntilNextLaunch(remaining: messageCount)
+            }
+            logger.info("[SyncMigration] phase=v1ZoneDelete: no local sessions or messages — safeguard threshold is 0, skipping cloud count and proceeding")
+            try await V1FetcherShim.deleteOwnZone(zoneName: myZoneName)
+            logger.info("[SyncMigration] phase=v1ZoneDelete end: deleted (no-local-sessions path)")
+            s.phase = .lock
+            return
+        }
+
         // countCloudSessionsV2 now returns nil when the COUNT QUERY ITSELF
         // failed (transient CloudKit error), as distinct from a confirmed
         // low count. [T-ios-icloud-v1v2-migration-fails] Previously it
@@ -624,8 +757,21 @@ final class MigrationEngine {
             cloudCount = 0
         }
         guard let actualCloud = cloudCount else {
-            logger.warning("[SyncMigration] phase=v1ZoneDelete: cloud session count unavailable (CK query failed) — deferring v1 zone delete, will retry next attempt (localSessions=\(localSessions))")
-            throw MigrationError.v1FetchFailed(reason: "could not verify v2 cloud session count (CloudKit query failed) — deferring v1 zone delete")
+            // [T-icloud-v1delete-count-deadlock] Deferral, NOT a failure.
+            //
+            // This throw used to be `v1FetchFailed`, which counts toward
+            // maxConsecutiveFailures. The retry backoff is 2^n*2s, so all five
+            // attempts burn in ~2 minutes — far inside a CloudKit throttle
+            // window, which runs minutes to hours. The migration therefore
+            // flipped to .failed while the only thing wrong was a transient
+            // throttle, and the user's "Retry" restarted the identical
+            // two-minute burn (OpenMinis#154: five days of exactly this).
+            //
+            // `deferredUntilNextLaunch` suspends the state machine without
+            // burning an attempt, so the next launch retries after the window
+            // has realistically passed instead of hammering through it.
+            logger.warning("[SyncMigration] phase=v1ZoneDelete: cloud session count unavailable (CK query failed — likely throttled) — suspending until next launch (localSessions=\(localSessions))")
+            throw MigrationError.deferredUntilNextLaunch(remaining: localSessions)
         }
         // Allow 50% slack — multi-device fan-in not yet complete is OK,
         // but >50% missing is a strong "something went wrong" signal.
@@ -689,6 +835,12 @@ enum MigrationError: Error, LocalizedError {
     case pushDidNotDrain(remaining: Int)
     case v1FetchFailed(reason: String)
     case zoneDeleteFailed(zone: String, reason: String)
+    /// [T-icloud-zone-delete-resurrect] The delete call itself reported
+    /// success, but the zone was still in the private database when we read
+    /// it back — i.e. a running sync engine re-created it. Distinct from
+    /// `zoneDeleteFailed` so the UI can explain the actual cause (an engine
+    /// owns this zone) rather than blaming CloudKit.
+    case zoneResurrected(zone: String)
     /// Sentinel: the current phase didn't finish in its window but is
     /// still making progress in the background (CK-throttled). Caller
     /// should suspend the state machine and resume on next app launch.
@@ -703,6 +855,8 @@ enum MigrationError: Error, LocalizedError {
             return "v1 fetch failed: \(r)"
         case .zoneDeleteFailed(let z, let r):
             return "Failed to delete v1 zone \(z): \(r)"
+        case .zoneResurrected(let z):
+            return "Zone \(z) was deleted but immediately re-created by a running sync engine. Turn off iCloud Sync, then delete it again."
         case .deferredUntilNextLaunch(let n):
             return "Deferred — \(n) records still in queue, will resume on next launch"
         }
@@ -838,6 +992,132 @@ enum V1FetcherShim {
 
     /// Delete this device's own v1 zone (device-<myId>). Other devices'
     /// v1 zones are NOT touched — they belong to those devices.
+    /// [T-icloud-v1delete-count-deadlock] CloudKit conditions that heal on their
+    /// own and must NOT count toward the migration's consecutive-failure cap.
+    /// Everything else stays a real failure so a genuinely broken migration is
+    /// still surfaced instead of retrying forever.
+    @available(iOS 17.0, *)
+    static func isTransientCKError(_ error: CKError) -> Bool {
+        switch error.code {
+        case .requestRateLimited, .zoneBusy, .serviceUnavailable,
+             .networkUnavailable, .networkFailure, .internalError:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// [T-icloud-zone-delete-resurrect] Zones the user deletes from the Zones
+    /// inventory must STAY deleted. Both sync engines hold a CKSyncEngine whose
+    /// pending database changes re-create the zones they own — v1 re-adds
+    /// `device-<myId>` AND the legacy bare `devices` zone
+    /// (CloudSyncEngine.queueZonesAndDeviceRecord), v2 re-adds the three
+    /// `minis-*` zones (ICloudSharedZoneTransport). A plain
+    /// `deleteRecordZone` therefore succeeds and the zone reappears seconds
+    /// later, which is exactly the "deleted it, still in the list" report.
+    ///
+    /// So the delete is bracketed: quiesce whichever engine owns the zone
+    /// first, then delete, then read the zone list back to confirm. Without the
+    /// read-back a resurrected zone is indistinguishable from a successful
+    /// delete, which is how this shipped silently.
+    ///
+    /// Returns normally only when the zone is verified absent.
+    static func purgeZone(zoneName: String) async throws {
+        guard #available(iOS 17.0, *) else { return }
+        // Quiesce the owner BEFORE deleting, so no pending `saveZone` is
+        // sitting in an engine's queue waiting to land after our delete.
+        let owner = ZoneOwner.owning(zoneName: zoneName)
+        await owner.quiesce()
+        do {
+            try await deleteOwnZone(zoneName: zoneName)
+            // Tombstone BEFORE resuming: `resume()` restarts the engine, whose
+            // very first act is to re-queue zone creation. Recording the purge
+            // first is what makes the delete outlive the resume — and the next
+            // launch, where start() would otherwise re-create it unprompted.
+            owner.markPurged(zoneName: zoneName)
+            // Read back. `allRecordZones` is the same call the inventory uses,
+            // so "gone here" means "gone in the list the user is looking at".
+            let container = CKContainer(identifier: ICloudSharedZoneTransport.containerIdentifier)
+            let remaining = try await container.privateCloudDatabase.allRecordZones()
+            if remaining.contains(where: { $0.zoneID.zoneName == zoneName }) {
+                logger.error("[SyncMigration] zone \(zoneName) reappeared after delete — engine re-created it")
+                throw MigrationError.zoneResurrected(zone: zoneName)
+            }
+            logger.info("[SyncMigration] zone purge verified: \(zoneName)")
+        } catch {
+            // Restore the engine on failure; a failed delete must not leave
+            // sync switched off behind the user's back.
+            await owner.resume()
+            throw error
+        }
+        await owner.resume()
+    }
+
+    /// Which engine re-creates a given zone, and how to hold it still while we
+    /// delete. Resolved by zone name because that is what the inventory row
+    /// carries, and it is the same naming both engines key off.
+    @available(iOS 17.0, *)
+    enum ZoneOwner {
+        case v1
+        case v2
+        case none
+
+        static func owning(zoneName: String) -> ZoneOwner {
+            if zoneName == ICloudSharedZoneTransport.sharedZoneName
+                || zoneName == ICloudSharedZoneTransport.devicesZoneName
+                || zoneName == ICloudSharedZoneTransport.secretsZoneName {
+                return .v2
+            }
+            // v1 owns its per-device zone AND the legacy bare "devices" zone
+            // (CloudSyncEngine.devicesZoneName) — the `[?]` row users hit.
+            if zoneName.hasPrefix("device-") || zoneName == "devices" {
+                return .v1
+            }
+            return .none
+        }
+
+        @MainActor
+        func quiesce() async {
+            switch self {
+            case .v1:
+                // Drops the CKSyncEngine (and its queued saveZone changes)
+                // without touching the user's `cloudSync.enabled` preference.
+                CloudSyncEngine.shared.suspendForZonePurge()
+            case .v2:
+                await SyncCore.shared.suspendForZonePurge()
+            case .none:
+                break
+            }
+        }
+
+        @MainActor
+        func resume() async {
+            switch self {
+            case .v1:
+                await CloudSyncEngine.shared.resumeAfterZonePurge()
+            case .v2:
+                await SyncCore.shared.resumeAfterZonePurge()
+            case .none:
+                break
+            }
+        }
+
+        /// Record the delete durably so the owning engine does not re-create
+        /// the zone — neither when it resumes moments from now, nor on any
+        /// later launch.
+        ///
+        /// Only v1 gets a tombstone. Its zones are legacy and the user is
+        /// deliberately reclaiming that space. A v2 zone is where sync
+        /// actively lives, so suppressing its re-creation would quietly break
+        /// sync instead of freeing space; deleting one is a data-clearing
+        /// action, and v2 legitimately rebuilds it on the next run.
+        @MainActor
+        func markPurged(zoneName: String) {
+            guard case .v1 = self else { return }
+            CloudSyncEngine.markZonePurged(zoneName)
+        }
+    }
+
     static func deleteOwnZone(zoneName: String) async throws {
         if #available(iOS 17.0, *) {
             let container = CKContainer(identifier: ICloudSharedZoneTransport.containerIdentifier)
@@ -847,6 +1127,15 @@ enum V1FetcherShim {
                 logger.info("[SyncMigration] deleted v1 zone: \(zoneName)")
             } catch let error as CKError where error.code == .zoneNotFound {
                 logger.info("[SyncMigration] v1 zone already gone: \(zoneName)")
+            } catch let error as CKError where Self.isTransientCKError(error) {
+                // [T-icloud-v1delete-count-deadlock] Throttling / network is not
+                // a broken migration. Reported as a hard failure it burns the
+                // 5-attempt cap inside ~124s of backoff — far shorter than a
+                // CloudKit throttle window — and flips the whole migration to
+                // .failed over something that would have healed on its own.
+                // Defer instead, so the next launch retries after the window.
+                logger.warning("[SyncMigration] v1 zone delete deferred (transient CK error \(error.code.rawValue)): \(error.localizedDescription)")
+                throw MigrationError.deferredUntilNextLaunch(remaining: 0)
             } catch {
                 throw MigrationError.zoneDeleteFailed(zone: zoneName, reason: error.localizedDescription)
             }

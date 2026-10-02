@@ -68,17 +68,25 @@ class PRootKernelInstrumentedTest {
 
     // ==================== bind mounts ====================
 
+    // [Minix] Keep the inherited tests aligned with v1.14's global-only
+    // bind table; session-private paths are carried by SessionMounts.
     @Test
     fun addBindMountStoresMapping() {
+        PRootKernel.addBindMount("/var/minis/shared", "/data/host/shared")
+        assertEquals("/data/host/shared", PRootKernel.bindMounts["/var/minis/shared"])
+    }
+
+    @Test
+    fun addBindMountRejectsSessionPrivateMapping() {
         PRootKernel.addBindMount("/var/minis/workspace", "/data/host/workspace")
-        assertEquals("/data/host/workspace", PRootKernel.bindMounts["/var/minis/workspace"])
+        assertFalse(PRootKernel.bindMounts.containsKey("/var/minis/workspace"))
     }
 
     @Test
     fun removeBindMountRemovesMapping() {
-        PRootKernel.addBindMount("/var/minis/workspace", "/data/host/workspace")
-        PRootKernel.removeBindMount("/var/minis/workspace")
-        assertNull(PRootKernel.bindMounts["/var/minis/workspace"])
+        PRootKernel.addBindMount("/var/minis/shared", "/data/host/shared")
+        PRootKernel.removeBindMount("/var/minis/shared")
+        assertNull(PRootKernel.bindMounts["/var/minis/shared"])
     }
 
     @Test
@@ -109,8 +117,9 @@ class PRootKernelInstrumentedTest {
 
         val cmd = PRootKernel.buildProotCommand("echo hello")
 
-        // Should contain proot binary path
-        assertTrue("Should start with proot binary", cmd[0].endsWith("proot-aarch64"))
+        // Android 10+ executes the APK-extracted native library so the binary
+        // has an executable SELinux label.
+        assertTrue("Should start with proot binary", cmd[0].endsWith("libproot.so"))
 
         // Should have -0 flag (fake root)
         assertTrue("Should contain -0 flag", cmd.contains("-0"))
@@ -145,12 +154,12 @@ class PRootKernelInstrumentedTest {
         }
         PRootKernel.boot(context)
 
-        PRootKernel.addBindMount("/var/minis/workspace", "/data/user/0/com.openminis.app/workspace")
+        PRootKernel.addBindMount("/var/minis/shared", "/data/user/0/com.openminis.app/shared")
 
-        val cmd = PRootKernel.buildProotCommand("ls /var/minis/workspace")
+        val cmd = PRootKernel.buildProotCommand("ls /var/minis/shared")
 
         // Should contain -b host:linux format
-        val bindStr = "/data/user/0/com.openminis.app/workspace:/var/minis/workspace"
+        val bindStr = "/data/user/0/com.openminis.app/shared:/var/minis/shared"
         assertTrue("Should contain bind mount arg", cmd.contains(bindStr))
     }
 
@@ -180,30 +189,30 @@ class PRootKernelInstrumentedTest {
 
     @Test
     fun resolveHostPathMatchesExactMount() {
-        PRootKernel.addBindMount("/var/minis/workspace", "/host/workspace")
+        PRootKernel.addBindMount("/var/minis/shared", "/host/shared")
 
-        val result = PRootKernel.resolveHostPath("/var/minis/workspace")
+        val result = PRootKernel.resolveHostPath("/var/minis/shared")
         assertNotNull(result)
-        assertEquals("/host/workspace", result!!.path)
+        assertEquals("/host/shared", result!!.path)
     }
 
     @Test
     fun resolveHostPathMatchesSubpath() {
-        PRootKernel.addBindMount("/var/minis/workspace", "/host/workspace")
+        PRootKernel.addBindMount("/var/minis/shared", "/host/shared")
 
-        val result = PRootKernel.resolveHostPath("/var/minis/workspace/file.txt")
+        val result = PRootKernel.resolveHostPath("/var/minis/shared/file.txt")
         assertNotNull(result)
-        assertEquals("/host/workspace/file.txt", result!!.path)
+        assertEquals("/host/shared/file.txt", result!!.path)
     }
 
     @Test
     fun resolveHostPathUsesLongestPrefixMatch() {
         PRootKernel.addBindMount("/var", "/host/var")
-        PRootKernel.addBindMount("/var/minis/workspace", "/host/workspace")
+        PRootKernel.addBindMount("/var/minis/shared", "/host/shared")
 
-        val result = PRootKernel.resolveHostPath("/var/minis/workspace/deep/file.txt")
+        val result = PRootKernel.resolveHostPath("/var/minis/shared/deep/file.txt")
         assertNotNull(result)
-        assertEquals("/host/workspace/deep/file.txt", result!!.path)
+        assertEquals("/host/shared/deep/file.txt", result!!.path)
     }
 
     @Test
@@ -264,13 +273,12 @@ class PRootKernelInstrumentedTest {
     // ==================== Helpers ====================
 
     private fun canBoot(): Boolean {
-        return try {
-            context.assets.open("alpine-minirootfs.tar.gz").use { }
-            context.assets.open("proot-aarch64").use { }
-            true
-        } catch (_: Exception) {
-            false
+        val hasRootfs = listOf("alpine-minirootfs.tar.gz", "alpine-minirootfs.tar").any { name ->
+            runCatching { context.assets.open(name).use { } }.isSuccess
         }
+        if (!hasRootfs) return false
+        // [Minix] v1.14 packages PRoot as libproot.so in nativeLibraryDir.
+        return RootfsManager.getInstance(context).prootBinary.run { exists() && canExecute() }
     }
 
     private fun resetKernel() {
@@ -278,6 +286,11 @@ class PRootKernelInstrumentedTest {
             val field = PRootKernel::class.java.getDeclaredField("isBooted")
             field.isAccessible = true
             field.set(PRootKernel, false)
+        } catch (_: Exception) { }
+        try {
+            val field = PRootKernel::class.java.getDeclaredField("rootfsManager")
+            field.isAccessible = true
+            field.set(PRootKernel, null)
         } catch (_: Exception) { }
         PRootKernel.clearBindMounts()
         PRootKernel.customEnvironment.clear()

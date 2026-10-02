@@ -11,6 +11,7 @@ import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RequestBodyControl
+import com.openminis.app.data.model.RequestBodyControlOption
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.anthropic.AnthropicProvider
 import kotlinx.coroutines.flow.toList
@@ -357,6 +358,10 @@ class AnthropicProviderTest {
         // 5-series single-segment ids — were null pre-fix, now (5,0).
         assertTrue(AnthropicProvider.modelRejectsTemperature("claude-fable-5"))
         assertTrue(AnthropicProvider.modelRejectsTemperature("claude-opus-5"))
+        // [T-anthropic-fable51-android] Fable 5.1 parses as the PAIR (5,1),
+        // not (5,0) — a different branch of the optional-minor group than the
+        // single-segment ids above, so it is worth asserting separately.
+        assertTrue(AnthropicProvider.modelRejectsTemperature("claude-fable-5-1"))
         // major=5 with a date suffix in the minor slot — major wins.
         assertTrue(AnthropicProvider.modelRejectsTemperature("claude-sonnet-5-20260301"))
         // Existing 4.6+ pairs — unchanged.
@@ -376,17 +381,18 @@ class AnthropicProviderTest {
         assertTrue(AnthropicProvider.modelUsesAdaptiveThinking("claude-fable-5"))
         assertTrue(AnthropicProvider.supportsThinking("claude-fable-5"))
         assertTrue(AnthropicProvider.supportsThinking("claude-opus-5"))
+        // [T-anthropic-fable51-android] Fable 5.1 is adaptive-thinking only —
+        // it must take the SAME branch as the rest of the 5-series. If it ever
+        // fell through to the hybrid path, a manual thinking budget would be
+        // sent and the server would reject the request.
+        assertTrue(AnthropicProvider.modelUsesAdaptiveThinking("claude-fable-5-1"))
+        assertTrue(AnthropicProvider.supportsThinking("claude-fable-5-1"))
         // Unchanged below the cutoffs.
         assertEquals(false, AnthropicProvider.modelUsesAdaptiveThinking("claude-3-5-sonnet"))
         assertEquals(false, AnthropicProvider.supportsThinking("claude-3-5-sonnet"))
     }
 
-    // -- Request customization end-to-end (header + body + controls) --
-    //
-    // [Minix] The RequestCustomization dictionary layer is exercised exhaustively
-    // in RequestCustomizationTest; these cases prove the Anthropic provider
-    // actually threads customization.apply(...) into the real outgoing request
-    // (headers + JSON body) rather than relying on cross-provider code homogeneity.
+    // -- Request customization end-to-end --
 
     private fun customizedProvider(
         instance: ProviderInstance,
@@ -439,44 +445,23 @@ class AnthropicProviderTest {
 
     @Test
     fun testStreamMessage_customHeaderCanReadDefaultAuthValue_BitsUT() = runBlocking {
-        // A custom base URL uses Bearer auth (x-api-key on the real endpoint), so
-        // {{ headers.Authorization }} lets a customization copy the resolved auth.
         val instance = ProviderInstance(
             id = "provider",
             label = "Anthropic",
             providerType = ProviderType.anthropic,
             credentialType = ProviderCredential.apiKey,
-            customRequestHeaders = listOf("X-Auth-Copy = {{ headers.Authorization }}"),
+            customRequestHeaders = listOf(
+                "X-Auth-Copy = {{ headers.Authorization }}",
+            ),
         )
-        val model = LLMModel(id = "test-model", displayName = "Test Model", provider = "Anthropic")
-        val entry = ModelEntry(providerInstanceId = instance.id, baseModel = model, uuid = "entry")
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
-
-        customizedProvider(instance, entry, model)
-            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
-
-        val request = server.takeRequest()
-        assertEquals("Bearer test-key", request.getHeader("X-Auth-Copy"))
-    }
-
-    @Test
-    fun testStreamMessage_headerDeleteRemovesCustomHeaderFromRequest_BitsUT() = runBlocking {
-        // Provider layer sets X-Temp; the model layer deletes it. The final
-        // request must not carry it. (Provider-hardcoded defaults like
-        // anthropic-version are re-added unconditionally in buildRequest and are
-        // out of scope here — see the delete-semantics note in the PR.)
-        val instance = ProviderInstance(
-            id = "provider",
-            label = "Anthropic",
-            providerType = ProviderType.anthropic,
-            credentialType = ProviderCredential.apiKey,
-            customRequestHeaders = listOf("""X-Temp = "set-by-provider""""),
+        val model = LLMModel(
+            id = "test-model",
+            displayName = "Test Model",
+            provider = "Anthropic",
         )
-        val model = LLMModel(id = "test-model", displayName = "Test Model", provider = "Anthropic")
         val entry = ModelEntry(
             providerInstanceId = instance.id,
             baseModel = model,
-            overrides = ModelOverrides(customRequestHeaders = listOf("X-Temp = delete()")),
             uuid = "entry",
         )
         server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
@@ -484,15 +469,41 @@ class AnthropicProviderTest {
         customizedProvider(instance, entry, model)
             .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
 
-        val request = server.takeRequest()
-        assertNull(request.getHeader("X-Temp"))
+        assertEquals("Bearer test-key", server.takeRequest().getHeader("X-Auth-Copy"))
     }
 
     @Test
-    fun testStreamMessage_thinkingControlInjectsEffortIntoRequestBody_BitsUT() = runBlocking {
-        // A thinkingBudget optionGroup control resolves to a definition and its
-        // payloadExpressions must land in the real body. Uses an explicit option
-        // (not RequestBodyControlDefaults) so the assertion is self-contained.
+    fun testStreamMessage_headerDeleteRemovesCustomHeaderFromRequest_BitsUT() = runBlocking {
+        val instance = ProviderInstance(
+            id = "provider",
+            label = "Anthropic",
+            providerType = ProviderType.anthropic,
+            credentialType = ProviderCredential.apiKey,
+            customRequestHeaders = listOf("""X-Temp = "provider""""),
+        )
+        val model = LLMModel(
+            id = "test-model",
+            displayName = "Test Model",
+            provider = "Anthropic",
+        )
+        val entry = ModelEntry(
+            providerInstanceId = instance.id,
+            baseModel = model,
+            overrides = ModelOverrides(
+                customRequestHeaders = listOf("X-Temp = delete()"),
+            ),
+            uuid = "entry",
+        )
+        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+
+        customizedProvider(instance, entry, model)
+            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        assertNull(server.takeRequest().getHeader("X-Temp"))
+    }
+
+    @Test
+    fun testStreamMessage_semanticThinkingControlSkipsBuiltInInjection_BitsUT() = runBlocking {
         val instance = ProviderInstance(
             id = "provider",
             label = "Anthropic",
@@ -505,15 +516,23 @@ class AnthropicProviderTest {
             provider = "Anthropic",
             supportsReasoning = true,
         )
-        val control = RequestBodyControl(
-            id = "thinking",
-            title = "Thinking",
-            kind = RequestBodyControl.Kind.toggle,
-            defaultIsActive = true,
+        val option = RequestBodyControlOption(
+            id = "high-option",
+            thinkingDefinitionId = "high",
+            title = "High",
             payloadExpressions = listOf(
+                "body.saw_builtin = exists(body.thinking)",
                 """body.thinking = {type: "adaptive", display: "summarized"}""",
                 """body.output_config.effort = "high"""",
             ),
+        )
+        val control = RequestBodyControl(
+            id = "thinking",
+            title = "Thinking",
+            kind = RequestBodyControl.Kind.optionGroup,
+            semanticKind = RequestBodyControl.SemanticKind.thinkingBudget,
+            defaultOptionID = option.id,
+            options = listOf(option),
         )
         val entry = ModelEntry(
             providerInstanceId = instance.id,
@@ -523,12 +542,38 @@ class AnthropicProviderTest {
         )
         server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
 
-        customizedProvider(instance, entry, model)
-            .sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        customizedProvider(instance, entry, model).sendMessage(
+            listOf(LLMMessage(LLMMessage.Role.USER, "Hi")),
+            null,
+            1024,
+            thinkingLevel = ThinkingLevel.HIGH,
+        )
 
         val body = JSONObject(server.takeRequest().body.readUtf8())
+        assertEquals(false, body.getBoolean("saw_builtin"))
         assertEquals("adaptive", body.getJSONObject("thinking").getString("type"))
         assertEquals("high", body.getJSONObject("output_config").getString("effort"))
+    }
+
+    // -- Fable 5.1 catalog entry --
+
+    @Test
+    fun `Fable 5point1 is catalogued with Fable 5's specs and listed first`() {
+        // [T-anthropic-fable51-android] The id is what every capability check
+        // derives from (parseClaudeVersion), so a typo here would silently
+        // disable adaptive thinking and re-enable temperature.
+        val m = LLMModel.claudeFable51
+        assertEquals("claude-fable-5-1", m.id)
+        assertEquals("Claude Fable 5.1", m.displayName)
+        assertEquals("Anthropic", m.provider)
+        // Same spec as Fable 5 — pinned against that entry rather than
+        // repeating literals, so the two cannot drift apart.
+        assertEquals(LLMModel.claudeFable5.contextWindow, m.contextWindow)
+        assertEquals(LLMModel.claudeFable5.maxOutputTokens, m.maxOutputTokens)
+        assertEquals(LLMModel.claudeFable5.supportsReasoning, m.supportsReasoning)
+        // Must be reachable from the picker, newest first (iOS ordering).
+        assertTrue(LLMModel.allAnthropic.contains(m))
+        assertEquals(m, LLMModel.allAnthropic.first())
     }
 
     // -- Provider metadata --
@@ -776,7 +821,7 @@ class AnthropicProviderTest {
             "anthropic-beta must not contain redact-thinking; was: $beta",
             !beta.contains("redact-thinking"),
         )
-        // Sanity: the OAuth mimicry betas we DO expect are still present.
+        // Sanity: the OAuth OAuth betas we DO expect are still present.
         assertTrue("oauth beta present", beta.contains("oauth-2025-04-20"))
     }
 }

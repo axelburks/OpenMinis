@@ -24,12 +24,24 @@ final class StreamingHangLogger {
     private var refCount: Int = 0
     private var flushTimer: DispatchSourceTimer?
 
+    // [T-diag-log-noise] Retuned 2026-08-11. This is a backstop monitor, not a
+    // profiler: it earns its keep by catching the rare severe stall in the
+    // field, so it is tuned for signal per line rather than completeness.
+    // Previous settings produced 888 [StreamHang] lines in a single day, each
+    // hit emitting dozens of stack frames — enough volume to bury the events
+    // actually worth reading (and to cost real I/O while streaming).
+
     /// Cap each event's frame list when writing to the log so a single deep
-    /// stack doesn't bloat one line into multiple KB.
-    private let maxFramesPerEvent: Int = 40
-    private let flushIntervalSeconds: Int = 2
+    /// stack doesn't bloat one line into multiple KB. 20 frames still reaches
+    /// well past the app→framework boundary that identifies a stall's owner.
+    private let maxFramesPerEvent: Int = 20
+    /// Flush cadence. Raised from 2s: these are batched writes of an already
+    /// bounded buffer, so a longer interval costs nothing but far fewer wakeups.
+    private let flushIntervalSeconds: Int = 10
     /// `HangDetector.start` threshold — captures stacks for hangs >= this.
-    private let thresholdMs: Double = 1000
+    /// Raised from 1000ms: sub-2s stalls are common enough during heavy
+    /// streaming to be noise, while >= 2s is unambiguously user-visible.
+    private let thresholdMs: Double = 2000
 
     // MARK: - Streaming content ring buffer
     //
@@ -464,21 +476,6 @@ final class StreamingHangLogger {
             assignedBuffer.removeAll(keepingCapacity: true)
         } else {
             mgr.writeRawLine(category: cat, level: lvl, message: "[StreamHang] === assignedText snapshot: (empty) ===")
-        }
-
-        // [HangRepro] Dump the last few attribute:atIndex:effectiveRange:
-        // queries observed on the main thread. When a typesetter feedback
-        // loop is the trigger, these are the calls fillLayoutHole is
-        // making in a tight inner loop — they tell us *which attribute
-        // key* on which storage index the typesetter is stuck asking
-        // about.
-        if let attrDump = AttributeQueryRecorder.drainSnapshot(), !attrDump.isEmpty {
-            // The snapshot is already pre-formatted with "[AttributeQuery]" prefixes.
-            // Emit it line by line so the raw-line writer interleaves cleanly with
-            // the surrounding stack frames.
-            for line in attrDump.split(separator: "\n") {
-                mgr.writeRawLine(category: cat, level: lvl, message: String(line))
-            }
         }
 
         for (i, event) in events.enumerated() {

@@ -61,9 +61,41 @@ interface SpeechRecognitionEngine {
     /**
      * Optional: called by [SpeechRecognitionManager] when a prior [start] ended
      * in an unrecoverable error so the engine can remember it and report
-     * `isAvailable = false` for the remainder of the process lifetime.
+     * `isAvailable = false`.
+     *
+     * Degradation is PER-ENGINE by design: `refreshAvailability()` is
+     * `engines.any { it.isAvailable }`, so a poisoned system engine must not
+     * mask a working provider engine.
      */
     fun markDegraded() {}
+
+    /**
+     * [T-android-voice-entry-always-available] Undo [markDegraded].
+     *
+     * Degradation used to be permanent for the process lifetime with no reset
+     * path, so a single transient failure (mic held by another app, permission
+     * not yet granted, a provider that was misconfigured and has since been
+     * fixed) disabled the engine until the app was restarted. The user
+     * explicitly re-entering voice mode or picking this engine is the signal
+     * that conditions may have changed — give it another chance.
+     */
+    fun clearDegraded() {}
+
+    /**
+     * [T-voice-asr-failure-retry-prompt] Re-transcribe audio kept from an
+     * earlier failed take ([Listener.onRetainedAudio]). No capture: the result
+     * arrives through [listener] exactly like a live take's terminal callback,
+     * and a second failure hands the audio back again.
+     *
+     * [wav] is mono PCM16 with a 44-byte header, at whatever rate the SAME
+     * engine handed it back with (retries always go to the engine that
+     * produced the audio). The default reports an
+     * error so an engine that cannot replay audio still ends in a terminal
+     * callback.
+     */
+    fun transcribeRetained(wav: ByteArray, locale: Locale, listener: Listener) {
+        listener.onError(RecognitionError.UNKNOWN, "This recognizer cannot re-transcribe saved audio.")
+    }
 
     interface Listener {
         /** Incremental interim result. Only fires if [supportsPartialResults]. */
@@ -80,12 +112,31 @@ interface SpeechRecognitionEngine {
 
         /** Fires when the engine starts actually listening (after warmup). */
         fun onReadyForSpeech() {}
+
+        /**
+         * [T-voice-asr-failure-retry-prompt] Called immediately BEFORE a
+         * terminal [onError] when the engine still holds the audio of the
+         * utterance that failed to transcribe (mono PCM16 WAV; the header
+         * carries the sample rate). The
+         * caller keeps it and offers a retry instead of the speech being
+         * dropped — long dictation is hard to repeat.
+         */
+        fun onRetainedAudio(wav: ByteArray) {}
     }
 }
 
 enum class RecognitionError {
     /** No speech detected / silence. Recoverable — the user can try again. */
     NO_MATCH,
+
+    /**
+     * [T-android-asr-silent-failure] Speech WAS detected (our VAD saw a
+     * voiced segment) but the recognizer produced no text. Distinct from
+     * [NO_MATCH] because the UI deliberately swallows NO_MATCH — it means
+     * "you didn't say anything", which is exactly the wrong message when the
+     * user spoke for 30 s and got nothing. This one must be shown.
+     */
+    TRANSCRIPTION_FAILED,
 
     /** Engine reported network failure (cloud recognizers). */
     NETWORK,
@@ -107,6 +158,20 @@ enum class RecognitionError {
 
     /** Audio capture failed (mic hardware / HAL). */
     AUDIO_ERROR,
+
+    /**
+     * [T-voice-mic-preempted] Another app holds the microphone (a call, a
+     * voice recorder). Transient, and not this engine's fault: it must not
+     * mark the engine degraded. See [MicInUse].
+     */
+    MIC_IN_USE,
+
+    /**
+     * [T-voice-asr-failure-retry-prompt] The recognizer produced no text
+     * before its (audio-length-scaled) watchdog fired. A failure — the audio
+     * is kept and the user asked to retry — not a "no speech" result.
+     */
+    TIMED_OUT,
 
     /** Any other failure. */
     UNKNOWN,

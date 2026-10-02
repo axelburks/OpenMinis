@@ -119,30 +119,27 @@ always carries the latest APK.
 ## Building from source
 
 Minis ships a Linux sandbox inside the app, so the native dependencies (iSH on
-iOS, PRoot on Android, FFmpeg, LAME) and the Alpine rootfs are **built from
-source** rather than committed as binaries.
+iOS, PRoot on Android, FFmpeg, LAME, rclone) and the Alpine rootfs are **built
+from source** rather than committed as binaries.
 
-**→ See [BUILDING.md](BUILDING.md) for the full first-build guide.**
-
-The short version:
+For this Minix fork, use the bootstrap script on a fresh Mac:
 
 ```sh
-git clone --recurse-submodules https://github.com/OpenMinis/OpenMinis.git
+git clone --recurse-submodules https://github.com/axelburks/OpenMinis.git
 cd OpenMinis
+git switch minix
 
-# iOS  — order matters: FFmpeg links against LAME
-./deps/build_lame.sh && ./deps/build_ffmpeg.sh
-./deps/build_ish.sh && ./deps/prepare_alpine_rootfs.sh
-open src/ios/Minis.xcodeproj
-
-# Android — needs NDK r28+
-./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
-cd src/android && ./gradlew :app:assembleDebug
+./scripts/minix-bootstrap.sh ios       # or android / both
 ```
 
-`BUILDING.md` covers the toolchain requirements per platform, the build-time
-customization templates, and a troubleshooting section for the failure modes
-you are most likely to hit.
+The script initializes submodules, creates missing non-secret customization
+templates, reconciles native dependencies, and builds the app. It reports any
+Xcode, Android SDK/NDK, Go, or signing prerequisite that must be supplied on
+the machine. Android uses the team's persistent Minix certificate; on first
+run, fill the generated out-of-repository signing template and rerun.
+
+**→ See [BUILDING.md](BUILDING.md) for prerequisites, manual dependency commands,
+and troubleshooting.**
 
 ---
 

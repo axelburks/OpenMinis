@@ -47,6 +47,51 @@ final class MinisMediaCache {
     func setResolvedURL(_ url: URL, for key: String) {
         resolvedURLCache.setObject(url as NSURL, forKey: key as NSString)
     }
+
+    // MARK: - Fingerprint cache
+
+    /// Cached `size|mtime` fingerprints keyed by resolved host path, with the
+    /// time each was taken.
+    ///
+    /// `minisMediaCacheKey` is evaluated inside `body` (it feeds `.task(id:)`),
+    /// so it runs on the main actor once per tile per body pass. Its `stat()`
+    /// was previously uncached, and for a `minis://mounts/<name>/…` source the
+    /// underlying resolve also touches the mount's backing volume — on a slow
+    /// or unreachable SMB / FileProvider share that blocks the main thread and
+    /// trips the scene-update watchdog. A short TTL keeps the mtime-based
+    /// invalidation this key exists for (an agent rewriting a chart at the same
+    /// path still refreshes within `fingerprintTTL`) while collapsing a whole
+    /// scroll's worth of body passes into at most one `stat()` per file.
+    private let fingerprintLock = NSLock()
+    private var fingerprints: [String: (value: String, takenAt: CFAbsoluteTime)] = [:]
+    private let fingerprintTTL: CFAbsoluteTime = 2.0
+
+    /// Returns a cached fingerprint for `path` if one was taken within the TTL.
+    func fingerprint(for path: String) -> String? {
+        fingerprintLock.lock()
+        defer { fingerprintLock.unlock() }
+        guard let hit = fingerprints[path] else { return nil }
+        guard CFAbsoluteTimeGetCurrent() - hit.takenAt < fingerprintTTL else {
+            fingerprints.removeValue(forKey: path)
+            return nil
+        }
+        return hit.value
+    }
+
+    func setFingerprint(_ value: String, for path: String) {
+        fingerprintLock.lock()
+        defer { fingerprintLock.unlock() }
+        fingerprints[path] = (value, CFAbsoluteTimeGetCurrent())
+    }
+
+    /// Drop a cached fingerprint so the next read re-stats immediately. Called
+    /// after we write to a minis:// path ourselves, where waiting out the TTL
+    /// would leave a visibly stale thumbnail.
+    func invalidateFingerprint(for path: String) {
+        fingerprintLock.lock()
+        defer { fingerprintLock.unlock() }
+        fingerprints.removeValue(forKey: path)
+    }
 }
 
 /// Downsample an image from data using ImageIO to avoid decoding the full bitmap.
@@ -83,7 +128,16 @@ func resolveMinisFileURLCached(url: URL) -> URL? {
         return cached
     }
     if let resolved = resolveMinisFileURL(url: url) {
-        MinisMediaCache.shared.setResolvedURL(resolved, for: key)
+        // Don't persist a mount resolution taken on the main thread: that path
+        // is returned unverified (see the mounts branch of resolveMinisFileURL,
+        // which skips `fileExists` on main to avoid blocking on the backing
+        // volume). Caching it would poison later off-main callers, which do
+        // verify. Non-mount resolutions are always verified, so they cache
+        // normally.
+        let isUnverifiedMountGuess = Thread.isMainThread && url.host == "mounts"
+        if !isUnverifiedMountGuess {
+            MinisMediaCache.shared.setResolvedURL(resolved, for: key)
+        }
         minisLogger.info("[MinisImage][ResolveCache] MISS→resolved url=\(url.absoluteString) → \(resolved.path)")
         return resolved
     }
@@ -115,16 +169,25 @@ func minisMediaCacheKey(for url: URL) -> String {
         // fingerprint load replaces it naturally.
         return base
     }
+    let path = fileURL.path
+    // This runs inside `body` (it feeds `.task(id:)`), so it must stay cheap
+    // and must never block on a mount's backing volume. Serve a recent
+    // fingerprint when we have one; see MinisMediaCache.fingerprint(for:).
+    if let cached = MinisMediaCache.shared.fingerprint(for: path) {
+        return cached
+    }
     // Stat without going through FileManager's attribute wrapper — it
     // allocates a dictionary and is measurably slower.
     var st = stat()
-    guard stat(fileURL.path, &st) == 0 else { return base }
+    guard stat(path, &st) == 0 else { return base }
     // Seconds + nanoseconds (APFS has nanosecond-resolution mtime, HFS+
     // only seconds — either way we capture every rewrite we care about).
     let secs = st.st_mtimespec.tv_sec
     let nsecs = st.st_mtimespec.tv_nsec
     let size = st.st_size
-    return "\(base)|\(size)|\(secs).\(nsecs)"
+    let key = "\(base)|\(size)|\(secs).\(nsecs)"
+    MinisMediaCache.shared.setFingerprint(key, for: path)
+    return key
 }
 
 /// Standard placeholder height for media items to prevent layout jumps
@@ -155,7 +218,12 @@ let minisDocumentExtensions: Set<String> = [
 /// Resolve a minis:// URL to a host filesystem URL.
 /// Maps directly to persistent storage: Library/MinisChat/minis/<sessionId>/<subdir>/<path>
 /// No dependency on iSH boot or bind mounts.
-func resolveMinisFileURL(url: URL) -> URL? {
+///
+/// [T-minisurl-wrong-active-session] Pass `sessionId` when the caller knows
+/// which session owns the reference (e.g. a link tapped inside a specific
+/// chat) — the `activeSessionId` fallback is the frontmost-UI session and can
+/// briefly diverge during session switches or concurrent background runs.
+func resolveMinisFileURL(url: URL, sessionId: String? = nil) -> URL? {
     guard let host = url.host else {
         minisLogger.warning("[ResolveMinisURL] no host in URL: \(url.absoluteString)")
         return nil
@@ -166,8 +234,8 @@ func resolveMinisFileURL(url: URL) -> URL? {
 
     let fm = FileManager.default
 
-    // Primary: resolve via active session → persistent directory
-    if let sid = AIChatViewModel.activeSessionId {
+    // Primary: resolve via the owning session → persistent directory
+    if let sid = sessionId ?? AIChatViewModel.activeSessionId {
         for subPath in subPaths {
             let persistURL = AIChatViewModel.minisPersistentBase
                 .appendingPathComponent(sid, isDirectory: true)
@@ -219,9 +287,28 @@ func resolveMinisFileURL(url: URL) -> URL? {
             }()
             if let mountURL {
                 let relative = pieces.count > 1 ? String(pieces[1]) : ""
-                let candidate = relative.isEmpty
+                // Build the candidate by string concatenation, NOT
+                // `mountURL.appendingPathComponent(relative)`. On a `file:` URL
+                // without an `isDirectory:` hint, `appendingPathComponent` asks
+                // the filesystem whether the base is a directory — on a
+                // FileProvider- or network-backed mount that is a synchronous
+                // XPC round-trip to the owning provider, which stalls whatever
+                // thread we're on. `URL(fileURLWithPath:)` on a fully-formed
+                // path does no such lookup.
+                let candidate: URL = relative.isEmpty
                     ? mountURL
-                    : mountURL.appendingPathComponent(relative)
+                    : URL(fileURLWithPath: mountURL.path + "/" + relative)
+                // `fileExists` on an unreachable mount blocks the same way.
+                // This resolver is reached from `body` via
+                // `minisMediaCacheKey`, so on the main thread we accept the
+                // candidate unverified — a wrong guess just means the async
+                // image load fails and shows a placeholder, whereas a blocked
+                // main thread means a watchdog SIGKILL. Off-main callers keep
+                // the precise check.
+                if Thread.isMainThread {
+                    minisLogger.info("[MinisImage][Resolve] \(url.absoluteString) → mount '\(mountName)' → \(candidate.path) (unverified, main thread)")
+                    return candidate
+                }
                 if fm.fileExists(atPath: candidate.path) {
                     minisLogger.info("[MinisImage][Resolve] \(url.absoluteString) → mount '\(mountName)' → \(candidate.path)")
                     return candidate
@@ -353,6 +440,10 @@ struct AsyncImageTile: View {
         }
         guard let url = URL(string: meta.minisURL),
               let fileURL = resolveMinisFileURLCached(url: url) else { return }
+        // The tile is `.frame(width: tileSize, height: tileSize)` in BOTH the
+        // loaded and the placeholder branch, so this completion does NOT change
+        // the cell's height and deliberately triggers no invalidateHeight /
+        // clearCachedHeight.
         Task.detached(priority: .utility) {
             guard let data = try? Data(contentsOf: fileURL),
                   let img = downsampleImageData(data, maxPixelSize: 256) else { return }
@@ -758,9 +849,20 @@ struct PreviewTitleToggle: View {
 /// same-path rewrite re-reads the file. Unlike minisMediaCacheKey this takes the
 /// already-resolved disk URL directly (no minis:// re-resolve).
 private func filePreviewFingerprint(_ url: URL) -> String {
+    // Evaluated inline in `body` as a `.task(id:)` argument, so it runs on the
+    // main actor on every body pass. `fileURL` can point into a mounted
+    // external folder, where `stat()` on an unreachable volume blocks the main
+    // thread — go through the shared TTL cache for the same reason
+    // `minisMediaCacheKey` does.
+    let path = url.path
+    if let cached = MinisMediaCache.shared.fingerprint(for: path) {
+        return cached
+    }
     var st = stat()
-    guard stat(url.path, &st) == 0 else { return url.absoluteString }
-    return "\(url.absoluteString)|\(st.st_size)|\(st.st_mtimespec.tv_sec).\(st.st_mtimespec.tv_nsec)"
+    guard stat(path, &st) == 0 else { return url.absoluteString }
+    let key = "\(url.absoluteString)|\(st.st_size)|\(st.st_mtimespec.tv_sec).\(st.st_mtimespec.tv_nsec)"
+    MinisMediaCache.shared.setFingerprint(key, for: path)
+    return key
 }
 
 struct MinisTextPreviewView: View {
@@ -797,11 +899,11 @@ struct MinisTextPreviewView: View {
                         Button {
                             PrintHelper.printText(text, jobName: fileURL.lastPathComponent)
                         } label: {
-                            Label(String(localized: "Print"), systemImage: "printer")
+                            Label(AppLocalized("Print"), systemImage: "printer")
                         }
                         .disabled(text.isEmpty)
                         Button { showShareSheet = true } label: {
-                            Label(String(localized: "Share"), systemImage: "square.and.arrow.up")
+                            Label(AppLocalized("Share"), systemImage: "square.and.arrow.up")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -920,17 +1022,17 @@ struct MinisMarkdownPreviewView: View {
                         Button {
                             PrintHelper.printText(markdownContent, jobName: fileURL.lastPathComponent)
                         } label: {
-                            Label(String(localized: "Print"), systemImage: "printer")
+                            Label(AppLocalized("Print"), systemImage: "printer")
                         }
                         .disabled(markdownContent.isEmpty)
                         Button { showShareSheet = true } label: {
-                            Label(String(localized: "Share"), systemImage: "square.and.arrow.up")
+                            Label(AppLocalized("Share"), systemImage: "square.and.arrow.up")
                         }
                         Button {
                             VoiceOutputPlayer.shared.stopAll()
                             VoiceOutputPlayer.shared.enqueueSegmented(markdownContent, sessionId: VoiceOutputPlayer.manualOwnerId)
                         } label: {
-                            Label(String(localized: "Read Aloud"), systemImage: "speaker.wave.2")
+                            Label(AppLocalized("Read Aloud"), systemImage: "speaker.wave.2")
                         }
                         .disabled(markdownContent.isEmpty)
                     } label: {
@@ -1040,62 +1142,13 @@ struct MinisHTMLPreviewView: View {
 
 
 // MARK: - minis:// Document Preview
-
-import QuickLook
-
-struct MinisDocumentPreviewView: UIViewControllerRepresentable {
-    let fileURL: URL
-
-    func makeUIViewController(context: Context) -> UINavigationController {
-        let controller = QLPreviewController()
-        controller.dataSource = context.coordinator
-        context.coordinator.controller = controller
-        return UINavigationController(rootViewController: controller)
-    }
-
-    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {
-        // [T-ios-file-preview-stale-cache] QLPreviewController caches a
-        // rendered representation keyed by URL. When the agent rewrites the
-        // file in place (same path, new bytes) the controller can keep showing
-        // the earlier render. If the on-disk fingerprint (mtime/size) has
-        // changed since we last rendered, force a reloadData() so QuickLook
-        // re-reads the file. Cheap stat; only reloads on an actual change.
-        let fp = context.coordinator.currentFingerprint()
-        if fp != context.coordinator.lastFingerprint {
-            context.coordinator.lastFingerprint = fp
-            context.coordinator.controller?.reloadData()
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(fileURL: fileURL)
-    }
-
-    class Coordinator: NSObject, QLPreviewControllerDataSource {
-        let fileURL: URL
-        weak var controller: QLPreviewController?
-        var lastFingerprint: String
-
-        init(fileURL: URL) {
-            self.fileURL = fileURL
-            self.lastFingerprint = ""
-            super.init()
-            self.lastFingerprint = currentFingerprint()
-        }
-
-        /// mtime+size fingerprint of the file on disk, aligned with
-        /// minisMediaCacheKey's stat-based approach.
-        func currentFingerprint() -> String {
-            var st = stat()
-            guard stat(fileURL.path, &st) == 0 else { return "" }
-            return "\(st.st_size)|\(st.st_mtimespec.tv_sec).\(st.st_mtimespec.tv_nsec)"
-        }
-
-        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
-
-        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
-            fileURL as QLPreviewItem
-        }
-    }
-}
+//
+// Documents (pdf / Office / iWork / rtf) are presented from AIChatView via
+// SwiftUI's `.quickLookPreview($previewDocumentFile)` — see
+// [T-ios-office-preview-toolbar] there. The previous
+// UIViewControllerRepresentable wrapper (a bare QLPreviewController inside a
+// .sheet) never got QuickLook's system chrome: inside a sheet QL is a child
+// of the hosting controller, so no Done and no Share were installed. Its
+// [T-ios-file-preview-stale-cache] reloadData() workaround is obsolete with
+// the native presentation, which builds a fresh preview per open.
 

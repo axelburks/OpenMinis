@@ -21,6 +21,12 @@ struct SyncedSession: Syncable {
     var memoryEnabled: Int          // 0/1
     var modelBinding: String?
     var pinnedAt: Date?
+    var folderId: String?
+    // [T-p1-delegate-task] Child-session linkage; optional, no version bump
+    // (same shape as folderId). Old builds ignore it and show the child as a
+    // normal session titled "Agent · …" — accepted build-skew.
+    var parentSessionId: String?
+    var parentToolUseId: String?
 
     static let syncMetadata: SyncTypeMetadata<SyncedSession> = {
         typealias F = FieldDescriptor<SyncedSession>
@@ -38,6 +44,12 @@ struct SyncedSession: Syncable {
                 F.int("memoryEnabled",       \SyncedSession.memoryEnabled),
                 F.optionalString("modelBinding", \SyncedSession.modelBinding),
                 F.optionalDate("pinnedAt",   \SyncedSession.pinnedAt),
+                // Optional field added the same way pinnedAt was (no version
+                // bump): old devices ignore the unknown CKRecord field on read
+                // and omit it on write, both of which decode as nil here.
+                F.optionalString("folderId", \SyncedSession.folderId),
+                F.optionalString("parentSessionId", \SyncedSession.parentSessionId),
+                F.optionalString("parentToolUseId", \SyncedSession.parentToolUseId),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedSession.updatedAt),
             version: 1
@@ -54,7 +66,10 @@ struct SyncedSession: Syncable {
             updatedAt: s.updatedAt,
             memoryEnabled: memoryEnabled ? 1 : 0,
             modelBinding: modelBinding,
-            pinnedAt: s.pinnedAt
+            pinnedAt: s.pinnedAt,
+            folderId: s.folderId,
+            parentSessionId: s.parentSessionId,
+            parentToolUseId: s.parentToolUseId
         )
     }
 }
@@ -76,6 +91,19 @@ struct SyncedMessage: Syncable {
     var sortOrder: Int
     var createdAt: Date
     var updatedAt: Date
+    /// [T-token-attribution-snapshot] Which model actually produced this
+    /// message. Optional so a device on an older build — which sends none of
+    /// these — still decodes: `optionalString` returns nil for a missing key
+    /// rather than throwing, so no protocol version bump is needed.
+    ///
+    /// A receiver must treat nil as "no information", never as "empty": see the
+    /// COALESCE guards in `ChatStore.mergeRemoteMessage`, without which an
+    /// older device echoing a message back would wipe a newer device's
+    /// correctly-recorded attribution.
+    var modelId: String?
+    var modelDisplayName: String?
+    var providerType: String?
+    var providerInstanceId: String?
 
     static let syncMetadata: SyncTypeMetadata<SyncedMessage> = {
         typealias F = FieldDescriptor<SyncedMessage>
@@ -94,6 +122,10 @@ struct SyncedMessage: Syncable {
                 F.int("sortOrder",                    \SyncedMessage.sortOrder),
                 F.date("createdAt",                   \SyncedMessage.createdAt),
                 F.date("updatedAt",                   \SyncedMessage.updatedAt),
+                F.optionalString("modelId",           \SyncedMessage.modelId),
+                F.optionalString("modelDisplayName",  \SyncedMessage.modelDisplayName),
+                F.optionalString("providerType",      \SyncedMessage.providerType),
+                F.optionalString("providerInstanceId", \SyncedMessage.providerInstanceId),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedMessage.updatedAt),
             version: 1
@@ -118,7 +150,11 @@ struct SyncedMessage: Syncable {
             streamInterruptCount: m.streamInterruptCount,
             sortOrder: m.sortOrder,
             createdAt: m.createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            modelId: m.modelId,
+            modelDisplayName: m.modelDisplayName,
+            providerType: m.providerType,
+            providerInstanceId: m.providerInstanceId
         )
     }
 }
@@ -276,33 +312,6 @@ struct SyncedProviderConfig: Syncable {
                 F.date("updatedAt",      \SyncedProviderConfig.updatedAt),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedProviderConfig.updatedAt),
-            version: 1
-        )
-    }()
-}
-
-// MARK: - SyncedMCPServers
-
-/// [T-mcp-integration-ios] Whole-file sync of /var/minis/mcp-servers/servers.json
-/// (the MCP server list). One record per app; last-write-wins by updatedAt
-/// (the file mtime), aligned with how the other config files sync.
-struct SyncedMCPServers: Syncable {
-    /// Constant id — only one MCP server list per app.
-    var id: String = "mcp-servers"
-    var serversJson: String
-    var updatedAt: Date
-
-    static let syncMetadata: SyncTypeMetadata<SyncedMCPServers> = {
-        typealias F = FieldDescriptor<SyncedMCPServers>
-        return SyncTypeMetadata<SyncedMCPServers>(
-            recordType: "MCPServersV2",
-            idKeyPath: \SyncedMCPServers.id,
-            scope: .global,
-            fields: [
-                F.string("serversJson", \SyncedMCPServers.serversJson),
-                F.date("updatedAt",     \SyncedMCPServers.updatedAt),
-            ],
-            conflictPolicy: .lastWriteWinsByField(\SyncedMCPServers.updatedAt),
             version: 1
         )
     }()
@@ -523,6 +532,109 @@ struct SyncedProviderModelGroupV3: Syncable {
     }()
 }
 
+/// [T-icloud-thinking-rules-sync] One USER-AUTHORED thinking rule.
+///
+/// Built-in rules are deliberately absent from this type. They are code constants
+/// recomputed per request on every device, are never persisted (`is_builtin = 0` is
+/// hardcoded on every write path), and must never travel over the wire — a built-in
+/// arriving as a record would become an undeletable duplicate on the receiver.
+///
+/// `wireFormatJson` is carried as an OPAQUE STRING, not a decoded enum. This is the
+/// forward-compatibility guarantee: a rule authored on a newer build using a
+/// `wire_format.kind` this build has never seen round-trips byte-for-byte instead of
+/// being dropped or coerced into a wrong shape. Decoding happens only at the point of
+/// use (`ProviderConfigDB.loadThinkingRules`), which already skips an unreadable row
+/// individually rather than failing the whole read.
+struct SyncedProviderThinkingRuleV3: Syncable {
+    var id: String                  // rule UUID (custom rules only)
+    var instanceId: String          // owning ProviderInstance UUID
+    var sortOrder: Int              // position = priority; first match wins
+    var scopeKind: String           // "allModels" | "modelPattern"
+    var scopePattern: String?       // non-nil only for .modelPattern
+    var wireFormatJson: String      // opaque {"kind":…} payload — see above
+    var echoField: String?          // ReasoningEchoPolicy.fieldName
+    var echoTiming: String?         // "everyTurn" | "afterToolUseOnly" | "never"
+    var label: String
+    var createdAt: Date
+    var updatedAt: Date
+
+    static let syncMetadata: SyncTypeMetadata<SyncedProviderThinkingRuleV3> = {
+        typealias F = FieldDescriptor<SyncedProviderThinkingRuleV3>
+        return SyncTypeMetadata<SyncedProviderThinkingRuleV3>(
+            recordType: "ProviderThinkingRuleV3",
+            idKeyPath: \SyncedProviderThinkingRuleV3.id,
+            scope: .global,
+            fields: [
+                F.string("instanceId",           \SyncedProviderThinkingRuleV3.instanceId),
+                F.int("sortOrder",               \SyncedProviderThinkingRuleV3.sortOrder),
+                F.string("scopeKind",            \SyncedProviderThinkingRuleV3.scopeKind),
+                F.optionalString("scopePattern", \SyncedProviderThinkingRuleV3.scopePattern),
+                F.string("wireFormatJson",       \SyncedProviderThinkingRuleV3.wireFormatJson),
+                F.optionalString("echoField",    \SyncedProviderThinkingRuleV3.echoField),
+                F.optionalString("echoTiming",   \SyncedProviderThinkingRuleV3.echoTiming),
+                F.string("label",                \SyncedProviderThinkingRuleV3.label),
+                F.date("createdAt",              \SyncedProviderThinkingRuleV3.createdAt),
+                F.date("updatedAt",              \SyncedProviderThinkingRuleV3.updatedAt),
+            ],
+            conflictPolicy: .lastWriteWinsByField(\SyncedProviderThinkingRuleV3.updatedAt),
+            version: 1
+        )
+    }()
+}
+
+/// [T-subagent-own-store] One CK record per sub agent definition.
+///
+/// Per-record rather than whole-roster so two devices editing different agents
+/// merge as a natural union instead of one overwriting the other — the same
+/// reason EnvVarItem replaced the whole-file EnvVarV2.
+///
+/// `sortOrder` rides on each record because it is disclosure order in the
+/// roster the model reads, i.e. real content, and a single record cannot
+/// express "the list moved" — a reorder therefore pushes one upsert per id.
+///
+/// `modelGroupId` is the one field pointing into provider-land. It is a plain
+/// foreign key and is synced verbatim; a group that does not exist on the
+/// receiving device resolves to "model chooses", which is the same fallback a
+/// locally-deleted group produces.
+struct SyncedSubAgentV3: Syncable {
+    var id: String                  // definition UUID (or SubAgentDefinition.builtInId)
+    var name: String
+    var subAgentDescription: String // `description` is taken on Syncable conformers
+    var instructions: String
+    var modelGroupId: String?
+    /// [T-subagent-thinking-override] ThinkingLevel raw value, nil = not set.
+    /// `optionalString`, so a peer on an older build that sends no such key
+    /// decodes as nil rather than throwing — no protocol version bump needed.
+    var thinkingLevelOverride: String?
+    /// 0/1 rather than Bool: the sync framework's FieldDescriptor offers
+    /// string / int / date only, and adding a bool descriptor for one field
+    /// would change shared infrastructure for no behavioural gain.
+    var isBuiltIn: Int
+    var sortOrder: Int
+    var updatedAt: Date
+
+    static let syncMetadata: SyncTypeMetadata<SyncedSubAgentV3> = {
+        typealias F = FieldDescriptor<SyncedSubAgentV3>
+        return SyncTypeMetadata<SyncedSubAgentV3>(
+            recordType: "SubAgentV3",
+            idKeyPath: \SyncedSubAgentV3.id,
+            scope: .global,
+            fields: [
+                F.string("name",                 \SyncedSubAgentV3.name),
+                F.string("description",          \SyncedSubAgentV3.subAgentDescription),
+                F.string("instructions",         \SyncedSubAgentV3.instructions),
+                F.optionalString("modelGroupId", \SyncedSubAgentV3.modelGroupId),
+                F.optionalString("thinkingLevelOverride", \SyncedSubAgentV3.thinkingLevelOverride),
+                F.int("isBuiltIn",               \SyncedSubAgentV3.isBuiltIn),
+                F.int("sortOrder",               \SyncedSubAgentV3.sortOrder),
+                F.date("updatedAt",              \SyncedSubAgentV3.updatedAt),
+            ],
+            conflictPolicy: .lastWriteWinsByField(\SyncedSubAgentV3.updatedAt),
+            version: 1
+        )
+    }()
+}
+
 // MARK: - SyncedThinkingLevelDefinitionsV3
 
 struct SyncedThinkingLevelDefinitionsV3: Syncable {
@@ -530,11 +642,8 @@ struct SyncedThinkingLevelDefinitionsV3: Syncable {
     var definitionsJson: String
     var updatedAt: Date
 
-    static let syncMetadata:
-        SyncTypeMetadata<SyncedThinkingLevelDefinitionsV3> = {
-        typealias F = FieldDescriptor<
-            SyncedThinkingLevelDefinitionsV3
-        >
+    static let syncMetadata: SyncTypeMetadata<SyncedThinkingLevelDefinitionsV3> = {
+        typealias F = FieldDescriptor<SyncedThinkingLevelDefinitionsV3>
         return SyncTypeMetadata<SyncedThinkingLevelDefinitionsV3>(
             recordType: "ThinkingLevelDefinitionsV3",
             idKeyPath: \SyncedThinkingLevelDefinitionsV3.id,
@@ -754,16 +863,70 @@ struct SyncedMemoryDaily: Syncable {
     }()
 }
 
+// MARK: - SyncedFolder
+
+/// Home-list session folder (FolderV2). Identity is the locally generated
+/// UUID; `name` intentionally carries no uniqueness guarantee — two devices
+/// may each create "Work" offline and both records coexist after sync (no
+/// auto-merge). Rename is a single LWW field here precisely because members
+/// reference the UUID, so a rename never touches SessionV2 records.
+/// Deleting a folder propagates as a tombstone whose apply-side clears
+/// members' folderId — it never deletes sessions.
+struct SyncedFolder: Syncable {
+    var id: String
+    var name: String
+    var icon: String?
+    var color: String?
+    var origin: String
+    var sortIndex: Int
+    var pinnedAt: Date?
+    var desc: String?
+    var createdAt: Date
+    var updatedAt: Date
+
+    static let syncMetadata: SyncTypeMetadata<SyncedFolder> = {
+        typealias F = FieldDescriptor<SyncedFolder>
+        return SyncTypeMetadata<SyncedFolder>(
+            recordType: "FolderV2",
+            idKeyPath: \SyncedFolder.id,
+            scope: .global,
+            fields: [
+                F.string("folderId",        \SyncedFolder.id),
+                F.string("name",            \SyncedFolder.name),
+                F.optionalString("icon",    \SyncedFolder.icon),
+                F.optionalString("color",   \SyncedFolder.color),
+                F.string("origin",          \SyncedFolder.origin),
+                F.int("sortIndex",          \SyncedFolder.sortIndex),
+                F.optionalDate("pinnedAt",  \SyncedFolder.pinnedAt),
+                F.optionalString("desc",    \SyncedFolder.desc),
+                F.date("createdAt",         \SyncedFolder.createdAt),
+                F.date("updatedAt",         \SyncedFolder.updatedAt),
+            ],
+            conflictPolicy: .lastWriteWinsByField(\SyncedFolder.updatedAt),
+            version: 1
+        )
+    }()
+
+    static func from(_ f: ChatFolder) -> SyncedFolder {
+        SyncedFolder(
+            id: f.id, name: f.name, icon: f.icon, color: f.color,
+            origin: f.origin, sortIndex: f.sortIndex, pinnedAt: f.pinnedAt,
+            desc: f.desc,
+            createdAt: f.createdAt, updatedAt: f.updatedAt
+        )
+    }
+}
+
 enum SyncedTypesBootstrap {
     static func registerAll() {
         let r = SyncableTypeRegistry.shared
         r.register(SyncedSession.self)
         r.register(SyncedMessage.self)
         r.register(SyncedCompactMarker.self)
+        r.register(SyncedFolder.self)
         r.register(SyncedSessionFile.self)
         r.register(SyncedSkill.self)
         r.register(SyncedProviderConfig.self)
-        r.register(SyncedMCPServers.self)   // legacy whole-file, inbound only
         r.register(SyncedMCPServer.self)    // per-server, current schema
         // v3 per-record provider sync. These coexist with the legacy
         // SyncedProviderConfig dual-write outbound until all peer
@@ -773,6 +936,11 @@ enum SyncedTypesBootstrap {
         r.register(SyncedProviderModelEntryV3.self)
         r.register(SyncedProviderModelGroupV3.self)
         r.register(SyncedThinkingLevelDefinitionsV3.self)
+        r.register(SyncedProviderThinkingRuleV3.self)
+        // [T-subagent-own-store] Missing this line is a SILENT failure:
+        // metadata(for: "SubAgentV3") returns nil, buildPortable is never
+        // reached, and the builder pushes nothing while dirty rows drain.
+        r.register(SyncedSubAgentV3.self)
         r.register(SyncedEnvVars.self)   // legacy whole-file, inbound only
         r.register(SyncedEnvVar.self)    // per-variable, current schema
         r.register(SyncedDevice.self)

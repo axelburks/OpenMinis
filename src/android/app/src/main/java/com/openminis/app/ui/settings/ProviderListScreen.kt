@@ -47,8 +47,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.key
+import sh.calvin.reorderable.ReorderableColumn
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.repository.ProviderRepository
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Delete
+import com.openminis.app.ui.components.MinisAlertDialog
+import com.openminis.app.ui.components.SwipeRowAction
+import com.openminis.app.ui.components.SwipeRowActions
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.R
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +77,12 @@ fun ProviderListScreen(
 
     var showMenu by remember { mutableStateOf(false) }
     var showThinkingLevels by remember { mutableStateOf(false) }
+    // [T-android-swipe-row-actions] Pending swipe-delete target. Held here
+    // rather than per-row so the confirmation survives the row being
+    // recomposed/reordered underneath it.
+    var instanceToDelete by remember {
+        mutableStateOf<com.openminis.app.data.model.ProviderInstance?>(null)
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -149,38 +165,123 @@ fun ProviderListScreen(
         } else {
             groupedInstances.forEach { (providerType, typeInstances) ->
                 SettingsSection(header = providerType.displayName) {
-                    typeInstances.forEachIndexed { index, instance ->
-                        val modelCount = providerRepository.visibleEntries(instance.id).size
-                        val apiKey = providerRepository.loadApiKey(instance.id)
-                        // Mirrors iOS `isConfigured` on ProviderInstancesView:
-                        // for OAuth providers, having a manual bearer token OR
-                        // a stored OAuth credential counts as "configured" — not
-                        // just the presence of an API key. Without this, OAuth
-                        // instances always show the gray dot even after a
-                        // successful sign-in or manual token paste.
-                        val isConfigured = if (instance.credentialType ==
-                            com.openminis.app.data.model.ProviderCredential.oauth) {
-                            val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                            mgr?.isAuthenticated() == true
-                        } else {
-                            !apiKey.isNullOrBlank()
-                        }
-                        ProviderInstanceRow(
-                            instance = instance,
-                            modelCount = modelCount,
-                            apiKey = apiKey,
-                            isConfigured = isConfigured,
-                            onClick = { onProviderClick(instance.id) },
-                        )
-                        if (index < typeInstances.size - 1) {
-                            val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 38.dp, end = 14.dp)
-                                    .height(0.5.dp)
-                                    .background(divider),
+                    // [T-android-provider-reorder] Long-press a row to drag it
+                    // within its provider-type section (mirrors iOS
+                    // ProviderInstancesView's .onMove).
+                    //
+                    // ReorderableColumn — not the LazyColumn variant used by
+                    // ModelGroupsScreen — because this screen renders inside
+                    // SettingsScaffold's verticalScroll Column, and the lazy
+                    // variant needs a LazyListState. Converting the whole screen
+                    // to a LazyColumn would churn the empty state and the Voice
+                    // Services section for no user-visible gain.
+                    //
+                    // `localOrder` holds the live order during the drag so the
+                    // rows follow the finger; it re-syncs whenever the repository
+                    // emits (keyed on the ids) so an external change — an import,
+                    // a delete — is not overwritten by a stale local copy.
+                    var localOrder by remember(typeInstances.map { it.id }) {
+                        mutableStateOf(typeInstances)
+                    }
+                    ReorderableColumn(
+                        list = localOrder,
+                        onSettle = { fromIndex, toIndex ->
+                            localOrder = localOrder.toMutableList().apply {
+                                add(toIndex, removeAt(fromIndex))
+                            }
+                            // Commit only THIS section's ids: reorderInstances
+                            // keeps every unmentioned instance in its existing
+                            // relative position, so other provider-type sections
+                            // are untouched. This is the Android answer to the
+                            // iOS index-mapping bug (246a8a8e) — there is no
+                            // section-local→global index arithmetic to get wrong.
+                            providerRepository.reorderInstances(localOrder.map { it.id })
+                        },
+                    ) { index, instance, isDragging ->
+                        key(instance.id) {
+                            val modelCount = providerRepository.visibleEntries(instance.id).size
+                            val apiKey = providerRepository.loadApiKey(instance.id)
+                            // Mirrors iOS `isConfigured` on ProviderInstancesView:
+                            // for OAuth providers, having a manual bearer token OR
+                            // a stored OAuth credential counts as "configured" — not
+                            // just the presence of an API key. Without this, OAuth
+                            // instances always show the gray dot even after a
+                            // successful sign-in or manual token paste.
+                            val isConfigured = if (instance.credentialType ==
+                                com.openminis.app.data.model.ProviderCredential.oauth) {
+                                val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
+                                mgr?.isAuthenticated() == true
+                            } else {
+                                // [T-empty-key-compat-endpoints] A keyless
+                                // third-party compatible endpoint is
+                                // configured-by-definition (mirrors iOS).
+                                !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
+                            }
+                            // [T-oauth-keep-credentials] Refresh rejected: the
+                            // credential is kept but the row renders red.
+                            val needsReauth = instance.credentialType ==
+                                com.openminis.app.data.model.ProviderCredential.oauth &&
+                                com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id)
+                            // Lift the dragged row above its neighbours so it
+                            // reads as "picked up" (matches ModelGroupsScreen).
+                            val elevation by animateDpAsState(
+                                targetValue = if (isDragging) 4.dp else 0.dp,
+                                label = "provider_drag_elevation",
                             )
+                            Surface(
+                                shadowElevation = elevation,
+                                color = Color.Transparent,
+                                modifier = Modifier.longPressDraggableHandle(),
+                            ) {
+                                // [T-android-swipe-row-actions] Swipe left for
+                                // Edit / Delete. Edit reuses the same
+                                // onProviderClick the tap already uses, and
+                                // Delete routes through the SAME confirmation +
+                                // removeInstance() the detail screen's "Delete
+                                // Provider" button uses — no second delete path.
+                                //
+                                // Sits INSIDE longPressDraggableHandle, not
+                                // around it: the handle needs to stay attached
+                                // to the row the user presses, and the two
+                                // gestures separate by axis (see SwipeRowActions).
+                                SwipeRowActions(
+                                    actions = listOf(
+                                        SwipeRowAction(
+                                            label = stringResource(R.string.common_edit),
+                                            icon = Icons.Filled.Edit,
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            onClick = { onProviderClick(instance.id) },
+                                        ),
+                                        SwipeRowAction(
+                                            label = stringResource(R.string.common_delete),
+                                            icon = Icons.Filled.Delete,
+                                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                            onClick = { instanceToDelete = instance },
+                                        ),
+                                    ),
+                                ) {
+                                    ProviderInstanceRow(
+                                        instance = instance,
+                                        modelCount = modelCount,
+                                        apiKey = apiKey,
+                                        isConfigured = isConfigured,
+                                        needsReauth = needsReauth,
+                                        onClick = { onProviderClick(instance.id) },
+                                    )
+                                }
+                            }
+                            if (index < localOrder.size - 1) {
+                                val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 38.dp, end = 14.dp)
+                                        .height(0.5.dp)
+                                        .background(divider),
+                                )
+                            }
                         }
                     }
                 }
@@ -290,6 +391,30 @@ fun ProviderListScreen(
             onDismiss = { showThinkingLevels = false },
         )
     }
+
+    // [T-android-swipe-row-actions] Same dialog copy and same repository call as
+    // ProviderDetailScreen's "Delete Provider" button, so swipe-delete and
+    // detail-delete cannot drift apart.
+    instanceToDelete?.let { target ->
+        MinisAlertDialog(
+            onDismissRequest = { instanceToDelete = null },
+            title = stringResource(R.string.provider_detail_delete_provider),
+            text = stringResource(
+                R.string.provider_detail_delete_provider_confirm,
+                target.label,
+            ),
+            confirmText = stringResource(R.string.common_delete),
+            isDestructive = true,
+            onConfirm = {
+                providerRepository.removeInstance(target.id)
+                AppLogger.info(
+                    "ProviderList",
+                    "Deleted provider instance ${target.id} (${target.label}) via swipe",
+                )
+                instanceToDelete = null
+            },
+        )
+    }
 }
 
 @Composable
@@ -298,6 +423,7 @@ private fun ProviderInstanceRow(
     modelCount: Int,
     apiKey: String?,
     isConfigured: Boolean,
+    needsReauth: Boolean = false,
     onClick: () -> Unit,
 ) {
     val isActive = isConfigured && instance.isEnabled
@@ -313,7 +439,9 @@ private fun ProviderInstanceRow(
             modifier = Modifier
                 .size(8.dp)
                 .background(
-                    color = if (isActive) Color(0xFF34C759) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                    color = if (needsReauth) MaterialTheme.colorScheme.error
+                        else if (isActive) Color(0xFF34C759)
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
                     shape = CircleShape,
                 ),
         )
@@ -345,9 +473,15 @@ private fun ProviderInstanceRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                 )
                 Text(
-                    text = if (!apiKey.isNullOrBlank()) maskKey(apiKey) else "No API key",
+                    // [T-empty-key-compat-endpoints] Keyless compatible endpoint:
+                    // say so instead of the alarming "No API key".
+                    text = if (needsReauth) stringResource(R.string.provider_oauth_sign_in_expired)
+                        else if (!apiKey.isNullOrBlank()) maskKey(apiKey)
+                        else if (instance.allowsEmptyAPIKey) stringResource(R.string.provider_no_key_required)
+                        else "No API key",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (needsReauth) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                 )
             }

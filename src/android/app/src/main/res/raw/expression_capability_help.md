@@ -29,13 +29,14 @@ body.messages[-1].content
 - **Current request:** `headers.<name>`, `body.<path>`
 
 Header names and references are case-insensitive.
+Do not override or delete `Authorization` or `Content-Type`; the transport manages them.
 
 ## Templates
 
 Use `{{ expression }}` inside a quoted string. If an embedded value is missing, the whole assignment is skipped.
 
 ```text
-Authorization = "Bearer {{ provider.apiKey }}"
+X-API-Key = "{{ provider.apiKey }}"
 metadata.session_id = "{{ session.id }}"
 ```
 
@@ -159,7 +160,7 @@ body.local_time = format_time(now(), "YY-M-D h:m:s a")
 body.utc_time = format_time(now(), "YYYY-MM-DD HH:mm:ss", "seconds", "UTC")
 body.created_at = parse_time("2026-08-04 09:30:00", "YYYY-MM-DD HH:mm:ss", "seconds", "Asia/Shanghai")
 headers["x-request-id"] = uuid()
-headers.authorization = delete()
+headers.x-legacy = delete()
 body.settings = deep_merge(body.settings, {legacy: delete()})
 ```
 

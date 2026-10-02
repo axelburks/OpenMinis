@@ -29,13 +29,14 @@ body.messages[-1].content
 - **当前请求：** `headers.<名称>`、`body.<路径>`
 
 请求头名称及引用不区分大小写。
+请勿覆盖或删除 `Authorization` 和 `Content-Type`，它们由传输层管理。
 
 ## 模板
 
 带引号字符串中可使用 `{{ expression }}`。任意内嵌值为 missing 时，会跳过整条赋值。
 
 ```text
-Authorization = "Bearer {{ provider.apiKey }}"
+X-API-Key = "{{ provider.apiKey }}"
 metadata.session_id = "{{ session.id }}"
 ```
 
@@ -159,7 +160,7 @@ body.local_time = format_time(now(), "YY-M-D h:m:s a")
 body.utc_time = format_time(now(), "YYYY-MM-DD HH:mm:ss", "seconds", "UTC")
 body.created_at = parse_time("2026-08-04 09:30:00", "YYYY-MM-DD HH:mm:ss", "seconds", "Asia/Shanghai")
 headers["x-request-id"] = uuid()
-headers.authorization = delete()
+headers.x-legacy = delete()
 body.settings = deep_merge(body.settings, {legacy: delete()})
 ```
 

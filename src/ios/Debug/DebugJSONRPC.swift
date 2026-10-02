@@ -163,6 +163,10 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await handleHighlight(params: params)
         case "debug.agentTrace":
             return handleAgentTrace(params: params)
+        case "debug.agentTrace.clear":
+            return handleAgentTraceClear(params: params)
+        case "debug.agentTrace.pause":
+            return handleAgentTracePause(params: params)
         case "debug.ls":
             return try handleLS(params: params)
         case "debug.readFile":
@@ -173,6 +177,26 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await handleShellExecute(params: params)
         case "debug.appInfo":
             return handleAppInfo(params: params)
+        case "debug.ish.memStats":
+            return handleISHMemStats()
+        case "debug.backup.export":
+            return try await DebugRPCBackup.export(params: params)
+        case "debug.backup.inspect":
+            return try await DebugRPCBackup.inspect(params: params)
+        case "debug.backup.cleanup":
+            return try await DebugRPCBackup.cleanup(params: params)
+        case "debug.backup.open":
+            return try await DebugRPCBackup.open(params: params)
+        case "debug.backup.destinations":
+            return try await DebugRPCBackup.destinations(params: params)
+        case "debug.backup.rescue":
+            return try await DebugRPCBackup.rescue(params: params)
+        case "debug.rclone.info":
+            return try await DebugRPCBackup.rcloneInfo(params: params)
+        case "debug.rclone.remote":
+            return try await DebugRPCBackup.rcloneRemote(params: params)
+        case "debug.backup.restore":
+            return try await DebugRPCBackup.restore(params: params)
         case "debug.auth.list":
             return ["tokens": DebugAuthenticator.shared.listTokens(),
                     "authRequired": DebugAuthenticator.shared.authRequired]
@@ -255,6 +279,10 @@ final class DebugJSONRPC: @unchecked Sendable {
             return handleLogsFlush()
         case "debug.logs.setEnabled":
             return try await handleLogsSetEnabled(params: params)
+        case "debug.toolExec.setEnabled":
+            return try handleToolExecSetEnabled(params: params)
+        case "debug.toolExec.getStatus":
+            return handleToolExecGetStatus()
         case "debug.screenshot":
             return try await handleScreenshot(params: params)
         case "debug.screenshot.capture":
@@ -295,6 +323,16 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await handleInputText(params: params)
         case "debug.scroll":
             return try await handleScroll(params: params)
+        case "debug.scrollOffset":
+            return try await handleScrollOffset(params: params)
+        case "debug.openSession":
+            return try await handleOpenSession(params: params)
+        case "debug.helper.openSheet":
+            return try await handleOpenHelperSheet(params: params)
+        case "debug.agentCallback.openSheet":
+            return try await handleOpenAgentCallbackSheet(params: params)
+        case "debug.agent.openToolSheet":
+            return try await handleOpenAgentToolSheet(params: params)
         // MARK: Hang detector
         case "debug.hangDetector.start":
             return DebugRPCHangDetector.start(params: params)
@@ -327,6 +365,26 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await MainActor.run { try DebugRPCProvider.instancesDelete(params: params) }
         case "provider.models.list":
             return try await MainActor.run { try DebugRPCProvider.modelsList(params: params) }
+        case "provider.thinkingRules.list":
+            return try await DebugRPCProvider.thinkingRulesList(params: params)
+        case "provider.thinkingRules.add":
+            return try await DebugRPCProvider.thinkingRulesAdd(params: params)
+        case "provider.thinkingRules.delete":
+            return try await DebugRPCProvider.thinkingRulesDelete(params: params)
+        case "provider.thinkingRules.resolve":
+            return try await DebugRPCProvider.thinkingRulesResolve(params: params)
+        // [T-config-debug-rpc] minis-config, driven remotely through the same
+        // ConfigOffloadBridge entry points the in-guest CLI binary calls.
+        case "config.get":
+            return try await DebugRPCConfig.get(params: params)
+        case "config.set":
+            return try await DebugRPCConfig.set(params: params)
+        case "config.topics":
+            return try await DebugRPCConfig.topics(params: params)
+        case "config.topicHelp":
+            return try await DebugRPCConfig.topicHelp(params: params)
+        case "config.audit":
+            return try await DebugRPCConfig.audit(params: params)
         case "provider.models.add":
             return try await MainActor.run { try DebugRPCProvider.modelsAdd(params: params) }
         case "provider.models.update":
@@ -385,6 +443,30 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await MainActor.run { try DebugRPCChat.thinkingSetExpanded(params: params) }
         case "chat.session.delete":
             return try await DebugRPCChat.sessionDelete(params: params)
+        case "debug.folders.list":
+            return try await DebugRPCChat.foldersList(params: params)
+        case "debug.folders.create":
+            return try await DebugRPCChat.foldersCreate(params: params)
+        case "debug.folders.move":
+            return try await DebugRPCChat.foldersMove(params: params)
+        case "debug.folders.dissolve":
+            return try await DebugRPCChat.foldersDissolve(params: params)
+        case "debug.folders.get":
+            return try await DebugRPCChat.foldersGet(params: params)
+        case "debug.folders.rename":
+            return try await DebugRPCChat.foldersRename(params: params)
+        case "debug.sessions.badge":
+            return try await DebugRPCChat.sessionsBadge(params: params)
+        case "debug.appearance.set":
+            return try await DebugRPCChat.appearanceSet(params: params)
+        case "debug.sessions.pin":
+            return try await DebugRPCChat.sessionsPin(params: params)
+        case "debug.folders.pin":
+            return try await DebugRPCChat.foldersPin(params: params)
+        case "debug.folders.setAutoGrouping":
+            return try await DebugRPCChat.foldersSetAutoGrouping(params: params)
+        case "chat.title.regenerate":
+            return try await DebugRPCChat.titleRegenerate(params: params)
         case "chat.compact.markers.list":
             return try await DebugRPCChat.compactMarkersList(params: params)
         case "chat.compact.before":
@@ -393,6 +475,10 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await DebugRPCChat.compactRevert(params: params)
         case "chat.simulateLongMessage":
             return try await DebugRPCChat.simulateLongMessage(params: params)
+        case "chat.debugRemoveMessages":
+            return try await DebugRPCChat.debugRemoveMessages(params: params)
+        case "chat.deleteFromMessage":
+            return try await DebugRPCChat.deleteFromMessage(params: params)
         #if DEBUG
         // MARK: Voice correction (design §10) — DEBUG-only, like the rest of this block.
         case "debug.voiceCorrection.confusionList":
@@ -413,6 +499,14 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await VoiceCorrectionDebugRPC.rebuildVocabulary(params: params)
         case "debug.voiceCorrection.metrics":
             return try await VoiceCorrectionDebugRPC.metrics(params: params)
+        case "debug.voiceCorrection.vocabularyStats":
+            return try await VoiceCorrectionDebugRPC.vocabularyStats(params: params)
+        case "debug.voiceCorrection.traceList":
+            return try await VoiceCorrectionDebugRPC.traceList(params: params)
+        case "debug.voiceCorrection.traceManualEdits":
+            return try await VoiceCorrectionDebugRPC.traceManualEdits(params: params)
+        case "debug.voiceCorrection.traceClear":
+            return try await VoiceCorrectionDebugRPC.traceClear(params: params)
         case "debug.voiceCorrection.injectConfusionRecord":
             return try await VoiceCorrectionDebugRPC.injectConfusionRecord(params: params)
         case "debug.voiceCorrection.recordManualEdit":
@@ -634,6 +728,49 @@ final class DebugJSONRPC: @unchecked Sendable {
         return ["traces": AgentRequestTrace.shared.getAll()]
     }
 
+    /// [T-debug-trace-pause-clear] Drop recorded traces and free their memory.
+    ///
+    /// Clears BOTH in-memory recorders by default, because they are two halves
+    /// of the same capture and clearing only one leaves the heap held by the
+    /// other: `AgentRequestTrace` holds the step timeline, while
+    /// `LastAPIRequestBody` holds the request/response BODIES — the latter is
+    /// where the bulk actually sits (bodies are capped at 512KB each across a
+    /// 5-entry ring plus per-tag sticky slots). Pass `llmRequests: false` to
+    /// clear the step traces alone.
+    private func handleAgentTraceClear(params: [String: Any]) -> Any {
+        let alsoLLM = params["llmRequests"] as? Bool ?? true
+        let freedTraces = AgentRequestTrace.shared.clear()
+        var result: [String: Any] = [
+            "clearedTraces": freedTraces,
+            "clearedLLMRequests": false,
+        ]
+        if alsoLLM {
+            let before = LastAPIRequestBody.shared.getAll().count
+            LastAPIRequestBody.shared.clear()
+            result["clearedLLMRequests"] = true
+            result["clearedLLMRequestCount"] = before
+        }
+        return result
+    }
+
+    /// [T-debug-trace-pause-clear] Stop/resume recording, so a captured state
+    /// can be inspected without later requests overwriting or growing it.
+    ///
+    /// Applies to both recorders for the same reason as clear. Omitting
+    /// `paused` reports the current state without changing it, so a client can
+    /// poll before deciding.
+    private func handleAgentTracePause(params: [String: Any]) -> Any {
+        let alsoLLM = params["llmRequests"] as? Bool ?? true
+        if let paused = params["paused"] as? Bool {
+            AgentRequestTrace.shared.setPaused(paused)
+            if alsoLLM { LastAPIRequestBody.shared.setPaused(paused) }
+        }
+        return [
+            "paused": AgentRequestTrace.shared.isPaused,
+            "llmRequestsPaused": LastAPIRequestBody.shared.isPaused,
+        ]
+    }
+
     private func handleLLMRequests(params: [String: Any]) -> Any {
         let requests = LastAPIRequestBody.shared.getAll()
         let last = params["last"] as? Int
@@ -846,6 +983,28 @@ final class DebugJSONRPC: @unchecked Sendable {
             LoggingManager.shared.isEnabled = enabled
         }
         return ["enabled": enabled]
+    }
+
+    // MARK: - Tool-exec Breadcrumb Handlers
+
+    /// Flip the durable `[ToolExec]` breadcrumb on/off at runtime. The state is
+    /// persisted, so it survives the Jetsam/SIGKILL restarts this breadcrumb
+    /// exists to investigate.
+    private func handleToolExecSetEnabled(params: [String: Any]) throws -> Any {
+        guard let enabled = params["enabled"] as? Bool else {
+            throw RPCError(code: -32602, message: "Invalid params: 'enabled' (bool) is required")
+        }
+        CrashReporter.toolBreadcrumbEnabled = enabled
+        return CrashReporter.toolBreadcrumbStatus()
+    }
+
+    /// Current switch state plus the breadcrumb file's path/size, so a caller
+    /// can decide whether to follow up with `debug.readFile`. No dedicated read
+    /// method: the file is a plain text file under Application Support and
+    /// `debug.readFile` already handles it — the `path` returned here is what
+    /// you feed it.
+    private func handleToolExecGetStatus() -> Any {
+        CrashReporter.toolBreadcrumbStatus()
     }
 
     // MARK: - Screenshot Handler
@@ -1971,6 +2130,12 @@ final class DebugJSONRPC: @unchecked Sendable {
                     let waitResult = ctx.sem.wait(timeout: .now() + timeout)
                     if waitResult == .timedOut {
                         ISHShellExecutor.killProcess(pid, withSignal: 9)
+                        // [T-ish-shell-timeout-leak] Same self-heal as the
+                        // agent path: don't leave teardown to an exit
+                        // notification that a zombie-reaped task never sends,
+                        // or this context and its reader threads leak for the
+                        // life of the process.
+                        ISHShellExecutor.finalizeTimedOutPid(pid)
                         continuation.resume(returning: (ctx.result, true))
                         return
                     }
@@ -2051,6 +2216,65 @@ final class DebugJSONRPC: @unchecked Sendable {
         var result: ISHShellExecutionResult?
     }
 
+    /// [T-ish-cluster-hitrate] Cluster-commit effectiveness, read live during a
+    /// workload. Reports the hit rate AND the reason for every miss, plus the
+    /// all-paths anonymous mmap totals the rate has to be read against, plus
+    /// the host footprint so the guest/host ratio can be computed from one
+    /// consistent sample instead of correlating two clocks by hand.
+    private func handleISHMemStats() -> Any {
+        var calls: UInt64 = 0, full: UInt64 = 0, single: UInt64 = 0
+        var whyMapped: UInt64 = 0, whyFlags: UInt64 = 0
+        var whyNoCluster: UInt64 = 0, whyEnomem: UInt64 = 0
+        var pagesCommitted: UInt64 = 0
+        ish_cluster_stats(&calls, &full, &single, &whyMapped, &whyFlags,
+                          &whyNoCluster, &whyEnomem, &pagesCommitted)
+
+        var anonMmaps: UInt64 = 0, anonPages: UInt64 = 0
+        ish_anon_mmap_stats(&anonMmaps, &anonPages)
+
+        let hostPage = UInt64(getpagesize())
+        let guestPage: UInt64 = 4096
+        // What the anonymous mappings cost the host vs what the guest got.
+        // Multi-page mappings pack perfectly; only single-page ones waste.
+        let guestBytes = anonPages * guestPage
+        let hostBytes = anonMmaps > 0
+            ? (anonPages &* guestPage &+ (anonMmaps &* (hostPage &- 1)))
+            : 0
+
+        var footprintMB: Double = 0
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            footprintMB = Double(info.phys_footprint) / (1024 * 1024)
+        }
+
+        let decided = full &+ single
+        return [
+            "clusterCalls": calls,
+            "clusterFull": full,
+            "clusterSingle": single,
+            "clusterHitRatePct": decided > 0 ? Double(full) * 100.0 / Double(decided) : 0,
+            "missWhyNeighbourMapped": whyMapped,
+            "missWhySameFlagsRefused": whyFlags,
+            "missWhyHostPageEqualsGuest": whyNoCluster,
+            "missWhyClusterMmapFailed": whyEnomem,
+            "clusterPagesCommitted": pagesCommitted,
+            "avgPagesPerClusterCall": decided > 0 ? Double(pagesCommitted) / Double(decided) : 0,
+            "anonMmapCalls": anonMmaps,
+            "anonPagesMapped": anonPages,
+            "anonGuestMB": Double(guestBytes) / (1024 * 1024),
+            "anonHostMBUpperBound": Double(hostBytes) / (1024 * 1024),
+            "avgPagesPerAnonMmap": anonMmaps > 0 ? Double(anonPages) / Double(anonMmaps) : 0,
+            "hostPageSize": hostPage,
+            "appFootprintMB": footprintMB,
+        ]
+    }
+
     private func handleAppInfo(params: [String: Any] = [:]) -> Any {
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -2077,6 +2301,11 @@ final class DebugJSONRPC: @unchecked Sendable {
             "dataPath": dataPath.path,
             "rootfsPath": docs.appendingPathComponent("alpine-rootfs").path,
             "bundlePath": bundlePath,
+            // [T-ish-shell-timeout-leak] Reader-thread accounting. `liveReaders`
+            // should sit at 0 between commands; a value that only grows is the
+            // shell timeout leak recurring, and it ends with the app unable to
+            // run any command until the device restarts.
+            "shellLeakGuard": ISHShellExecutor.leakGuardStatus(),
             "buildDate": buildDate,
         ]
 
@@ -2528,6 +2757,161 @@ final class DebugJSONRPC: @unchecked Sendable {
                                      in: nil)
         }
         return ["ok": true, "start": ["x": x, "y": y], "delta": ["x": deltaX, "y": deltaY]] as [String: Any]
+    }
+
+    /// debug.openSession — bring a specific chat session to the foreground.
+    ///
+    /// [T-ios-render-collapse-ca-limit] Photographing a specific conversation
+    /// needs the chat view for THAT session actually frontmost.
+    /// `debug.screenshot` captures the topmost view, and on iPhone the session
+    /// list sits above the chat, so a harness that injects into session X and
+    /// then screenshots keeps photographing the list instead. `debug.tap`
+    /// cannot fix it: synthetic taps do not resolve against SwiftUI `List`
+    /// rows (they miss the hit-test), and a coordinate tap opens whichever
+    /// row happens to be at that point — not the session under test.
+    ///
+    /// This posts the SAME `.openSessionFromIntent` notification that Siri
+    /// intents, deep links and the sessions offload already use, so it drives
+    /// the app's real navigation path (including the iPhone
+    /// `switchToSession` vs iPad `openSession` split) rather than a
+    /// debug-only shortcut that could diverge from production behaviour.
+    ///
+    /// The session id is validated first so a typo fails loudly instead of
+    /// posting a notification that silently does nothing.
+    /// debug.agentCallback.openSheet — open the detail sheet for an
+    /// `<agent_callback>` message. [T-p3-agent-callback-cell] Params:
+    /// `text` (the raw callback XML), or `sessionId` — the last callback
+    /// message of that (cached, on-screen) session is used. Synthesized taps
+    /// cannot reach the SwiftUI cell, so this posts the same notification.
+    private func handleOpenAgentCallbackSheet(params: [String: Any]) async throws -> Any {
+        let callback: AgentCallback? = await MainActor.run {
+            if let text = params["text"] as? String, !text.isEmpty {
+                return AgentCallback.parse(text)
+            }
+            guard let sid = params["sessionId"] as? String,
+                  let vm = ViewModelCache.shared.get(for: sid) else { return nil }
+            return vm.messages.reversed().lazy.compactMap { $0.agentCallback }.first
+        }
+        guard let callback else {
+            throw RPCError(code: -32602, message: "No agent callback message found")
+        }
+        await MainActor.run {
+            NotificationCenter.default.post(name: .openAgentCallback, object: nil,
+                                            userInfo: ["callback": callback])
+        }
+        return ["ok": true, "kind": callback.kind.rawValue, "job": callback.jobId, "status": callback.status]
+    }
+
+    /// debug.agent.openToolSheet — open the regular tool sheet (ToolLiveSheet
+    /// + HelperDetailCard) for the LAST delegate_task block of `sessionId`,
+    /// i.e. what a tap on the inline block or the tool bar opens.
+    /// [T-agent-tool-sheet-unified] Synthesized taps cannot reach SwiftUI.
+    private func handleOpenAgentToolSheet(params: [String: Any]) async throws -> Any {
+        guard let sid = params["sessionId"] as? String else {
+            throw RPCError(code: -32602, message: "Missing required param: sessionId")
+        }
+        let block: AssistantBlock? = await MainActor.run {
+            guard let vm = ViewModelCache.shared.get(for: sid) else { return nil }
+            for msg in vm.messages.reversed() where msg.role == .assistant {
+                if let b = msg.blocks.last(where: { if case .delegateTool = $0.kind { return true }; return false }) { return b }
+            }
+            return nil
+        }
+        guard let block else { throw RPCError(code: -32602, message: "No delegate_task block in that session") }
+        await MainActor.run {
+            NotificationCenter.default.post(name: .openAgentCallback, object: nil, userInfo: ["block": block])
+        }
+        return ["ok": true, "toolUseId": block.toolUseId ?? ""]
+    }
+
+    /// debug.helper.openSheet — open the read-only helper mirror sheet for a
+    /// child session on whatever chat is on screen. [T-p1-delegate-task]
+    /// The capsule and the delegate block are SwiftUI tap targets that the
+    /// synthesized-tap ladder cannot reach without iCTRL; this is the same
+    /// notification the P2 notification-tap path will post.
+    private func handleOpenHelperSheet(params: [String: Any]) async throws -> Any {
+        guard let childId = params["childSessionId"] as? String, !childId.isEmpty else {
+            throw RPCError(code: -32602, message: "Missing required param: childSessionId")
+        }
+        guard let child = await ChatStore.shared.getSession(childId) else {
+            throw RPCError(code: -32602, message: "Session not found: \(childId)")
+        }
+        let title = AgentJobRegistry.stripChildSessionTitlePrefix(child.title ?? "")
+        await MainActor.run {
+            NotificationCenter.default.post(name: .openHelperSheet, object: nil,
+                                            userInfo: ["childSessionId": childId, "title": title,
+                                                       "parentSessionId": child.parentSessionId ?? ""])
+        }
+        return ["ok": true, "childSessionId": childId, "parentSessionId": child.parentSessionId ?? ""] as [String: Any]
+    }
+
+    private func handleOpenSession(params: [String: Any]) async throws -> Any {
+        guard let sessionId = params["sessionId"] as? String, !sessionId.isEmpty else {
+            throw RPCError(code: -32602, message: "Missing required param: sessionId")
+        }
+        let sessions = await ChatStore.shared.listSessions()
+        guard sessions.contains(where: { $0.id == sessionId }) else {
+            throw RPCError(code: -32602, message: "Session not found: \(sessionId)")
+        }
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .openSessionFromIntent,
+                object: nil,
+                userInfo: ["sessionId": sessionId]
+            )
+        }
+        return ["ok": true, "sessionId": sessionId] as [String: Any]
+    }
+
+    /// debug.scrollOffset — read or SET the chat collection view's
+    /// contentOffset.y directly.
+    ///
+    /// [T-ios-render-collapse-ca-limit] `debug.scroll` posts a synthetic pan,
+    /// which stalls inside a cell whose layer exceeds the Core Animation
+    /// backing limit — exactly the case we need to photograph. Writing
+    /// contentOffset bypasses the gesture layer entirely, so a repro harness
+    /// can page through a 9700pt+ cell one screen at a time deterministically.
+    /// Omit `y` to just read the current position.
+    private func handleScrollOffset(params: [String: Any]) async throws -> Any {
+        return try await MainActor.run {
+            var found: UIScrollView?
+            func walk(_ v: UIView) {
+                if found != nil { return }
+                if let sv = v as? UIScrollView, sv.contentSize.height > sv.bounds.height * 1.5 {
+                    found = sv
+                    return
+                }
+                for sub in v.subviews { walk(sub) }
+            }
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+            for window in windows { walk(window) }
+            guard let sv = found else {
+                throw RPCError(code: -32000, message: "No scrollable collection view found")
+            }
+            if let y = params["y"] as? Double {
+                // [T-ios-render-collapse-ca-limit] The list coordinator pins the
+                // offset to the bottom while `scrollMode == .autoScrolling`, so a
+                // plain setContentOffset is snapped back within a frame. Tell the
+                // delegate the user is browsing first — same transition a real
+                // drag causes — so the requested offset actually sticks.
+                if let coord = sv.delegate as? CollectionViewMessageListV3.Coordinator {
+                    coord.scrollMode = .userBrowsing
+                }
+                let maxY = max(0, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+                let clamped = min(max(CGFloat(y), -sv.adjustedContentInset.top), maxY)
+                sv.setContentOffset(CGPoint(x: sv.contentOffset.x, y: clamped), animated: false)
+                sv.layoutIfNeeded()
+            }
+            return [
+                "offsetY": Double(sv.contentOffset.y),
+                "contentHeight": Double(sv.contentSize.height),
+                "boundsHeight": Double(sv.bounds.height),
+                "insetTop": Double(sv.adjustedContentInset.top),
+                "insetBottom": Double(sv.adjustedContentInset.bottom),
+            ] as [String: Any]
+        }
     }
 
     // MARK: - JSON Response Helpers

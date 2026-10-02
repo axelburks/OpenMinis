@@ -271,7 +271,16 @@ class ModelUseOffloadHandler(
             )
         val instance = providerRepository.instance(entry.providerInstanceId)
             ?: return NativeOffloadResult(2, "minis-model-use run: provider instance not found\n")
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, context, entry)
+        // [T-android-opencode-subtask-session] The calling chat's id, so an
+        // OpenCode Go model gets its required `x-opencode-session` header and
+        // does not answer 400 "Request is missing x-opencode-session". This
+        // run is that chat's traffic (iOS b99e4da87 / 4d002af1c tag it the
+        // same way). The header itself is still gated on the OpenCode host and
+        // on a persisted id inside the provider, so no other endpoint sees it.
+        val provider = ProviderFactory.create(
+            instance, apiKey, entry.model, context,
+            entry = entry, sessionId = request.sessionId, overrides = entry.overrides,
+        )
 
         // [GH#67] input_audio serialization is implemented for the OpenAI
         // chat/completions + responses paths only. Other provider types would
@@ -368,7 +377,7 @@ class ModelUseOffloadHandler(
             provider = provider,
             inputJson = inputText,
             fallbackPromptMessages = nonSystem,
-            hasInputImages = imageParts.isNotEmpty(),
+            inputImages = imageParts,
             outputPath = outputPath,
             outputExt = outputExt,
             sessionId = request.sessionId,
@@ -402,6 +411,18 @@ class ModelUseOffloadHandler(
         // --output has a media extension, else fall back to text. Mirrors iOS
         // ModelUseOffloadBridge.performRun (non-streaming branch).
         val sessionId = request.sessionId
+        // [T-android-model-use-no-media-fails] A run that had to produce media
+        // — the caller asked for a .png/.mp3/... output, or the model can only
+        // output images — and got none must FAIL, not exit 0. Otherwise the
+        // agent reads success, writes ![](minis://attachments/...) for a file
+        // that was never written, and the user sees an image that "exists"
+        // but cannot be opened. That included writing the model's text reply
+        // INTO the requested out.png, so the phantom even had a file.
+        val mediaRequired = (outputPath != null && (isImageExt(outputExt) || isAudioExt(outputExt) || isVideoExt(outputExt))) ||
+            ("image" in outputs && "text" !in outputs)
+        if (mediaRequired && response.mediaAttachments.isEmpty()) {
+            return noMediaResult(entry, response.text, outputPath, endpoint = "chat")
+        }
         val mediaFiles = JSONArray()
         val ts = System.currentTimeMillis() / 1000
         val modelSlug = entry.model.id.replace("/", "_")
@@ -1036,7 +1057,7 @@ class ModelUseOffloadHandler(
         provider: com.openminis.app.provider.LLMProvider,
         inputJson: String,
         fallbackPromptMessages: List<ParsedMessage>,
-        hasInputImages: Boolean,
+        inputImages: List<LLMMessage.ImagePart>,
         outputPath: String?,
         outputExt: String,
         sessionId: String?,
@@ -1083,31 +1104,17 @@ class ModelUseOffloadHandler(
         // models keep auto/probe/fallback.
         val isPureImageGenerator = "image" in outputs && "text" !in outputs
 
-        // [T-android-image-endpoint-edit-gap] iOS routes input-image requests to
-        // /v1/images/edits (image-to-image); Android has no editImage endpoint
-        // yet. Rather than silently DROP the input image into a text-to-image
-        // generateImage call (the model would ignore the reference image and
-        // the user wouldn't know), handle the two cases explicitly:
-        //   - mixed text+image model: decline the images route → fall through to
-        //     the chat path below, which forwards imageParts to the model so the
-        //     reference image is at least seen.
-        //   - pure image generator: chat can't serve it, so return a clear error
-        //     telling the caller image editing isn't supported here.
-        if (hasInputImages) {
-            if (isPureImageGenerator) {
-                return NativeOffloadResult(
-                    2,
-                    JSONObject().put("error", "image_edit_not_supported")
-                        .put(
-                            "message",
-                            "Image-to-image editing (input image + ${entry.model.displayName}) is not supported by minis-model-use on Android yet — only text-to-image generation. Omit the input image, or use a model that also supports text output so the image can be passed via chat.",
-                        )
-                        .toString() + "\n",
-                )
-            }
+        // [T-android-image-edit-endpoint] Input-image requests now route to
+        // /v1/images/edits via editImage, matching iOS ModelUseOffloadBridge —
+        // the endpoint whose absence made this return image_edit_not_supported.
+        // Only a PURE image generator takes that route: a mixed text+image model
+        // still declines to chat, which forwards imageParts to the model and is
+        // the better channel for "look at this image and answer" requests. That
+        // split is the pre-existing guard semantics, deliberately unchanged.
+        if (inputImages.isNotEmpty() && !isPureImageGenerator) {
             Log.i(
                 TAG,
-                "[ModelUseRoute] input images present for ${entry.model.id} — declining images route (no editImage), falling through to chat so images are forwarded",
+                "[ModelUseRoute] input images present for ${entry.model.id} (text+image model) — declining images route, falling through to chat so images are forwarded",
             )
             return null
         }
@@ -1133,9 +1140,15 @@ class ModelUseOffloadHandler(
         // is terminal (no silent fallback) so the caller sees the real error.
         if (effectiveMode == com.openminis.app.data.model.ImageEndpointMode.imagesGenerations) {
             val response = try {
-                runBlocking { openAI.generateImage(prompt, cfg.n, cfg.size, cfg.quality) }
+                runBlocking {
+                    if (inputImages.isEmpty()) {
+                        openAI.generateImage(prompt, cfg.n, cfg.size, cfg.quality)
+                    } else {
+                        openAI.editImage(prompt, inputImages, cfg.n, cfg.size, cfg.quality)
+                    }
+                }
             } catch (e: Throwable) {
-                Log.w(TAG, "[ModelUseRoute] images/generations (forced) failed: ${e.message}", e)
+                Log.w(TAG, "[ModelUseRoute] images/${if (inputImages.isEmpty()) "generations" else "edits"} (forced) failed: ${e.message}", e)
                 val hint = imageParamHint(entry)
                 val base = e.message ?: "image_generation_failed"
                 return NativeOffloadResult(
@@ -1151,7 +1164,13 @@ class ModelUseOffloadHandler(
         // auto mode: probe /images/generations; cache the result; on a
         // route-missing 4xx, cache chatCompletions and fall through to chat.
         val response = try {
-            runBlocking { openAI.generateImage(prompt, cfg.n, cfg.size, cfg.quality) }.also {
+            runBlocking {
+                if (inputImages.isEmpty()) {
+                    openAI.generateImage(prompt, cfg.n, cfg.size, cfg.quality)
+                } else {
+                    openAI.editImage(prompt, inputImages, cfg.n, cfg.size, cfg.quality)
+                }
+            }.also {
                 providerRepository.setImageEndpointResolved(
                     instance.id, com.openminis.app.data.model.ImageEndpointMode.imagesGenerations,
                 )
@@ -1197,6 +1216,12 @@ class ModelUseOffloadHandler(
     ): NativeOffloadResult {
         val mediaFiles = JSONArray()
         val firstMedia = response.mediaAttachments.firstOrNull()
+        // [T-android-model-use-no-media-fails] The image endpoint exists to
+        // return an image; an empty list (content filter, quota, provider
+        // quirk) is a failure, never a success with a warning attached.
+        if (firstMedia == null) {
+            return noMediaResult(entry, response.text, outputPath, endpoint = endpointUsed)
+        }
         val ts = System.currentTimeMillis() / 1000
         val modelSlug = entry.model.id.replace("/", "_")
         if (outputPath != null) {
@@ -1253,9 +1278,36 @@ class ModelUseOffloadHandler(
             put("image_endpoint", endpointUsed)
             if (outputPath != null) put("output_file", outputPath)
             if (mediaFiles.length() > 0) put("media_files", mediaFiles)
-            if (firstMedia == null) put("warning", "Image endpoint returned no image data.")
         }
         return NativeOffloadResult(0, body.toString(2) + "\n")
+    }
+
+    /**
+     * [T-android-model-use-no-media-fails] Exit 1 with a machine-readable
+     * error and the model's own text (usually the refusal / moderation
+     * reason), and no file written — so neither the exit code nor the disk
+     * suggests an image exists.
+     */
+    private fun noMediaResult(
+        entry: ModelEntry,
+        text: String,
+        outputPath: String?,
+        endpoint: String,
+    ): NativeOffloadResult {
+        Log.w(TAG, "[ModelUseNoMedia] model=${entry.model.id} endpoint=$endpoint output=$outputPath textLen=${text.length}")
+        val body = JSONObject().apply {
+            put("error", "no_media_generated")
+            put(
+                "message",
+                "The model returned no image/media (often a content-policy refusal or quota limit). " +
+                    "Nothing was saved" + (outputPath?.let { " to $it" } ?: "") +
+                    ". Do not reference a generated file; tell the user it failed and why.",
+            )
+            put("model", entry.model.id)
+            put("endpoint", endpoint)
+            if (text.isNotBlank()) put("model_text", text.take(2000))
+        }
+        return NativeOffloadResult(1, body.toString(2) + "\n")
     }
 
     /**
@@ -1293,7 +1345,7 @@ class ModelUseOffloadHandler(
         Log.i(
             "ModelUseImage",
             "[ModelUseWrite] path=$responsePath hostFile=${hostFile.absolutePath} " +
-                "sessionId=$sessionId globalAttachMount=${PRootKernel.bindMounts["/var/minis/attachments"]}",
+                "sessionId=$sessionId",
         )
     }
 
@@ -1316,7 +1368,9 @@ class ModelUseOffloadHandler(
                   {"messages":[{"role":"user","content":"<prompt>"}],
                    "generation_config":{"aspect_ratio":"16:9","image_size":"2K"}}
             """.trimIndent()
-            ProviderType.openAI, ProviderType.openRouter -> """
+            // [T-android-provider-type-parity] Same /v1/images/generations
+            // shape as OpenAI.
+            ProviderType.openAI, ProviderType.openRouter, ProviderType.openAIResponses -> """
                 Hint — ${entry.model.displayName} is an OpenAI-compatible image model. Pass image params at the top level of the input JSON (matches /v1/images/generations):
                   n         integer, number of images (default 1)
                   size      "1024x1024" | "1792x1024" | "1024x1792" | etc.
@@ -1336,7 +1390,12 @@ class ModelUseOffloadHandler(
             """.trimIndent()
             // xAI (Grok) / Kimi Coding have no image-output models in the
             // current catalog — fall through to empty hint like Anthropic.
-            ProviderType.anthropic, ProviderType.xAI, ProviderType.kimiCode, null -> ""
+            ProviderType.anthropic, ProviderType.xAI, ProviderType.kimiCode,
+            // [T-copilot-provider] Copilot exposes no image-output model.
+            ProviderType.githubCopilot,
+            // [T-android-provider-type-parity] No image-param hint for types
+            // this build cannot drive.
+            ProviderType.antigravity, ProviderType.unsupported, null -> ""
         }
     }
 

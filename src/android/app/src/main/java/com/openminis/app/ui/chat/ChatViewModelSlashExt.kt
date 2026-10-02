@@ -98,7 +98,7 @@ import java.io.ByteArrayOutputStream
  *  for this session never appeared in the `/` picker even though the
  *  prompt-injection path ([SkillRepository.skillPromptFragment]) already
  *  honored the override — the agent knew about the skill but the user
- *  couldn't surface it via slash. (DM 𝙓𝙄𝙉 304891.)
+ *  couldn't surface it via slash.
  */
 internal fun ChatViewModel.filteredSlashCommands(): List<SlashCommand> {
     val filter = _slashFilter.value.lowercase()
@@ -262,6 +262,26 @@ internal fun ChatViewModel.dismissSlashMenu(currentInput: String): String {
         return saved
     }
     return if (currentInput.startsWith("/") || currentInput.startsWith("／")) "" else currentInput
+}
+
+/**
+ * [T-android-slash-send-keeps-text] End the slash session because the composer
+ * was SENT.
+ *
+ * Unlike [dismissSlashMenu] this restores nothing and returns nothing: the body
+ * text has just been sent as a message, so the stashed original must be dropped
+ * rather than written back into the (now cleared) composer. Without this, the
+ * "/" button's over-content mode survived the send and the just-sent text
+ * reappeared in the input — reported on Android only.
+ *
+ * Safe to call unconditionally: when no slash session is open every assignment
+ * below is already its own value.
+ */
+internal fun ChatViewModel.endSlashSessionForSend() {
+    savedInputBeforeSlash = null
+    _showSlashMenu.value = false
+    _slashMenuSelectedIndex.value = -1
+    _slashFilter.value = ""
 }
 
 internal fun ChatViewModel.slashMenuSetSelectedIndex(index: Int) {

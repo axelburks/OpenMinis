@@ -73,6 +73,7 @@ import com.openminis.app.data.MountedFoldersStore
 import com.openminis.app.data.SafMountHelper
 import com.openminis.app.ui.components.DialogTextField
 import kotlinx.coroutines.launch
+import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
  * Settings → Mount External Folders. Mirrors iOS MountedFoldersSettingsView.
@@ -97,6 +98,11 @@ fun MountedFoldersScreen(
     var pendingPickedUri by remember { mutableStateOf<Uri?>(null) }
     var pendingDefaultName by remember { mutableStateOf("") }
     var addError by remember { mutableStateOf<String?>(null) }
+
+    // [T-android-mount-picker-landing] Shown once before handing off to the
+    // system picker, explaining that Android forbids mounting the storage root.
+    // See showPicker() below for why this is needed.
+    var showPickerIntro by remember { mutableStateOf(false) }
 
     // T219 follow-up: re-read all-files-access state on every ON_RESUME so
     // returning from the system Settings page (where the user toggles the
@@ -180,7 +186,7 @@ fun MountedFoldersScreen(
                                     ),
                                 )
                             } else {
-                                pickerLauncher.launch(null)
+                                showPickerIntro = true
                             }
                         },
                         enabled = !isAtCapacity,
@@ -323,7 +329,84 @@ fun MountedFoldersScreen(
             text = { Text(msg) },
         )
     }
+
+    // [T-android-mount-picker-landing] GH#93: the system picker used to open at
+    // whatever location it liked — on the reporter's Xiaomi that was the shared
+    // storage ROOT, where Android shows "无法使用此文件夹 / can't use this folder",
+    // greys out "Use this folder", and (being already the top level) offers no
+    // way back. The user reads that as being trapped.
+    //
+    // Two halves to the fix; this is the half we control from our side of the
+    // hand-off. The picker's own chrome belongs to the system + OEM, so we
+    // cannot add a back button to it — what we CAN do is (a) explain the
+    // restriction in our own words before the user leaves our UI, and
+    // (b) land them somewhere selectable (see initialPickerUri()).
+    if (showPickerIntro) {
+        AlertDialog(
+            onDismissRequest = { showPickerIntro = false },
+            title = { Text(stringResource(R.string.mount_picker_intro_title)) },
+            text = { Text(stringResource(R.string.mount_picker_intro_message)) },
+            confirmButton = {
+                MinisTextButton(onClick = {
+                    showPickerIntro = false
+                    // [T-android-mount-picker-anf] OpenDocumentTree fires
+                    // ACTION_OPEN_DOCUMENT_TREE, and some OEM ROMs ship without a
+                    // resolvable DocumentsUI (field crash: OnePlus 8T / ColorOS,
+                    // ActivityNotFoundException straight out of
+                    // startActivityForResult). Catch it and tell the user instead
+                    // of dying. A resolveActivity pre-check is deliberately NOT
+                    // used as a gate: under package-visibility filtering it can
+                    // report null on devices where the picker launches fine, which
+                    // would disable mounting for everyone to protect a few.
+                    try {
+                        pickerLauncher.launch(initialPickerUri())
+                    } catch (e: android.content.ActivityNotFoundException) {
+                        com.openminis.app.logging.AppLogger.warning("MountedFolders", "document-tree picker unavailable: ${e.message}")
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.mount_picker_unavailable),
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }) {
+                    Text(stringResource(R.string.mount_picker_intro_continue))
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { showPickerIntro = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
 }
+
+/**
+ * [T-android-mount-picker-landing] Where the system folder picker should open.
+ *
+ * Returning null (the old behaviour) lets the picker choose, and on some ROMs
+ * that is the shared-storage ROOT — the one place Android refuses to grant
+ * (blocked since Android 11, alongside Android/data and Android/obb). The user
+ * lands on a greyed-out "Use this folder" with no parent left to go back to,
+ * which is exactly what GH#93 reported.
+ *
+ * `Documents` is chosen because it satisfies all three constraints at once:
+ *  • NOT on Android's blocked list, so it is actually selectable;
+ *  • always present on a real device (a non-existent initial URI is silently
+ *    ignored, which would drop the user back at the broken default);
+ *  • one level below the root, so the breadcrumb still lets them navigate
+ *    anywhere else — this positions the user without deciding for them.
+ *
+ * Media dirs (DCIM/Pictures/Music/Movies) were rejected as too narrow in
+ * meaning, and Download as more "transient scratch" than the long-lived folder
+ * a mount implies.
+ */
+private fun initialPickerUri(): Uri? = runCatching {
+    DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        "primary:Documents",
+    )
+}.getOrNull()
 
 @Composable
 private fun InfoBanner() {
@@ -433,7 +516,7 @@ private fun ListHeader(count: Int, atCapacity: Boolean) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = stringResource(R.string.mount_folders_title).uppercase(),
+            text = stringResource(R.string.mount_folders_title).uppercaseForDisplay(),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.Medium,
@@ -602,7 +685,7 @@ private fun AddMountSheet(
                     )
                 }
                 Spacer(Modifier.width(12.dp))
-                Switch(checked = allowWrite, onCheckedChange = { allowWrite = it })
+                SettingsSwitch(checked = allowWrite, onCheckedChange = { allowWrite = it })
             }
 
             Spacer(Modifier.height(20.dp))

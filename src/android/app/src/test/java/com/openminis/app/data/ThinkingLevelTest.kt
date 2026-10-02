@@ -168,10 +168,12 @@ class ThinkingLevelTest {
     }
 
     /**
-     * The repository's Json instance uses coerceInputValues so an unknown enum
-     * value in a persisted blob falls back to the property default instead of
-     * throwing SerializationException. This is what stops a newer-build config
-     * from wiping the UI when read by an older build.
+     * The repository's Json instance uses coerceInputValues. ThinkingLevel no
+     * longer relies on it: [ThinkingLevelSerializer] reads the value as a plain
+     * string, so an unknown level (one a NEWER build wrote) clamps to XHIGH —
+     * the same rule as [ThinkingLevel.decoded] and iOS — instead of being
+     * coerced to null. It still never throws, so the config is never wiped.
+     * [T-android-restore-thinking-level]
      */
     private val json = Json {
         ignoreUnknownKeys = true
@@ -184,9 +186,31 @@ class ThinkingLevelTest {
         val wire = """{"id":"g1","name":"G","memberEntryIds":[],"defaultThinkingDefinitionId":"custom-uuid"}"""
         val group = json.decodeFromString(ModelGroup.serializer(), wire)
         val encoded = json.encodeToString(ModelGroup.serializer(), group)
-
         assertTrue(encoded.contains(""""defaultThinkingDefinitionId":"custom-uuid""""))
         assertEquals("G", group.name)
+    }
+
+    @Test
+    fun modelOverrides_unknownMaxThinkingLevel_clampsToXHigh() {
+        val wire = """{"maxThinkingLevel":"SUPREME","displayName":"X"}"""
+        val ov = json.decodeFromString(ModelOverrides.serializer(), wire)
+        assertEquals(ThinkingLevel.XHIGH, ov.maxThinkingLevel)
+        assertEquals("X", ov.displayName)
+    }
+
+    @Test
+    fun decoded_acceptsIosRawValues() {
+        assertEquals(ThinkingLevel.HIGH, ThinkingLevel.decoded("high"))
+        assertEquals(ThinkingLevel.MAX, ThinkingLevel.decoded("max"))
+        assertEquals(ThinkingLevel.OFF, ThinkingLevel.decoded("off"))
+        assertEquals(null, ThinkingLevel.parseOrNull("SUPREME"))
+    }
+
+    @Test
+    fun modelOverrides_knownMaxThinkingLevel_roundTrips() {
+        val wire = """{"maxThinkingLevel":"MAX"}"""
+        val ov = json.decodeFromString(ModelOverrides.serializer(), wire)
+        assertEquals(ThinkingLevel.MAX, ov.maxThinkingLevel)
     }
 
     @Test
@@ -206,14 +230,8 @@ class ThinkingLevelTest {
         val decoded = json.decodeFromString(ModelOverrides.serializer(), encoded)
 
         assertEquals("globe", decoded.requestBodyControls.single().iconName)
-        assertEquals(
-            "#123456",
-            decoded.requestBodyControls.single().sliderStartColorHex,
-        )
-        assertEquals(
-            "#ABCDEF",
-            decoded.requestBodyControls.single().sliderEndColorHex,
-        )
+        assertEquals("#123456", decoded.requestBodyControls.single().sliderStartColorHex)
+        assertEquals("#ABCDEF", decoded.requestBodyControls.single().sliderEndColorHex)
         assertEquals(
             "custom_level_1",
             ThinkingLevelRegistry.normalizedLevelId(" Custom-Level.1 "),
@@ -228,8 +246,7 @@ class ThinkingLevelTest {
             id = "thinking-control",
             title = "Thinking",
             kind = RequestBodyControl.Kind.optionGroup,
-            semanticKind =
-                RequestBodyControl.SemanticKind.thinkingBudget,
+            semanticKind = RequestBodyControl.SemanticKind.thinkingBudget,
             options = listOf(
                 RequestBodyControlOption(
                     id = optionID,
@@ -254,55 +271,32 @@ class ThinkingLevelTest {
                         supportsReasoning = true,
                     ),
                     overrides = ModelOverrides(
-                        requestBodyControls =
-                            listOf(control),
+                        requestBodyControls = listOf(control),
                     ),
                 ),
             ),
             modelGroups = mutableListOf(
                 ModelGroup(
                     name = "Group",
-                    defaultThinkingDefinitionId =
-                        definitionId,
+                    defaultThinkingDefinitionId = definitionId,
                 ),
             ),
         )
-
-        val original = ThinkingLevelDefinition(
+        val renamed = ThinkingLevelDefinition(
             definitionId = definitionId,
             levelId = "custom_old",
             title = "Custom",
             rank = 4,
-        )
-        val renamed = original.copy(
-            levelId = "custom_new",
-        )
+        ).copy(levelId = "custom_new")
 
         assertEquals(definitionId, renamed.definitionId)
-        val options =
-            config.modelEntries.single()
-                .overrides.requestBodyControls
-                .single().options
+        val options = config.modelEntries.single()
+            .overrides.requestBodyControls.single().options
         assertEquals(optionID, options[0].id)
-        assertEquals(
-            definitionId,
-            options[0].thinkingDefinitionId,
-        )
-        assertEquals(
-            "high",
-            options[1].thinkingDefinitionId,
-        )
-        assertEquals(
-            definitionId,
-            config.modelGroups.single()
-                .defaultThinkingDefinitionId,
-        )
-        assertEquals(
-            2,
-            config.thinkingDefinitionReferenceCount(
-                definitionId,
-            ),
-        )
+        assertEquals(definitionId, options[0].thinkingDefinitionId)
+        assertEquals("high", options[1].thinkingDefinitionId)
+        assertEquals(definitionId, config.modelGroups.single().defaultThinkingDefinitionId)
+        assertEquals(2, config.thinkingDefinitionReferenceCount(definitionId))
     }
 
     @Test
@@ -423,9 +417,7 @@ class ThinkingLevelTest {
         )
         assertEquals(
             "Local Name",
-            merged.first {
-                it.definitionId == "shared-uuid"
-            }.title,
+            merged.first { it.definitionId == "shared-uuid" }.title,
         )
     }
 }

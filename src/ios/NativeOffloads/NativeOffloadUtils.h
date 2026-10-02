@@ -54,6 +54,23 @@ NSDate *_Nullable noff_parse_date(NSString *str);
 /// Format a date as ISO 8601 with timezone.
 NSString *noff_format_date(NSDate *date);
 
+// ── All-day event helpers ──  [T-calendar-all-day]
+
+/// YES when `str` is exactly a calendar date with no time component
+/// (`YYYY-MM-DD`, 10 characters). A caller that receives a bare date for an
+/// event's --start/--end treats the event as all-day: EventKit stores an
+/// all-day event by its day range, and a bare date carries no time to lose.
+BOOL noff_is_date_only_string(NSString *_Nullable str);
+
+/// Normalise an inclusive [start, end] pair to EventKit's all-day convention in
+/// the local calendar: `*outStart` is 00:00:00 of start's day, `*outEnd` is
+/// 23:59:59 of end's day. An end before start collapses to a single day.
+/// Computed with calendar arithmetic (not `+ 86399`) so a DST transition inside
+/// the range cannot shift the boundary onto the wrong day.
+void noff_all_day_bounds(NSDate *start, NSDate *end,
+                         NSDate *_Nonnull *_Nonnull outStart,
+                         NSDate *_Nonnull *_Nonnull outEnd);
+
 // ── JSON output ──
 
 /// Build a success envelope: {ok:true, tool, action, data, timestamp}.
@@ -76,7 +93,27 @@ void noff_emit_help(int stderr_fd, NSString *helpText);
 
 /// Synchronously dispatch a block on the main thread and return the result.
 /// Safe to call from any thread. If already on main thread, executes directly.
-id _Nullable noff_dispatch_main_sync(id _Nullable (^block)(void));
+///
+/// WARNING: this parks the CALLING thread on the main queue. If the block calls
+/// a system API that itself blocks (XPC to a daemon, dispatch_sync into another
+/// subsystem), the main thread is held for the whole duration and the app is
+/// killed by the 10s scene-update watchdog (0x8BADF00D). Only use it for work
+/// that genuinely requires the main thread — UIKit views — and that cannot
+/// block. For anything else prefer running on the offload's own thread, or
+/// `noff_dispatch_main_sync_timeout` when a main-thread hop is unavoidable.
+id _Nullable noff_dispatch_main_sync(id _Nullable (^_Nonnull block)(void));
+
+/// Bounded-wait variant: dispatches `block` to the main queue and waits at most
+/// `timeoutSeconds`. Returns the block's result, or `nil` if the wait expired
+/// (in which case `timedOut`, when non-NULL, is set to YES and the block may
+/// still run later — it must therefore not capture anything it mutates
+/// unsafely, and callers must treat the result as best-effort).
+///
+/// Exists so an unresponsive system daemon degrades into a null result instead
+/// of consuming the whole watchdog budget and killing the process.
+id _Nullable noff_dispatch_main_sync_timeout(NSTimeInterval timeoutSeconds,
+                                              BOOL *_Nullable timedOut,
+                                              id _Nullable (^_Nonnull block)(void));
 
 // ── Guest stub creation ──
 

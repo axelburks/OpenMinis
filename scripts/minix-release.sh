@@ -21,10 +21,10 @@
 # (ASC_KEY_ID / ASC_ISSUER_ID / ASC_PRIVATE_KEY_PATH) — no keychain, no prompts.
 #
 # Android signing comes from env vars (ANDROID_KEYSTORE_FILE/…_PASSWORD/KEY_ALIAS/
-# KEY_PASSWORD). Without them a release build fails fast (no debug-signing
-# fallback — a debug-signed "release" can't be shared).
+# KEY_PASSWORD). The same persistent certificate signs Debug, Perf, and Release;
+# without it a release build fails fast instead of using a machine-local key.
 #
-# Secret env files live OUTSIDE the repo (e.g. iCloud); scripts/.env (gitignored)
+# Secret env files live OUTSIDE the repo; scripts/.env (gitignored)
 # only stores their paths. The script bootstraps everything on first run: it
 # creates scripts/.env and the pointed-at asc.env / android.env as commented
 # templates when absent, and reports exactly which variables still need values.
@@ -41,6 +41,8 @@ IOS_BUNDLE_ID="com.axel.minix"
 IOS_SCHEME="Minis"
 IOS_PROJECT="$IOS_DIR/Minis.xcodeproj"
 ASC_EXTERNAL_GROUP="External"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/minix-android-toolchain.sh"
 
 PLATFORM="both"
 DO_UPLOAD=1
@@ -59,7 +61,7 @@ die() { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
 
 mkdir -p "$BUILD_OUT"
 
-# Secrets live OUTSIDE the repo (e.g. in iCloud) and are never committed. The
+# Secrets live OUTSIDE the repo and are never committed. The
 # only thing tracked here is scripts/.env — a gitignored pointer file that holds
 # paths to those secret env files plus any non-secret overrides. Layout:
 #
@@ -92,7 +94,7 @@ if write_if_absent "$ENV_FILE" <<'EOF'
 # iOS — shell file exporting ASC_KEY_ID / ASC_ISSUER_ID / ASC_PRIVATE_KEY_PATH.
 export MINIX_ASC_ENV="$HOME/.config/minix/asc.env"
 
-# Android — shell file exporting the release-signing keystore vars.
+# Android — shell file exporting the persistent Minix signing vars.
 export MINIX_ANDROID_ENV="$HOME/.config/minix/android.env"
 
 # Optional: external TestFlight group name (default: External).
@@ -125,7 +127,7 @@ then
 fi
 
 if write_if_absent "$MINIX_ANDROID_ENV" <<'EOF'
-# [Minix] Android release-signing credentials (out-of-repo secret file).
+# [Minix] Persistent Android signing credentials (out-of-repo secret file).
 # Fill in the four values, then re-run scripts/minix-release.sh android.
 export ANDROID_KEYSTORE_FILE=""      # path to minix-release.jks
 export ANDROID_KEYSTORE_PASSWORD=""
@@ -285,8 +287,8 @@ promote_ios() {
 # ---------------------------------------------------------------------------
 release_android() {
   say "Android: signed release APK"
-  # Release signing must be configured via env (no debug-signing fallback — a
-  # debug-signed "release" can't be shared/upgraded, so fail fast instead).
+  # Release signing must use the same persistent certificate as official
+  # Debug/Perf builds. Never fall back to a machine-local debug key.
   local missing=()
   [ -n "${ANDROID_KEYSTORE_FILE:-}" ]     || missing+=("ANDROID_KEYSTORE_FILE")
   [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] || missing+=("ANDROID_KEYSTORE_PASSWORD")
@@ -297,15 +299,7 @@ release_android() {
   fi
   [ -f "$ANDROID_KEYSTORE_FILE" ] || die "ANDROID_KEYSTORE_FILE not found: $ANDROID_KEYSTORE_FILE (fix in $MINIX_ANDROID_ENV)"
 
-  # Self-contained toolchain bootstrap: the script must run from a bare shell
-  # (no pre-exported JAVA_HOME/PATH/NDK). Callers should NOT need to set anything.
-  : "${JAVA_HOME:=/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
-  : "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
-  export JAVA_HOME ANDROID_HOME
-  export ANDROID_SDK_ROOT="$ANDROID_HOME"
-  export PATH="$JAVA_HOME/bin:$PATH"
-  [ -x "$JAVA_HOME/bin/java" ] || die "no JDK at JAVA_HOME=$JAVA_HOME (install Android Studio, or export JAVA_HOME)"
-  [ -d "$ANDROID_HOME" ] || die "no Android SDK at ANDROID_HOME=$ANDROID_HOME"
+  minix_setup_android_toolchain || die "JDK 17 or Android SDK not found"
   # NDK is resolved by AGP under $ANDROID_HOME/ndk/<version> automatically; we
   # deliberately don't pin ANDROID_NDK_HOME here so it can't drift from the AGP
   # default. If the matching NDK isn't installed the Gradle error says which.

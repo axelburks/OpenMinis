@@ -31,9 +31,7 @@ struct ModelGroupDetailView: View {
         var availableDefinitionIds = Set<String>()
         for entryId in group.memberEntryIds {
             guard let entry = store.entry(for: entryId) else { continue }
-            let builtInLevels = ThinkingLevel.availableLevels(
-                model: entry.model
-            )
+            let builtInLevels = ThinkingLevel.availableLevels(model: entry.model)
             availableDefinitionIds.formUnion(
                 ThinkingLevelRegistry.availableDefinitionIds(
                     controls: entry.overrides.requestBodyControls ?? [],
@@ -42,30 +40,23 @@ struct ModelGroupDetailView: View {
             )
         }
         return ThinkingLevelRegistry.definitions.filter {
-            availableDefinitionIds.contains(
-                $0.definitionId
-            ) && $0.definitionId
-                != ThinkingLevelRegistry.offDefinitionId
+            availableDefinitionIds.contains($0.definitionId)
+                && $0.definitionId != ThinkingLevelRegistry.offDefinitionId
         }
     }
 
     private func initialGroupThinkingDefinitionId(
         from definitions: [ThinkingLevelDefinition]
     ) -> String? {
-        let availableDefinitionIds =
-            definitions.map(\.definitionId)
+        let availableDefinitionIds = definitions.map(\.definitionId)
         let mediumDefinitionId =
-            ThinkingLevelRegistry.definition(
-                forLevelId:
-                    ThinkingLevel.medium.rawValue
-            )?.definitionId
+            ThinkingLevelRegistry.definition(forLevelId: ThinkingLevel.medium.rawValue)?
+                .definitionId
             ?? ThinkingLevelRegistry.offDefinitionId
-        return ThinkingLevelRegistry
-            .resolvedDefinitionId(
-                mediumDefinitionId,
-                availableDefinitionIds:
-                    availableDefinitionIds
-            ) ?? availableDefinitionIds.first
+        return ThinkingLevelRegistry.resolvedDefinitionId(
+            mediumDefinitionId,
+            availableDefinitionIds: availableDefinitionIds
+        ) ?? availableDefinitionIds.first
     }
 
     var body: some View {
@@ -84,9 +75,9 @@ struct ModelGroupDetailView: View {
                 if let group {
                     Button {
                         UIPasteboard.general.string = "group:\(group.id)"
-                        MinisToast.show(String(localized: "Copied: \(group.name)"))
+                        MinisToast.show(AppLocalized("Copied: \(group.name)"))
                     } label: {
-                        Label(String(localized: "Copy Shortcut Model ID"), systemImage: "link")
+                        Label(AppLocalized("Copy Shortcut Model ID"), systemImage: "link")
                     }
                 }
             }
@@ -226,7 +217,7 @@ struct ModelGroupDetailView: View {
                 HStack {
                     Text("Models")
                     Spacer()
-                    Button(editMode.isEditing ? String(localized: "Done") : String(localized: "Edit")) {
+                    Button(editMode.isEditing ? AppLocalized("Done") : AppLocalized("Edit")) {
                         withAnimation {
                             editMode = editMode.isEditing ? .inactive : .active
                         }
@@ -278,30 +269,23 @@ struct ModelGroupDetailView: View {
                 }
                 .disabled(thinkingDefinitions.isEmpty)
 
-                if let selectedId =
-                    group.defaultThinkingDefinitionId {
+                if let selectedId = group.defaultThinkingDefinitionId {
                     Picker("Intensity", selection: Binding(
                         get: {
                             ThinkingLevelRegistry.resolvedDefinitionId(
                                 selectedId,
                                 availableDefinitionIds:
-                                    thinkingDefinitions.map(
-                                        \.definitionId
-                                    )
+                                    thinkingDefinitions.map(\.definitionId)
                             ) ?? selectedId
                         },
                         set: { definitionId in
                             var updated = group
-                            updated.defaultThinkingDefinitionId =
-                                definitionId
+                            updated.defaultThinkingDefinitionId = definitionId
                             store.updateGroup(updated)
                         }
                     )) {
                         ForEach(thinkingDefinitions) { definition in
-                            Text(definition.title)
-                                .tag(
-                                    definition.definitionId
-                                )
+                            Text(definition.title).tag(definition.definitionId)
                         }
                     }
                     .pickerStyle(.menu)
@@ -383,10 +367,13 @@ struct ModelGroupDetailView: View {
         let store = self.store
         let voiceNote: String? = {
             if store.voiceInputGroupId == gid {
-                return String(localized: "This group drives Voice Input — only models that accept audio input are listed.", comment: "Add-models filter note for the bound voice input group")
+                return AppLocalized("This group drives Voice Input — only models that accept audio input are listed.", comment: "Add-models filter note for the bound voice input group")
             }
             if store.voiceOutputGroupId == gid {
-                return String(localized: "This group drives Voice Output — only models that can output audio are listed.", comment: "Add-models filter note for the bound voice output group")
+                return AppLocalized("This group drives Voice Output — only models that can output audio are listed.", comment: "Add-models filter note for the bound voice output group")
+            }
+            if store.visionGroupId == gid {
+                return AppLocalized("This group describes images for models that cannot see them — only models that accept image input are listed.", comment: "Add-models filter note for the bound vision group")
             }
             return nil
         }()
@@ -434,7 +421,18 @@ struct ModelGroupDetailView: View {
 
             Spacer()
 
-            Text(entry.model.provider)
+            // Same reasoning as ModelEntryDetailSheet.providerDisplayName:
+            // `model.provider` is a denormalized display string whose content
+            // depends on which path created the model (vendor name / protocol
+            // type / instance UUID), so prefer the owning instance's label.
+            // `instance` is already resolved above for the disabled check.
+            Text({
+                if let instance {
+                    let label = instance.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return label.isEmpty ? instance.providerType.displayName : label
+                }
+                return entry.model.provider
+            }())
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .opacity(providerDisabled ? 0.5 : 1)
@@ -599,7 +597,7 @@ private struct ContextLimitSlider: View {
         ("200K", 200_000),
         ("400K", 400_000),
         ("1M",   1_000_000),
-        (String(localized: "Unlimited"), Int.max),
+        (AppLocalized("Unlimited"), Int.max),
     ]
 
     private var sliderIndex: Double {
@@ -616,8 +614,8 @@ private struct ContextLimitSlider: View {
     }
 
     private var currentLabel: String {
-        guard let v = value else { return steps.last?.label ?? String(localized: "Unlimited") }
-        if v >= Int.max { return String(localized: "Unlimited") }
+        guard let v = value else { return steps.last?.label ?? AppLocalized("Unlimited") }
+        if v >= Int.max { return AppLocalized("Unlimited") }
         if let match = steps.first(where: { $0.tokens == v }) { return match.label }
         return "\(v / 1000)K"
     }

@@ -41,12 +41,16 @@ enum DebugRPCProvider {
             case .openAIResponses: supportedCreds = ["apiKey"]
             case .xAI: supportedCreds = ["apiKey", "oauth"]
             case .kimiCode: supportedCreds = ["oauth"]
+            // [T-copilot-provider] OAuth only — there is no API-key form.
+            case .githubCopilot: supportedCreds = ["oauth"]
             case .unsupported: supportedCreds = []
             }
             let customBaseSupported: Bool
             switch type {
             case .openAI, .openRouter, .openAIResponses, .gemini, .xAI, .kimiCode: customBaseSupported = true
-            case .anthropic, .antigravity, .unsupported: customBaseSupported = false
+            // Copilot's host is fixed; a custom base would just break the
+            // header/endpoint contract the integration depends on.
+            case .anthropic, .antigravity, .githubCopilot, .unsupported: customBaseSupported = false
             }
             return [
                 "id": type.rawValue,
@@ -86,10 +90,6 @@ enum DebugRPCProvider {
         let isEnabled = (params["isEnabled"] as? Bool) ?? true
         let seedBuiltInModels = (params["seedBuiltInModels"] as? Bool) ?? true
 
-        if credentialType == .apiKey, apiKey == nil || apiKey?.isEmpty == true {
-            throw DebugRPCErr(-32602, "apiKey is required when credentialType=apiKey")
-        }
-
         let instance = ProviderInstance(
             label: label,
             providerType: providerType,
@@ -99,8 +99,24 @@ enum DebugRPCProvider {
             appendV1Suffix: appendV1Suffix
         )
 
-        // Persist credential before adding instance — if Keychain write fails we abort.
-        if credentialType == .apiKey, let key = apiKey {
+        // [T-empty-key-compat-endpoints] Keyless is a valid configuration for
+        // a third-party OpenAI/Anthropic-compatible endpoint with a custom
+        // base URL (ollama, LM Studio, an internal gateway) — the same
+        // `allowsEmptyAPIKey` predicate the rest of the app already trusts
+        // (hasAnyCredential, model refresh, AddProviderView). This RPC used
+        // to hard-refuse any empty key, which blocked agents from creating
+        // exactly the instances the UI happily creates.
+        if credentialType == .apiKey, (apiKey ?? "").isEmpty, !instance.allowsEmptyAPIKey {
+            throw DebugRPCErr(-32602, "apiKey is required when credentialType=apiKey "
+                + "(keyless is allowed only for OpenAI/Anthropic-compatible instances "
+                + "with a custom base URL)")
+        }
+
+        // Persist credential before adding instance — if Keychain write fails we
+        // abort. Never write an empty string: hasAnyCredential treats empty as
+        // absent, and an empty Keychain entry is how the AddProviderView keyless
+        // flow avoids phantom credentials too.
+        if credentialType == .apiKey, let key = apiKey, !key.isEmpty {
             ProviderKeychainHelper.saveAPIKey(key, instanceId: instance.id)
         }
         if let token = oauthToken, !token.isEmpty {
@@ -664,14 +680,22 @@ enum DebugRPCProvider {
             "modelEntryCount": store.entries(for: instance.id).count,
         ]
         dict["customBaseURL"] = instance.customBaseURL ?? NSNull()
-        let hasKey: Bool = {
+        // [T-empty-key-compat-endpoints] `hasCredential` answers the question a
+        // caller actually asks: "is this instance usable?" That is
+        // hasAnyCredential — the same predicate every picker, router and chat
+        // path gates on — and it is true for a keyless compatible endpoint. The
+        // old raw Keychain probe reported false for a fully working keyless
+        // instance, sending agents chasing a credential the server never
+        // wanted. `hasStoredKey` keeps the raw probe for callers that really
+        // do need to know whether a secret is stored (e.g. before an export).
+        dict["hasCredential"] = instance.hasAnyCredential
+        dict["hasStoredKey"] = {
             if instance.credentialType == .apiKey {
                 return ProviderKeychainHelper.loadAPIKey(instanceId: instance.id)?.isEmpty == false
             } else {
                 return ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token")?.isEmpty == false
             }
-        }()
-        dict["hasCredential"] = hasKey
+        }() as Bool
         if instance.supportsImageEndpointSetting {
             dict["imageEndpointMode"] = instance.imageEndpointMode.rawValue
             if let resolved = instance.imageEndpointResolved {
@@ -707,12 +731,237 @@ enum DebugRPCProvider {
             .replacingOccurrences(of: "_", with: " ")
             .capitalized
     }
+
+    // MARK: - Thinking rules (Phase 2 §3 verification surface)
+    //
+    // [T-thinking-rules-phase2] These call the SAME ProviderConfigStore API the UI calls
+    // (saveThinkingRule / deleteThinkingRule / thinkingRules), so a rule created here goes
+    // through the real persistence path, the real cache refresh, and the real resolver.
+    // They exist because `debug.tap` cannot activate controls inside the sheet-hosted Form
+    // the editor lives in, which left the end-to-end path unverifiable on device. This is
+    // NOT a bypass of the application layer — writing the SQLite file directly would have
+    // been that, and was rejected (the new table lives in the WAL, so a file-level write
+    // would split the DB and risk the user's real provider config).
+    //
+    // DEBUG-only, like every other method in this file.
+
+    static func thinkingRulesList(params: [String: Any]) async throws -> [String: Any] {
+        let instanceId = try require(params["instanceId"] as? String, "instanceId")
+        let rules = await ProviderConfigStore.shared.thinkingRules(for: instanceId)
+        let builtIns = ThinkingRuleResolver.builtInRulesForDisplay(instanceId: instanceId)
+        return [
+            "instanceId": instanceId,
+            "custom": rules.map(describeRule),
+            "builtIn": builtIns.map(describeRule),
+        ]
+    }
+
+    /// Create or update ONE user rule. `wireFormat` accepts the same encoded shape the
+    /// persistence layer stores, so this exercises the real coder too.
+    static func thinkingRulesAdd(params: [String: Any]) async throws -> [String: Any] {
+        let instanceId = try require(params["instanceId"] as? String, "instanceId")
+        let label = try require(params["label"] as? String, "label")
+        let fmtObj = try require(params["wireFormat"] as? [String: Any], "wireFormat")
+        guard let fmt = ThinkingWireFormat.fromPersistedJSON(fmtObj) else {
+            throw DebugRPCErr(-32602, "Unrecognized wireFormat: \(fmtObj)")
+        }
+        let scope: ThinkingRule.Scope = {
+            if let pattern = params["pattern"] as? String, !pattern.isEmpty {
+                return .modelPattern(pattern)
+            }
+            return .allModels
+        }()
+        let rule = ThinkingRule(
+            kind: .custom, scope: scope, wireFormat: fmt,
+            label: label, id: params["id"] as? String
+        )
+        let order = (params["sortOrder"] as? Int) ?? 0
+        let ok = await ProviderConfigStore.shared.saveThinkingRule(rule, instanceId: instanceId, sortOrder: order)
+        return ["ok": ok, "id": rule.id, "instanceId": instanceId]
+    }
+
+    static func thinkingRulesDelete(params: [String: Any]) async throws -> [String: Any] {
+        let instanceId = try require(params["instanceId"] as? String, "instanceId")
+        let id = try require(params["id"] as? String, "id")
+        let ok = await ProviderConfigStore.shared.deleteThinkingRule(id: id, instanceId: instanceId)
+        return ["ok": ok, "id": id]
+    }
+
+    /// Resolve a (model, level) pair through the REAL resolver, including whatever user
+    /// rules are currently stored, and return both the emitted body and the trace. This is
+    /// what makes "did my rule actually take effect" answerable without sending a request.
+    static func thinkingRulesResolve(params: [String: Any]) async throws -> [String: Any] {
+        let instanceId = try require(params["instanceId"] as? String, "instanceId")
+        let modelId = try require(params["modelId"] as? String, "modelId")
+        let levelRaw = (params["level"] as? String) ?? "high"
+        let level = ThinkingLevel(rawValue: levelRaw) ?? .high
+        // ProviderConfigStore is @MainActor — reading it off the main actor traps at
+        // runtime and takes the app down with it. Hop once and carry out plain values.
+        // [T-thinking-vision-diag] `authoritative` added to the carried-out values. Without
+        // it this RPC could not reproduce the off-tier guard at all — it always resolved
+        // with the flag defaulted to false, so the one path that took three rounds to get
+        // right was the one path this diagnostic could not show.
+        let resolved: (base: String, supportsReasoning: Bool?, effortValues: [String]?,
+                       noEffortTiers: Bool, authoritative: Bool)? =
+            await MainActor.run {
+                let store = ProviderConfigStore.shared
+                guard let instance = store.instance(for: instanceId) else { return nil }
+                let entry = store.entries(for: instanceId).first { $0.baseModel.id == modelId }
+                return (instance.effectiveCustomBaseURL?.lowercased() ?? "",
+                        entry?.model.supportsReasoning,
+                        entry?.model.reasoningEffortValues,
+                        entry?.model.declaresNoEffortTiers ?? false,
+                        entry?.model.effortDeclarationIsAuthoritative ?? false)
+            }
+        guard let resolved else {
+            throw DebugRPCErr(-32602, "Unknown instanceId: \(instanceId)")
+        }
+        let base = resolved.base
+
+        var body: [String: Any] = [:]
+        let ctx = ThinkingResolveContext(
+            modelId: modelId,
+            supportsReasoning: resolved.supportsReasoning ?? true,
+            declaredEffortValues: resolved.effortValues,
+            declaresNoEffortTiers: resolved.noEffortTiers,
+            effortDeclarationIsAuthoritative: resolved.authoritative,
+            isXAI: base.contains("api.x.ai") || base.contains("//x.ai"),
+            level: level,
+            maxTokens: (params["maxTokens"] as? Int) ?? 8192,
+            isOpenRouter: base.contains("openrouter.ai"),
+            usesUnifiedReasoningEffort: base.contains("volces") || base.contains("ark.") || base.contains("api.venice.ai"),
+            isMistral: base.contains("mistral.ai"),
+            offEffort: params["offEffort"] as? String,
+            // Read through the same cache the request path reads.
+            userRules: ThinkingRuleCache.shared.rules(for: instanceId)
+        )
+        let trace = ThinkingRuleResolver.apply(to: &body, ctx: ctx)
+        return [
+            "modelId": modelId,
+            "level": level.rawValue,
+            "body": body,
+            "trace": [
+                "rule": trace.matchedRuleLabel,
+                "kind": "\(trace.matchedRuleKind)",
+                "source": trace.formatSource,
+                "emittedKeys": trace.emittedKeys.sorted(),
+                // [T-thinking-vision-diag] Which gates intervened, and on what class of
+                // evidence. An empty array is a positive answer, not missing data: it
+                // means nothing overrode the matched rule.
+                "gates": trace.gateEvents.map {
+                    ["id": $0.id, "evidence": $0.evidence.rawValue, "verdict": $0.verdict]
+                },
+            ] as [String: Any],
+            // [T-thinking-vision-diag] The inputs the decision turned on, echoed back so a
+            // surprising verdict can be explained from one call instead of cross-checking
+            // the catalog by hand.
+            "inputs": [
+                "supportsReasoning": resolved.supportsReasoning as Any,
+                "declaredEffortValues": resolved.effortValues as Any,
+                "declaresNoEffortTiers": resolved.noEffortTiers,
+                "effortDeclarationIsAuthoritative": resolved.authoritative,
+                "offEffort": (params["offEffort"] as? String) as Any,
+                "endpoint": [
+                    "isOpenRouter": base.contains("openrouter.ai"),
+                    "usesUnifiedReasoningEffort": base.contains("volces") || base.contains("ark.") || base.contains("api.venice.ai"),
+                    "isMistral": base.contains("mistral.ai"),
+                    "isXAI": base.contains("api.x.ai") || base.contains("//x.ai"),
+                ] as [String: Any],
+                "userRuleCount": ThinkingRuleCache.shared.rules(for: instanceId).count,
+            ] as [String: Any],
+        ]
+    }
+
+    private static func describeRule(_ r: ThinkingRule) -> [String: Any] {
+        [
+            "id": r.id,
+            "label": r.label,
+            "kind": "\(r.kind)",
+            "scope": r.scope.persistedKind,
+            "pattern": (r.scope.persistedPattern as Any?) ?? NSNull(),
+            "wireFormat": r.wireFormat?.persistedJSON as Any? ?? NSNull(),
+            "editable": r.isEditable,
+        ]
+    }
 }
 
 // MARK: - Chat Methods
 
 @MainActor
 enum DebugRPCChat {
+
+    /// [T-msgidx-oob-repro] `chat.debugRemoveMessages` — TEST HOOK.
+    ///
+    /// Removes `count` UI rows from the FRONT of the LIVE view model's
+    /// `messages` array (never the trailing assistant), simulating the
+    /// external mid-loop mutations the agent loop's msgIdx resync exists to
+    /// survive: an iCloud inbound rebuild, a compaction sweep, a user delete.
+    /// Exists to deterministically reproduce (and then regression-test) the
+    /// crash family where `messages[msgIdx]` is subscripted with a stale
+    /// index after a suspension — timing the call into a stalled provider
+    /// stream lands the mutation inside the exact windows that crash in the
+    /// field (1.11(15) .ips 2026-08-15 14:02, runAgentLoop reminder path).
+    /// Deliberately mutates ONLY the UI array (not agentHistory, not the DB)
+    /// — same shape as the sync-rebuild mutation.
+    static func debugRemoveMessages(params: [String: Any]) async throws -> [String: Any] {
+        guard let sid = params["sessionId"] as? String, !sid.isEmpty else {
+            throw DebugRPCErr(-32602, "Missing required param: sessionId")
+        }
+        let count = max(1, min((params["count"] as? Int) ?? 2, 10))
+        return await MainActor.run {
+            let (vm, _) = ViewModelCache.shared.getOrCreate(for: sid)
+            let before = vm.messages.count
+            var removed = 0
+            while removed < count, vm.messages.count > 1 {
+                vm.messages.remove(at: 0)
+                removed += 1
+            }
+            AppLogger(category: "DebugRPC").warning("[MsgIdxRepro] removed \(removed) leading UI rows (\(before) → \(vm.messages.count)) sid=\(sid.prefix(8))")
+            return ["before": before, "removed": removed, "after": vm.messages.count]
+        }
+    }
+
+    /// [T-ios-delete-from-message] `chat.deleteFromMessage` — TEST HOOK.
+    ///
+    /// Drives `AIChatViewModel.deleteFromMessage` on the live view model and
+    /// reports the before/after size of all THREE stores the suffix delete has
+    /// to keep in step (UI rows, model-facing agentHistory, persisted rows), so
+    /// a test can assert they stay consistent — in particular that the surviving
+    /// history never ends on a dangling tool_use.
+    ///
+    /// `index` selects the n-th USER bubble (0-based) instead of requiring a
+    /// message UUID, which is what a script actually has on hand.
+    static func deleteFromMessage(params: [String: Any]) async throws -> [String: Any] {
+        guard let sid = params["sessionId"] as? String, !sid.isEmpty else {
+            throw DebugRPCErr(-32602, "Missing required param: sessionId")
+        }
+        let userIndex = (params["index"] as? Int) ?? 0
+        // Make sure the view model has its UI loaded — a session that isn't
+        // open in the app has an empty `messages`/`agentHistory`, and the
+        // delete would be a silent no-op.
+        let (vm, _) = await MainActor.run { ViewModelCache.shared.getOrCreate(for: sid) }
+        await vm.loadSession()
+        return await MainActor.run {
+            let userIds = vm.messages.filter { $0.role == .user }.map(\.id)
+            guard userIndex >= 0, userIndex < userIds.count else {
+                return ["error": "index \(userIndex) out of range (userBubbles=\(userIds.count))"]
+            }
+            let beforeMsgs = vm.messages.count
+            let beforeHistory = vm.agentHistory.count
+            vm.deleteFromMessage(userIds[userIndex])
+            return [
+                "userBubblesBefore": userIds.count,
+                "messagesBefore": beforeMsgs,
+                "messagesAfter": vm.messages.count,
+                "historyBefore": beforeHistory,
+                "historyAfter": vm.agentHistory.count,
+                "trailingHistoryRole": vm.agentHistory.last.map { "\($0.role)" } ?? "none",
+                "trailingHasToolUse": vm.agentHistory.last.map { entry in
+                    entry.parts.contains { if case .toolUse = $0 { return true }; return false }
+                } ?? false,
+            ]
+        }
+    }
 
     static func modelsList(params: [String: Any]) throws -> [String: Any] {
         let includeHidden = (params["includeHidden"] as? Bool) ?? false
@@ -963,8 +1212,33 @@ enum DebugRPCChat {
             )
         }
 
-        vm.inputText = prompt
-        vm.send()
+        // [T-paste-single-split] Faithful E2E driver for the paste pipeline:
+        // each entry in `pastedTexts` is stashed exactly as PastableUITextView's
+        // paste branch would, and its `[Pasted#N]` literal lands in the prompt —
+        // at the matching `{{PASTE<i>}}` token when present, appended otherwise.
+        // The subsequent send() then exercises the real consume/persist path.
+        var effectivePrompt = prompt
+        if let pastes = params["pastedTexts"] as? [String] {
+            for (i, pasteText) in pastes.enumerated() {
+                guard let literal = vm.stashPastedText(pasteText) else { continue }
+                let token = "{{PASTE\(i)}}"
+                if effectivePrompt.contains(token) {
+                    effectivePrompt = effectivePrompt.replacingOccurrences(of: token, with: literal)
+                } else {
+                    effectivePrompt += " \(literal)"
+                }
+            }
+        }
+        vm.inputText = effectivePrompt
+        // Mirror ChatInputBar: while a turn is running, the send button becomes
+        // "queue" — send() itself guards on isProcessing and would silently
+        // drop the prompt. Routing to enqueuePrompt makes chat.prompt faithful
+        // to the UI and lets automation exercise the queued-drain path.
+        if vm.isProcessing {
+            vm.enqueuePrompt()
+        } else {
+            vm.send()
+        }
 
         let sid = vm.sessionId ?? "unknown"
         let userMessageId = vm.messages.last(where: { $0.role == .user })?.id.uuidString ?? ""
@@ -1224,10 +1498,211 @@ enum DebugRPCChat {
         let id = try require(params["sessionId"] as? String, "sessionId")
         let confirm = (params["confirm"] as? Bool) ?? false
         guard confirm else { throw DebugRPCErr(-32602, "confirm=true required") }
+        let all = await ChatStore.shared.sessionIdsWithDescendants([id])
+        await MainActor.run {
+            for sid in all {
+                AgentJobRegistry.shared.cancelAll(parent: sid, reason: "sessionDeleted")
+                AgentJobRegistry.shared.cancelAll(session: sid, reason: "sessionDeleted")
+                ViewModelCache.shared.remove(sessionId: sid)
+                BrowserUseOffloadBridge.releasePool(forSession: sid)
+            }
+        }
         await ChatStore.shared.deleteSession(id)
         ProviderConfigStore.shared.removeBinding(for: id)
         ProviderConfigStore.shared.removeInferenceConfig(for: id)
         return ["sessionId": id, "deleted": true]
+    }
+
+    // MARK: - Folders (test/automation API)
+
+    /// List folders with member counts and last member activity, so tests can
+    /// assert grouping/ordering without scraping the UI.
+    static func foldersList(params: [String: Any]) async throws -> [String: Any] {
+        let folders = await ChatStore.shared.listFolders()
+        let activity = await ChatStore.shared.folderLastActivity()
+        var rows: [[String: Any]] = []
+        for f in folders {
+            let memberIds = await ChatStore.shared.sessionIdsInFolder(f.id)
+            rows.append([
+                "id": f.id,
+                "name": f.name,
+                "origin": f.origin,
+                "pinned": f.isPinned,
+                // [T-folder-rename-desc-wipe] The auto-grouping description.
+                // Omitted here originally, which made the desc-wipe bug
+                // invisible to every RPC-driven check — the field the feature
+                // is about could not be observed at all.
+                "desc": f.desc ?? NSNull(),
+                "memberCount": memberIds.count,
+                "lastActivity": activity[f.id].map { $0.timeIntervalSince1970 } ?? NSNull(),
+            ])
+        }
+        return ["count": rows.count, "folders": rows]
+    }
+
+    static func foldersCreate(params: [String: Any]) async throws -> [String: Any] {
+        let name = try require(params["name"] as? String, "name")
+        let desc = params["desc"] as? String
+        let folder = await ChatStore.shared.createFolder(name: name, desc: desc)
+        await Self.notifySessionListChanged()
+        return ["id": folder.id, "name": folder.name, "desc": folder.desc ?? NSNull()]
+    }
+
+    /// Move sessions into a folder (or out of any folder when folderId is
+    /// absent). Mirrors the UI's picker apply path 1:1 — same ChatStore calls.
+    static func foldersMove(params: [String: Any]) async throws -> [String: Any] {
+        let ids = try require(params["sessionIds"] as? [String], "sessionIds")
+        let folderId = params["folderId"] as? String
+        await ChatStore.shared.setFolder(folderId, forSessions: ids)
+        await Self.notifySessionListChanged()
+        return ["moved": ids.count, "folderId": folderId ?? NSNull()]
+    }
+
+    /// Dissolve a folder (clear members, delete folder — deletes no session).
+    static func foldersDissolve(params: [String: Any]) async throws -> [String: Any] {
+        let id = try require(params["folderId"] as? String, "folderId")
+        let freed = await ChatStore.shared.dissolveFolder(id)
+        await Self.notifySessionListChanged()
+        return ["folderId": id, "freedSessions": freed.count]
+    }
+
+    /// One folder in full: metadata + member sessions (id/title/category/
+    /// updatedAt), newest first. The inspection counterpart of foldersList.
+    static func foldersGet(params: [String: Any]) async throws -> [String: Any] {
+        let id = try require(params["folderId"] as? String, "folderId")
+        guard let folder = await ChatStore.shared.getFolder(id) else {
+            throw DebugRPCErr(-32602, "Unknown folderId '\(id)'. Use debug.folders.list.")
+        }
+        var members: [[String: Any]] = []
+        for sid in await ChatStore.shared.sessionIdsInFolder(id) {
+            if let sess = await ChatStore.shared.getSession(sid) {
+                members.append([
+                    "id": sess.id,
+                    "title": sess.title ?? NSNull(),
+                    "category": sess.category ?? NSNull(),
+                    "updatedAt": sess.updatedAt.timeIntervalSince1970,
+                ])
+            }
+        }
+        return [
+            "id": folder.id,
+            "name": folder.name,
+            "desc": folder.desc ?? NSNull(),
+            "icon": folder.icon ?? NSNull(),
+            "color": folder.color ?? NSNull(),
+            "origin": folder.origin,
+            "pinned": folder.isPinned,
+            "createdAt": folder.createdAt.timeIntervalSince1970,
+            "updatedAt": folder.updatedAt.timeIntervalSince1970,
+            "memberCount": members.count,
+            "members": members,
+        ]
+    }
+
+    /// Rename a folder (same ChatStore call as the header menu's Rename).
+    static func foldersRename(params: [String: Any]) async throws -> [String: Any] {
+        let id = try require(params["folderId"] as? String, "folderId")
+        let name = try require(params["name"] as? String, "name")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            throw DebugRPCErr(-32602, "name must be non-empty")
+        }
+        guard await ChatStore.shared.getFolder(id) != nil else {
+            throw DebugRPCErr(-32602, "Unknown folderId '\(id)'. Use debug.folders.list.")
+        }
+        let desc = params["desc"] as? String   // nil = keep, "" = clear
+        await ChatStore.shared.renameFolder(id, name: name, desc: desc)
+        await Self.notifySessionListChanged()
+        return ["folderId": id, "name": name]
+    }
+
+    /// Inject a session badge with a back-dated entry stamp — exercises the
+    /// group-card 24h freshness filter from tests (real paused states need a
+    /// genuine interruption, unreachable headlessly).
+    static func sessionsBadge(params: [String: Any]) async throws -> [String: Any] {
+        let id = try require(params["sessionId"] as? String, "sessionId")
+        let raw = try require(params["state"] as? String, "state")
+        guard let state = SessionBadgeState(rawValue: raw) else {
+            throw DebugRPCErr(-32602, "Unknown state '\(raw)'. Known: paused, iCloudSyncing, unread")
+        }
+        let ageHours = (params["ageHours"] as? Double) ?? 0
+        let enteredAt = Date().addingTimeInterval(-ageHours * 3600)
+        await MainActor.run {
+            SessionBadgeStore.shared.debugSetBadge(state, for: id, enteredAt: enteredAt)
+        }
+        await Self.notifySessionListChanged()
+        return ["sessionId": id, "state": raw, "ageHours": ageHours]
+    }
+
+    /// Set the app's Theme override (mirrors Settings → Appearance → Theme:
+    /// 0 system / 1 light / 2 dark) — test hook so appearance-dependent
+    /// rendering (e.g. dark-mode color sampling) can be driven headlessly.
+    static func appearanceSet(params: [String: Any]) async throws -> [String: Any] {
+        let mode = try require(params["mode"] as? Int, "mode")
+        guard (0...2).contains(mode) else { throw DebugRPCErr(-32602, "mode must be 0(system)/1(light)/2(dark)") }
+        await MainActor.run {
+            UserDefaults.standard.set(mode, forKey: "appearanceMode")
+            for scene in UIApplication.shared.connectedScenes {
+                guard let ws = scene as? UIWindowScene else { continue }
+                for window in ws.windows {
+                    window.overrideUserInterfaceStyle = mode == 1 ? .light : mode == 2 ? .dark : .unspecified
+                }
+            }
+        }
+        return ["mode": mode]
+    }
+
+    /// Toggle a SESSION's pin (same ChatStore call as the row menu) — test
+    /// hook for pin-related list states the tap synthesizer can't reach.
+    static func sessionsPin(params: [String: Any]) async throws -> [String: Any] {
+        let id = try require(params["sessionId"] as? String, "sessionId")
+        let pinned = await ChatStore.shared.toggleSessionPin(id)
+        await Self.notifySessionListChanged()
+        return ["sessionId": id, "pinned": pinned]
+    }
+
+    /// Toggle a folder's pin (same ChatStore call as the header menu).
+    static func foldersPin(params: [String: Any]) async throws -> [String: Any] {
+        let id = try require(params["folderId"] as? String, "folderId")
+        let pinned = await ChatStore.shared.toggleFolderPin(id)
+        await Self.notifySessionListChanged()
+        return ["folderId": id, "pinned": pinned]
+    }
+
+    /// [T-titlegen-regenerate-folder] Drive the manual "regenerate title"
+    /// action for tests — the real entry point is a session-row long-press
+    /// menu the tap synthesizer can't reach. Returns the resulting title and
+    /// folder id so folder-suggestion behavior is directly assertable.
+    static func titleRegenerate(params: [String: Any]) async throws -> [String: Any] {
+        let sessionId = try require(params["sessionId"] as? String, "sessionId")
+        try await AIChatViewModel.regenerateSessionTitle(sessionId: sessionId)
+        guard let session = await ChatStore.shared.getSession(sessionId) else {
+            throw DebugRPCErr(-32602, "Session not found after regenerate")
+        }
+        await notifySessionListChanged()
+        return [
+            "sessionId": sessionId,
+            "title": session.title ?? NSNull(),
+            "folderId": session.folderId ?? NSNull(),
+        ]
+    }
+
+    /// Toggle the auto-grouping setting (Settings → Appearance → Grouping)
+    /// for tests — the toggle lives in a sheet the tap synthesizer can't
+    /// reach, and title-generation reads this defaults key directly.
+    static func foldersSetAutoGrouping(params: [String: Any]) async throws -> [String: Any] {
+        let enabled = try require(params["enabled"] as? Bool, "enabled")
+        UserDefaults.standard.set(enabled, forKey: "autoGroupingEnabled")
+        return ["enabled": enabled]
+    }
+
+    /// Kick the sidebar's existing external-mutation refresh channel — the
+    /// same notification cloud-sync fetch uses — so an RPC mutation shows up
+    /// without waiting for an unrelated refresh trigger.
+    private static func notifySessionListChanged() async {
+        await MainActor.run {
+            NotificationCenter.default.post(name: .cloudSyncDidFetchChanges, object: nil)
+        }
     }
 
     // MARK: - Compact (test/automation API)
@@ -1306,7 +1781,15 @@ enum DebugRPCChat {
 
         let beforeMarkers = await ChatStore.shared.compactMarkers(sessionId: sid).count
 
+        // [T-ios-compact-task-binding] Deliberately still an inline await rather
+        // than startCompactTask: this RPC's contract is to block until the
+        // compaction settles, and it does that by polling isCompacting below.
+        // Wrapping it in a Task would return here immediately and race that
+        // poll. The origin is still stamped so that if the user hits Stop mid-
+        // RPC, cancel() applies the right cleanup (no promptQueue rollback).
+        await MainActor.run { vm.compactOrigin = .debugRPC }
         await vm.compactBefore(msgUUID, includesBoundary: includesBoundary)
+        await MainActor.run { vm.compactOrigin = nil }
 
         // compactBefore is async + drives an LLM call internally. Poll until
         // isCompacting / isProcessing both clear (or timeout).
@@ -1364,7 +1847,18 @@ enum DebugRPCChat {
             throw DebugRPCErr(-32602, "Session not found: \(sid)")
         }
 
-        let (markdown, blockCount) = buildSyntheticMarkdown(targetChars: charCount, blockChars: blockChars)
+        // [T-ios-render-collapse-ca-limit] Optional verbatim text. Without it
+        // this RPC can only inject generated lorem-ipsum, which cannot
+        // reproduce a bug that depends on the USER's actual content (CJK line
+        // breaking, LaTeX display blocks whose async render grows the cell,
+        // real table widths). Passing `text` replays a captured conversation
+        // exactly; omitting it keeps the original synthetic behaviour.
+        let (markdown, blockCount): (String, Int) = {
+            if let verbatim = params["text"] as? String, !verbatim.isEmpty {
+                return (verbatim, verbatim.components(separatedBy: "\n\n").count)
+            }
+            return buildSyntheticMarkdown(targetChars: charCount, blockChars: blockChars)
+        }()
 
         let msgId = UUID().uuidString.lowercased()
         let raw = RawMessage(

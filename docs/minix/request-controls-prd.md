@@ -12,9 +12,9 @@
 
 ## 2. 背景
 
-思考强度、温度、Web Search 和实验性能力在不同 Provider、兼容网关和模型之间存在细微差异。把差异持续写入 App 会造成大量按服务商、Base URL 和模型 ID 的硬编码，并要求用户等待版本更新。
+思考强度、温度、Web Search 和实验性能力在不同 Provider、兼容网关和模型之间存在细微差异。上游通过 Provider Thinking Rules 维护已知的 OpenAI Chat Completions 兼容规则；Minix Request Controls 为单个模型提供可编辑的最终覆盖能力。
 
-请求控制把“用户在聊天时选择的离散状态”映射为一组 Header/Body 表达式，使 App 只维护协议级默认行为，模型差异由用户自行描述。
+请求控制把“用户在聊天时选择的离散状态”映射为一组 Header/Body 表达式。未启用语义思考控制时保留上游默认行为；启用后由该控制完整接管 thinking 字段，避免默认注入与用户表达式叠加。
 
 ## 3. 目标
 
@@ -22,14 +22,14 @@
 2. Option Group 可切换为离散渐变 Slider。
 3. 用户可以完整编辑控制名称、图标、默认状态、选项、顺序和表达式。
 4. 支持语义化思考强度控制，并允许自定义档位突破内置档位集合与内置最高档位。
-5. 未配置自定义思考控制时继续使用 Provider 协议默认映射。
+5. 未配置自定义思考控制时继续使用上游默认链路，包括适用路径上的 Provider Thinking Rules。
 6. 配置自定义思考控制时精确替代内置 thinking 注入。
 7. 聊天页提供独立 Request Controls 按钮，不再把思考强度放在 `/` 菜单中。
 8. 每个会话或草稿只保存当前模型条目的一份运行状态快照，新会话和模型切换从目标模型的配置默认值开始。
 
 ## 4. 非目标
 
-- 不为每个第三方兼容服务商维护独立 thinking 适配表。
+- 不在 Minix Request Controls 中复制上游 Provider Thinking Rules；已知兼容规则仍由上游 resolver 集中维护。
 - 不在服务商层配置 Request Controls。
 - 不改变 Provider 响应解析、思考内容展示和历史 reasoning 回传。
 - 不要求所有控制都是思考强度；普通控制完全由用户定义。
@@ -121,7 +121,7 @@ Request Controls 使用统一表达式列表，通过左值根区分目标：
 body.max_tokens = 4096
 body.thinking = {type: "enabled", reasoning_effort: "medium"}
 headers.X-Feature = "enabled"
-headers.Authorization = delete()
+headers.X-Legacy = delete()
 ```
 
 左值必须以以下形式开始：
@@ -141,7 +141,8 @@ headers.Authorization = delete()
 - 内置顺序为 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`。
 - 未命中内置档位的推理模型默认最高为 `xhigh`。
 - 模型不支持推理时不显示档位。
-- Provider 按自身协议映射请求。
+- OpenAI Chat Completions 路径按上游原有接线执行 `ThinkingRuleResolver`；Minix 不扩大 Provider 用户规则的适用范围，Android Mistral 保留上游独立传输门禁。
+- OpenAI Responses、Anthropic、Gemini 和 Antigravity 继续执行各自上游协议映射；这些路径不开放 Provider Thinking Rules 编辑。
 - OpenAI App 语义 `off` 映射为 wire `"none"`。
 - Codex OAuth 不开放 `ultra` 特例。
 
@@ -177,6 +178,7 @@ body.reasoning.effort = "extreme"
 - 不按旧模型 ID 做兼容。
 - 不保证未来协议永远不变。
 - 用户可删除、增加或修改任何选项。
+- 后续加入内置档位时按当前 Provider 的实际路由生成表达式（包括 Codex OAuth 的 Responses 路由）；自定义档位不猜测 wire shape，表达式留空。
 - 新 Provider 格式需要 App 更新模板，但已有用户表达式继续生效。
 
 ## 10. App 级思考档位
@@ -217,7 +219,7 @@ body.reasoning.effort = "extreme"
 - 无较低档位时使用 `off` 或第一可用档位。
 - 降级后的实际有效 `definitionId` 写回会话，切回原模型时不恢复切换前的较高档位。
 - 切换分组或分组成员时，目标分组存在默认档位则先覆盖当前值；未设置默认档位和直接选择模型时保留当前值再按目标模型下调。
-- fallback 候选成功后才写回降级档位；失败候选不得修改会话状态。
+- fallback 候选取得 stream 后沿用上游行为立即更新模型绑定；用户已中途选择其他模型时不覆盖该选择。
 
 ## 11. 聊天交互
 
@@ -242,8 +244,8 @@ body.reasoning.effort = "extreme"
 - 新会话不继承同一模型在其他会话中的运行选择。
 - Slider 只持久化离散的选中选项；拖动中的连续位置仅存在于 UI 内存，松手后吸附到选项。
 - 普通聊天请求读取会话快照；标题、压缩和已有会话语音纠错可向表达式提供 session ID，但只使用模型配置默认状态。
-- Quick Test、模型列表刷新和 `minis-model-use` 不提供表达式 session ID，也不读取会话快照。
-- fallback 候选使用自己的默认状态，成功成为当前模型后才替换快照；失败候选不得污染快照。
+- Quick Test、模型列表刷新和 `minis-model-use` 不提供表达式 session ID，也不读取会话快照；其中 raw、image、image-edit 仅执行 Provider/Model Header 与 Body，不执行 Request Controls。
+- fallback 候选的普通控件使用候选默认状态；语义思考档位继承会话 `definitionId` 并按候选能力向下 clamp。请求保留原有 skills、MCP、memory 与状态 footer；模型绑定沿用上游的 stream 创建成功即更新行为，用户中途选择其他模型时不覆盖该选择。
 - 没有会话上下文的轻量请求不读取其他会话状态，直接使用配置默认值。
 - 修改默认值不覆盖已有运行选择。
 - 删除控制或选项后，无法匹配的状态安全回退到当前默认值。
@@ -251,6 +253,8 @@ body.reasoning.effort = "extreme"
 ## 13. 分享与同步
 
 - App 级档位定义参与 iOS 端的账号云同步。
+- iOS 上游 Provider Thinking Rules 继续通过 `ProviderThinkingRuleV3` 同步，并参与备份恢复。
+- Android Provider Thinking Rules 继续存放在 Provider DB v4，并参与备份恢复。
 - 服务商分享包含模型 Request Controls 和引用的档位定义。
 - 导入优先按 `definitionId` 合并。
 - 不同 UUID 但相同 `levelId` 时，将导入引用重映射到本地定义。
@@ -273,3 +277,5 @@ body.reasoning.effort = "extreme"
 13. 双端保存完整思考档位数组，重启及分享导入后保留内置档位和自定义档位的统一顺序。
 14. Android 的长列表选择页可滚动，控制、选项和自定义档位均支持左滑删除。
 15. iOS 事务型编辑页禁用右滑返回，取消操作正确处理未保存修改。
+16. 未启用语义思考控制时，上游 Provider Thinking Rules 的内置规则和用户规则保持有效；启用后 resolver 与协议默认 thinking 注入均被跳过。
+17. raw、image、image-edit 保留 Provider/Model Header 与 Body，但不执行 Request Controls。

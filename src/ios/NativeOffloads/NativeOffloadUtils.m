@@ -130,6 +130,39 @@ NSString *noff_format_date(NSDate *date) {
     return [fmt stringFromDate:date];
 }
 
+// ── All-day event helpers ──  [T-calendar-all-day]
+
+BOOL noff_is_date_only_string(NSString *_Nullable str) {
+    if (str.length != 10) return NO;
+    // Positional check rather than a formatter: a formatter is lenient about
+    // trailing text and would also accept "2026-12-01" as the prefix of a
+    // datetime, which is exactly the case this must reject.
+    for (NSUInteger i = 0; i < 10; i++) {
+        unichar c = [str characterAtIndex:i];
+        if (i == 4 || i == 7) {
+            if (c != '-') return NO;
+        } else if (c < '0' || c > '9') {
+            return NO;
+        }
+    }
+    return noff_parse_date(str) != nil;
+}
+
+void noff_all_day_bounds(NSDate *start, NSDate *end,
+                         NSDate *_Nonnull *_Nonnull outStart,
+                         NSDate *_Nonnull *_Nonnull outEnd) {
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *startDay = [cal startOfDayForDate:start];
+    NSDate *endDay = [cal startOfDayForDate:end ?: start];
+    if ([endDay compare:startDay] == NSOrderedAscending) endDay = startDay;
+    // 23:59:59 of the last day = (next midnight) - 1s, via calendar units so a
+    // 23h/25h DST day still lands on its own last second.
+    NSDate *nextMidnight = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:endDay options:0];
+    NSDate *endOfDay = [nextMidnight dateByAddingTimeInterval:-1];
+    *outStart = startDay;
+    *outEnd = endOfDay ?: endDay;
+}
+
 // ── JSON output ──
 
 NSDictionary *noff_json_envelope(NSString *tool, NSString *action, id data) {
@@ -201,7 +234,7 @@ void noff_emit_help(int stderr_fd, NSString *helpText) {
 
 // ── Main thread dispatch ──
 
-id _Nullable noff_dispatch_main_sync(id _Nullable (^block)(void)) {
+id _Nullable noff_dispatch_main_sync(id _Nullable (^_Nonnull block)(void)) {
     if ([NSThread isMainThread]) {
         return block();
     }
@@ -210,6 +243,36 @@ id _Nullable noff_dispatch_main_sync(id _Nullable (^block)(void)) {
         result = block();
     });
     return result;
+}
+
+id _Nullable noff_dispatch_main_sync_timeout(NSTimeInterval timeoutSeconds,
+                                              BOOL *_Nullable timedOut,
+                                              id _Nullable (^_Nonnull block)(void)) {
+    if (timedOut) *timedOut = NO;
+    // Already on main: a bounded wait is impossible (we'd deadlock waiting on
+    // ourselves) and also unnecessary — run inline, matching the unbounded variant.
+    if ([NSThread isMainThread]) {
+        return block();
+    }
+
+    // The result box is heap-allocated and captured by BOTH the async block and
+    // this frame, so a late-running block after a timeout writes into a still-live
+    // object rather than a dead stack slot.
+    NSMutableArray *box = [NSMutableArray arrayWithCapacity:1];
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id r = block();
+        @synchronized (box) { if (r) [box addObject:r]; }
+        dispatch_semaphore_signal(sem);
+    });
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW,
+                                             (int64_t)(timeoutSeconds * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, deadline) != 0) {
+        if (timedOut) *timedOut = YES;
+        return nil;
+    }
+    @synchronized (box) { return box.firstObject; }
 }
 
 // ── Read stdin ──
@@ -243,6 +306,25 @@ void noff_ensure_guest_stub(const char *guest_path) {
 
 NSString *_Nullable noff_resolve_host_path(NSString *guestPath) {
     if (guestPath.length == 0) return nil;
+
+    // Idempotence guard [T-offload-double-path-translate]: exec_handler
+    // (native_offload.c) translates every absolute-path argv entry
+    // guest→host (bind mounts first, then fakefs data root) BEFORE the
+    // in-process handler runs, so `--image <path>`-style arguments arrive
+    // here already host-side. Re-mapping such a path nests it under the
+    // data root a second time (…/data/private/var/…/data/…) and every
+    // read/write on it fails with ENOENT. Any path already inside the app
+    // sandbox or the shared app-group container is host-side — return it
+    // unchanged. Genuine guest paths (constructed strings, stdin-derived
+    // paths that never went through argv translation) still fall through
+    // to the mapping below.
+    NSString *home = NSHomeDirectory();
+    NSString *privateHome = [@"/private" stringByAppendingString:home];
+    if ([guestPath hasPrefix:home] || [guestPath hasPrefix:privateHome] ||
+        [guestPath hasPrefix:@"/var/mobile/Containers/Shared/"] ||
+        [guestPath hasPrefix:@"/private/var/mobile/Containers/Shared/"]) {
+        return guestPath;
+    }
 
     // Documents/alpine-rootfs/data/ is the fakefs data root
     NSString *documents = NSSearchPathForDirectoriesInDomains(

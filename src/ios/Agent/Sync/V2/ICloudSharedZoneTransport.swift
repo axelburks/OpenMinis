@@ -41,6 +41,7 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         "MessageV2":          sharedZoneName,
         "CompactMarkerV2":    sharedZoneName,
         "SessionFileV2":      sharedZoneName,
+        "FolderV2":           sharedZoneName,
         "SkillV2":            sharedZoneName,
         "SyncDeviceV2":       devicesZoneName,
         "ProviderConfigV2":   secretsZoneName,
@@ -63,12 +64,16 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         "ProviderModelEntryV3": secretsZoneName,
         "ProviderModelGroupV3": secretsZoneName,
         "ThinkingLevelDefinitionsV3": secretsZoneName,
+        "ProviderThinkingRuleV3": secretsZoneName,
+        // [T-subagent-own-store] Instructions can quote anything the user
+        // pasted, so co-locate with the other config records rather than
+        // splitting the roster into a different zone.
+        "SubAgentV3":           secretsZoneName,
         // [T-mcp-sync-zone-mapping] servers.json whole-file record. Was missing
         // from this map, so every MCPServersV2 portable was silently dropped at
         // the push loop's zone guard — MCP servers never reached CloudKit at
         // all. Headers/env values can hold literal tokens, so co-locate with
         // ProviderConfigV2 in the secrets zone.
-        "MCPServersV2":         secretsZoneName,
         // [T-mcp-per-server-sync] Per-server MCP records (recordName =
         // server name). Same secrets-zone placement as the legacy
         // whole-file record: headers/env can hold literal tokens.
@@ -144,6 +149,13 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     /// Set during fullFetch / fetchChanges so the inbound delegate can
     /// accumulate records into a single batch the caller awaits.
     private var fetchAccumulator: (records: [PortableRecord], deletes: [SyncRecordID])?
+    /// [T-icloud-sync-tier1-fetch-source-tag] True while the poll tail's
+    /// bare `engine.fetchChanges()` is in flight. That call does NOT go
+    /// through `fetchChanges(trigger:)` and so does not set
+    /// `fetchAccumulator`; without this flag its resulting event would be
+    /// mis-tagged as push/engine and inflate the push-path count that
+    /// Tier 2 relies on.
+    private var pollTailEngineFetchInFlight = false
     private var fetchCompletion: CheckedContinuation<SyncInboundBatch, Error>?
 
     /// V1 record IDs corresponding to V2 records that have been confirmed
@@ -215,6 +227,9 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     // crashing CloudKit layer is given room instead of being hammered.
     private static let recentFetchInterval: TimeInterval = 120  // 2 min (was 60)
     private static let recentFetchWindow: TimeInterval = 24 * 60 * 60   // last 24 h
+    /// [T-icloud-inbound-serial-apply] Max 200-row pages an incremental
+    /// (non-full-history) fetchRecentV2 query follows per type: 5000 rows.
+    static let incrementalPageCap = 25
 
     // [T-icloud-fresh-restore-provider-groups] Secrets-zone "config" record
     // types whose payload is low-volume but long-lived (created once, edited
@@ -225,8 +240,13 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     // until they have been anchored once via `configTypeAnchoredKey`.
     private static let fullHistoryConfigTypes: Set<String> = [
         "ProviderInstanceV3", "ProviderModelEntryV3", "ProviderModelGroupV3",
-        "ThinkingLevelDefinitionsV3", "ProviderConfigV2", "MCPServersV2",
-        "MCPServerItem", "EnvVarItem",
+        "ThinkingLevelDefinitionsV3", "ProviderThinkingRuleV3", "SubAgentV3",
+        "ProviderConfigV2", "MCPServerItem", "EnvVarItem",
+        // Folders are low-volume config-like records: a fresh device must
+        // pull the full set (a folder created months ago would never fall
+        // inside the 24h window), and sessions arriving before their folder
+        // render as ungrouped until this pull anchors.
+        "FolderV2",
     ]
     /// Per-type "we have completed at least one full-history pull AND the
     /// consumer was ready to apply it" flag. Until set, the type pulls full
@@ -234,12 +254,40 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     private static func configTypeAnchoredKey(_ type: String) -> String {
         "cloudSync.v2.configAnchored.\(type)"
     }
+    /// [T-provider-anchor-two-run-confirm] Count fetched by the LAST clean
+    /// full-history pull of an un-anchored type. Anchoring requires TWO
+    /// consecutive clean full-history pulls returning the same count: CK
+    /// queries are eventually consistent, and anchoring on a single
+    /// "successful" pull permanently trusted a snapshot that could be a
+    /// subset — observed on device as a peer's Default Model group never
+    /// arriving because the anchor closed the full-history window before the
+    /// record was visible to the query.
+    private static func configTypeAnchorPendingCountKey(_ type: String) -> String {
+        "cloudSync.v2.configAnchorPendingCount.\(type)"
+    }
+
+    /// [T-provider-forcesync-v3] Forget the provider types' "history fully
+    /// pulled" anchors (and any pending confirmation counts) so the next
+    /// fetchRecentV2 re-pulls their FULL history. Called by the Providers
+    /// force-sync button — the manual escape hatch for a device whose anchor
+    /// was set from an incomplete (eventually-consistent) pull and whose
+    /// incremental window can therefore never see older-updatedAt records.
+    static func resetProviderConfigAnchors() {
+        let types = ["ProviderInstanceV3", "ProviderModelEntryV3",
+                     "ProviderModelGroupV3", "ThinkingLevelDefinitionsV3",
+                     "ProviderThinkingRuleV3",
+                     "SubAgentV3", "ProviderConfigV2"]
+        for t in types {
+            UserDefaults.standard.removeObject(forKey: configTypeAnchoredKey(t))
+            UserDefaults.standard.removeObject(forKey: configTypeAnchorPendingCountKey(t))
+        }
+        logger.info("[iCloudTrace] provider config anchors reset — next fetchRecentV2 pulls full history for \(types.count) types")
+    }
     /// Consecutive fetchRecentV2 runs that hit at least one CKQuery error.
     /// Drives exponential backoff via `retryAfter`; reset to 0 on a clean run.
     private var consecutiveFetchFailures: Int = 0
     /// Backoff schedule (seconds) indexed by failure count, capped at the
     /// last entry. ~2min → 5min → 10min → 20min → 30min ceiling.
-    private static let fetchBackoffSchedule: [TimeInterval] = [120, 300, 600, 1200, 1800]
 
     // [T-ios-icloud-ckrecordid-nilname-crash] Pre-flight validation for
     // `CKRecord.ID(recordName:zoneID:)`. iOS 26.6 Beta raises an ObjC
@@ -263,8 +311,19 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     // no leading `_`, no trailing `:` for the degenerate empty-id row).
     // Everything else — letters, digits, `/`, `.`, `-`, `_`, spaces, and
     // any printable Unicode incl. Chinese — passes through.
+    ///
+    /// [T-ckrecordname-length-bytes] The 255 limit is measured in BYTES, so the
+    /// check counts UTF-8 bytes rather than Swift `Characters`. `String.count`
+    /// counts GRAPHEME CLUSTERS, which badly under-counts non-ASCII: a 204-char
+    /// Chinese filename is 612 UTF-8 bytes, and a family emoji (👨‍👩‍👧‍👦, seven
+    /// scalars joined by ZWJ) counts as ONE Character while occupying 25 bytes.
+    /// This is reachable, not theoretical — `SessionFileV2` recordNames embed a
+    /// user-controlled file path (`"<type>:<sessionId>:<dir>/<name>"`) and the
+    /// guard deliberately admits CJK and emoji, so a long non-ASCII filename
+    /// could pass a `count <= 255` test while being several times over the real
+    /// limit.
     static func isValidCKRecordName(_ name: String) -> Bool {
-        guard !name.isEmpty, name.count <= 255 else { return false }
+        guard !name.isEmpty, name.utf8.count <= 255 else { return false }
         if name.hasPrefix("_") { return false }
         // Reject the degenerate "type:" with empty id — easy to construct
         // when a dirty row's id column landed as "" instead of NULL.
@@ -601,9 +660,18 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         // applied) pulls its FULL history so months-old providers/groups are not
         // missed by the 24h floor. `cutoffFor` returns the right floor per type.
         func cutoffFor(_ type: String) -> Date {
-            if Self.fullHistoryConfigTypes.contains(type),
-               !UserDefaults.standard.bool(forKey: Self.configTypeAnchoredKey(type)) {
-                return .distantPast
+            if Self.fullHistoryConfigTypes.contains(type) {
+                if !UserDefaults.standard.bool(forKey: Self.configTypeAnchoredKey(type)) {
+                    return .distantPast
+                }
+                // [T-provider-anchor-two-run-confirm] Anchored config types get
+                // a 7-DAY overlap instead of the high-volume types' 24h/5min
+                // window. These are low-volume (tens of instances/groups, ~1k
+                // entries at most), so the wide window costs almost nothing —
+                // and it absorbs clock skew, delayed pushes and CK indexing
+                // lag that the tight window turned into permanently-missed
+                // records.
+                return min(defaultCutoff, now.addingTimeInterval(-7 * 24 * 3600))
             }
             return defaultCutoff
         }
@@ -629,17 +697,41 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         // them either). ProviderModelEntryV3 / ProviderModelGroupV3 carry only
         // updatedAt (no createdAt), so sort all V3 types by updatedAt.
         let typesAndKeys: [(String, String)] = [
-            ("SessionV2", "createdAt"),
+            // [T-icloud-session-poll-by-updatedat] SessionV2 is polled by
+            // updatedAt, not createdAt. A session row changes every time a
+            // turn finishes (updated_at, last-message preview, title), but
+            // its createdAt never moves, so `createdAt > cutoff` can only
+            // ever return sessions CREATED inside the window — an existing
+            // session's updates were invisible to the poll and reached a peer
+            // only if CKSyncEngine's token fetch happened to deliver them.
+            // Observed 2026-09-19: .6 server-saved SessionV2:F163A506 twice
+            // (20:38:10, 20:38:30); .2 polled SessionV2 three times after
+            // that and got 0 rows, so its home list kept the 11:00 preview
+            // while all 277 messages had arrived. MessageV2 / CompactMarkerV2
+            // stay on createdAt: they are immutable by id and numerous, and
+            // an edit to an old message is carried by its own updatedAt LWW
+            // once fetched — but they are fetched by creation, which is what
+            // a "recent" window means for them.
+            ("SessionV2", "updatedAt"),
             ("MessageV2", "createdAt"),
             ("CompactMarkerV2", "createdAt"),
             ("SessionFileV2", "updatedAt"),
+            ("FolderV2", "updatedAt"),
             ("SkillV2", "updatedAt"),
             ("ProviderConfigV2", "updatedAt"),
             ("ProviderInstanceV3", "updatedAt"),
             ("ProviderModelEntryV3", "updatedAt"),
             ("ProviderModelGroupV3", "updatedAt"),
             ("ThinkingLevelDefinitionsV3", "updatedAt"),
-            ("MCPServersV2", "updatedAt"),
+            ("ProviderThinkingRuleV3", "updatedAt"),
+            ("SubAgentV3", "updatedAt"),
+            // [T-icloud-unknown-type-backoff] MCPServersV2 is deliberately NOT
+            // polled. Its outbound path was dead from day one (never in the
+            // v2SyncRecordTypes whitelist — see cb9152c6e), so no device has
+            // ever saved one and CloudKit's just-in-time schema has no such
+            // type: every query returned code 11 unknownItem. The inbound
+            // merger and zone mapping stay so a record could still be read
+            // if one ever appeared, but nothing asks for it any more.
             ("MCPServerItem", "updatedAt"),
             ("EnvVarItem", "updatedAt"),
             ("SoulV2", "updatedAt"),
@@ -689,11 +781,21 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
             // completion: a single page is capped at 200 records, but a power
             // user can have far more model entries than that (e.g. OpenRouter
             // ships 300+), and silently truncating to 200 would drop the rest —
-            // including model-group members. Steady-state 24h windows almost
-            // never exceed one page, so keep their single-page behavior.
+            // including model-group members.
+            //
+            // [T-icloud-inbound-serial-apply] Incremental windows follow the
+            // cursor too, up to `incrementalPageCap` pages. They used to stop at
+            // the first 200 rows, and because the query sorts NEWEST first, a
+            // busy window silently lost its OLDEST rows — then the cursor
+            // commit moved the next window past them, so the poll never saw
+            // them again. Withholding the cursor instead would not help: the
+            // next poll re-runs the same newest-first query and gets the same
+            // 200 rows. Paging costs nothing in the common case (one page, no
+            // queryCursor) and is bounded by the ≤24 h window plus the cap.
             let paginate = (cutoff == .distantPast)
-            let outcome: Result<[(CKRecord, PortableRecord?)], Error>
-            outcome = await Task.detached(priority: .utility) { [self] () -> Result<[(CKRecord, PortableRecord?)], Error> in
+            let pageCap = paginate ? Int.max : Self.incrementalPageCap
+            let outcome: Result<(rows: [(CKRecord, PortableRecord?)], truncated: Bool), Error>
+            outcome = await Task.detached(priority: .utility) { [self] () -> Result<(rows: [(CKRecord, PortableRecord?)], truncated: Bool), Error> in
                 do {
                     var rows: [(CKRecord, PortableRecord?)] = []
                     var result = try await db.records(
@@ -702,6 +804,7 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                         desiredKeys: nil,
                         resultsLimit: 200
                     )
+                    var pages = 1
                     while true {
                         for (_, recResult) in result.matchResults {
                             if case .success(let rec) = recResult {
@@ -711,16 +814,26 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                                 rows.append((rec, p))
                             }
                         }
-                        guard paginate, let cursor = result.queryCursor else { break }
+                        guard let cursor = result.queryCursor else { break }
+                        guard pages < pageCap else { return .success((rows: rows, truncated: true)) }
                         result = try await db.records(continuingMatchFrom: cursor, desiredKeys: nil, resultsLimit: 200)
+                        pages += 1
                     }
-                    return .success(rows)
+                    return .success((rows: rows, truncated: false))
                 } catch {
                     return .failure(error)
                 }
             }.value
             switch outcome {
-            case .success(let rows):
+            case .success(let page):
+                let rows = page.rows
+                if page.truncated {
+                    // Pathological volume (more than incrementalPageCap pages in
+                    // one window). The oldest rows beyond the cap are left to
+                    // CKSyncEngine's token fetch; say so instead of dropping
+                    // them silently.
+                    logger.warning("[iCloudTrace] fetchRecentV2 type=\(type) hit the \(Self.incrementalPageCap)-page cap (\(rows.count) rows) — older rows in this window are left to the token fetch")
+                }
                 for (rec, p) in rows {
                     totalFetched += 1
                     byType[type, default: 0] += 1
@@ -728,18 +841,55 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                     etagCacheDirty = true
                     if let p { portables.append(p) }
                 }
-                // [T-icloud-fresh-restore-provider-groups] For the long-lived
-                // config types, log the count at INFO with the full-history flag
-                // so a field log shows whether providers/groups actually arrived
-                // from CloudKit (vs being dropped downstream by a not-yet-open DB).
-                if Self.fullHistoryConfigTypes.contains(type) {
-                    logger.info("[iCloudTrace][v3sync] fetchRecentV2 config type=\(type) fetched=\(byType[type] ?? 0) fullHistory=\(paginate)")
-                } else {
-                    logger.info("[iCloudTrace] fetchRecentV2 type=\(type) done count=\(byType[type] ?? 0)")
-                }
+                // [T-sync-trace-log-volume] The per-type success lines are gone.
+                //
+                // They were added for T-icloud-fresh-restore-provider-groups
+                // (1e4c74aad, 2026-06-15) to prove whether providers/groups
+                // actually arrived from CloudKit; that bug was fixed in
+                // 1e5f816a5 and the scaffolding stayed. Their information is
+                // fully contained in the summary this same function already
+                // emits at the end of the pass:
+                //
+                //   fetchRecentV2 ok total=226 byType=[EnvVarItem=1
+                //   ProviderConfigV2=1 ProviderInstanceV3=21
+                //   ProviderModelEntryV3=200 …] window=86400s
+                //
+                // …which names every type and its count in ONE line, instead of
+                // two or three lines per type per cycle. Measured on a sampled
+                // device log: 18 types, 34 such lines, every count also present
+                // in the summary.
+                //
+                // Failures are untouched — the `.failure` branch below and the
+                // "NOT anchoring … this type's pull errored" line still report
+                // per type, which is where per-type detail earns its place.
+                break
             case .failure(let error):
                 let nse = error as NSError
                 let ck = error as? CKError
+                // [T-icloud-unknown-type-backoff] A per-type CKQuery that fails
+                // with `.unknownItem` ("Did not find record type") is not a
+                // fetch failure: CloudKit creates a record type only when the
+                // first record of that type is SAVED, so a type no device has
+                // written yet simply does not exist. Semantically that is
+                // "zero records", identical to a successful empty query.
+                //
+                // It used to be counted as an error, which fed the exponential
+                // backoff below — and because such a type errors on EVERY run,
+                // the streak could never reset. Observed on two devices for a
+                // whole day: `ProviderThinkingRuleV3` (the user has no thinking
+                // rules) tripped the 1800s cap on both, `fetchRecentV2
+                // recovered` never fired, and — since `retryAfter` also gates
+                // sends — provider changes sat unsent for 13 minutes at a time.
+                // Zero `retryAfterSeconds` from Apple all day: the throttle was
+                // entirely self-inflicted.
+                //
+                // Log at info, once per run, and move on. Not marking the type
+                // in `typesWithError` is deliberate: an empty type has nothing
+                // to anchor past, so anchoring it as "pulled clean" is correct.
+                if ck?.code == .unknownItem {
+                    logger.info("[iCloudTrace] fetchRecentV2 type=\(type) not in schema yet (no record of this type has ever been saved) — treating as empty")
+                    continue
+                }
                 logger.warning("[iCloudTrace] fetchRecentV2 type=\(type) field=\(dateKey) failed: code=\(nse.code) ck=\(ck?.code.rawValue ?? -1) desc=\(error.localizedDescription)")
                 fetchHadError = true
                 typesWithError.insert(type)
@@ -752,7 +902,12 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                 continue
             }
         }
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.recentFetchLastKey)
+        // [T-icloud-sync-tier1-cursor-after-apply] The cursor used to be
+        // stamped HERE — before a single fetched record reached SyncCore.
+        // A kill between this line and the end of apply lost the batch for
+        // good once it aged past the 5-min slack. It is now committed by
+        // `commitRecentFetchCursor` from the LAST chunk's onApplied.
+        let fetchStampForCursor = Date().timeIntervalSince1970
         // [T-icloud-fresh-restore-provider-groups] Anchor each full-history
         // config type so it stops re-pulling its whole history — but ONLY once
         // its consumer is actually ready to APPLY what we fetched. The V3
@@ -765,6 +920,7 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         let providerDBReady = ProviderConfigStore.shared.db != nil
         let providerGatedTypes: Set<String> = [
             "ProviderInstanceV3", "ProviderModelEntryV3", "ProviderModelGroupV3", "ProviderConfigV2",
+            "ProviderThinkingRuleV3",
         ]
         // [T-icloud-provider-anchor-per-type] Anchor each full-history type on
         // ITS OWN successful pull (no error for THAT type), not on a clean batch.
@@ -781,23 +937,67 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                 logger.info("[iCloudTrace] fetchRecentV2 NOT anchoring \(type) — provider DB not open yet, will re-pull full history next run")
                 continue
             }
-            UserDefaults.standard.set(true, forKey: Self.configTypeAnchoredKey(type))
-            logger.info("[iCloudTrace] fetchRecentV2 anchored config type \(type) (full-history pull complete)")
+            // [T-provider-anchor-two-run-confirm] CK queries are eventually
+            // consistent: one clean pull can still return a SUBSET, and
+            // anchoring on it permanently hides the missed records behind the
+            // incremental window. Require two consecutive clean full-history
+            // pulls with the SAME count before trusting the snapshot. Costs
+            // one extra full-history query per type on a fresh device (low
+            // volume, and the second run's applies all hit the updatedAt
+            // guard); the steady-state incremental path is unchanged.
+            let fetchedThisRun = byType[type] ?? 0
+            let pendingKey = Self.configTypeAnchorPendingCountKey(type)
+            if let prev = UserDefaults.standard.object(forKey: pendingKey) as? Int,
+               prev == fetchedThisRun {
+                UserDefaults.standard.set(true, forKey: Self.configTypeAnchoredKey(type))
+                UserDefaults.standard.removeObject(forKey: pendingKey)
+                logger.info("[iCloudTrace] fetchRecentV2 anchored config type \(type) (confirmed: two full-history pulls both fetched=\(fetchedThisRun))")
+            } else {
+                UserDefaults.standard.set(fetchedThisRun, forKey: pendingKey)
+                logger.info("[iCloudTrace] fetchRecentV2 NOT anchoring \(type) yet — first clean full-history pull fetched=\(fetchedThisRun), awaiting a confirming run")
+            }
         }
         let breakdown = byType.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
         logger.info("[iCloudTrace] fetchRecentV2 ok total=\(totalFetched) byType=[\(breakdown)] window=\(Int(Self.recentFetchWindow))s")
         if !portables.isEmpty, let h = observeHandler {
-            // Slice into 50-record chunks (same as token-driven path).
+            // Slice into 50-record chunks (same as token-driven path). The
+            // cursor is committed by the last chunk's completion; earlier
+            // chunks carry no completion. [T-icloud-inbound-serial-apply]
+            // SyncCore chains every processInbound task onto the previous one
+            // (`inboundTail`), so slices apply strictly in hand-off order and
+            // "last chunk applied" implies all earlier chunks applied. It did
+            // NOT hold before that change: one independent task per slice
+            // interleaved at every await.
+            // A run in which ANY per-type query failed must not advance the
+            // cursor: that type's records were never fetched, and moving
+            // past them would hide them until the 24 h window is forced. The
+            // pre-change code stamped unconditionally — that was a second,
+            // quieter way to lose a batch. `.unknownItem` (type not in
+            // schema) does not set fetchHadError, so an empty type still
+            // lets the cursor advance.
+            let commitAllowed = !fetchHadError
             let chunk = 50
             var i = 0
             while i < portables.count {
                 let end = min(i + chunk, portables.count)
-                h(SyncInboundBatch(records: Array(portables[i..<end]), deletes: [], sourceDeviceId: nil))
+                let isLast = end >= portables.count
+                let stamp = fetchStampForCursor
+                h(SyncInboundBatch(records: Array(portables[i..<end]), deletes: [], sourceDeviceId: nil,
+                                   onApplied: (isLast && commitAllowed) ? { [weak self] in self?.commitRecentFetchCursor(stamp) } : nil))
                 i = end
             }
+            if !commitAllowed {
+                logger.info("[iCloudTrace] fetchRecentV2 cursor NOT advanced — a per-type query failed this run; will re-pull from the previous cursor")
+            }
+        } else if !fetchHadError {
+            // Nothing to apply and nothing failed: the fetch itself is the
+            // whole unit of work.
+            commitRecentFetchCursor(fetchStampForCursor)
         }
         // Also poke CKSyncEngine to keep its token catching up.
         if let engine = syncEngine {
+            pollTailEngineFetchInFlight = true
+            defer { pollTailEngineFetchInFlight = false }
             do {
                 try await engine.fetchChanges()
                 logger.info("[iCloudTrace] fetchRecentV2 token-fetch ok")
@@ -822,15 +1022,19 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         // Server-signalled retryAfterSeconds above already sets a floor; this
         // ensures even errors WITHOUT a retryAfter hint back off. A fully
         // clean run resets the streak so steady-state latency is unaffected.
+        // [T-icloud-sync-tier2-apple-retry-only] No app-invented backoff.
+        // The schedule that used to live here ([120, 300, 600, 1200, 1800])
+        // fired on ANY per-type failure and, because two record types
+        // failed on every run, parked both test devices at the 1800 s cap
+        // for a whole day while Apple sent zero `retryAfterSeconds`. Apple's
+        // own guidance: honour `CKErrorRetryAfterKey` when the server sends
+        // it (it is applied above, per failing type, and by CKSyncEngine for
+        // its own operations), and otherwise let the next scheduled fetch
+        // try again. The 120 s poll is already the retry cadence. The
+        // failure streak is kept as a counter for the log only.
         if fetchHadError {
             consecutiveFetchFailures += 1
-            let idx = min(consecutiveFetchFailures - 1, Self.fetchBackoffSchedule.count - 1)
-            let backoff = Self.fetchBackoffSchedule[idx]
-            let until = Date().addingTimeInterval(backoff)
-            if (self.retryAfter ?? .distantPast) < until {
-                self.retryAfter = until
-            }
-            logger.warning("[iCloudTrace] fetchRecentV2 backoff — failures=\(consecutiveFetchFailures) next attempt gated for \(Int(backoff))s")
+            logger.warning("[iCloudTrace] fetchRecentV2 had errors this run (streak=\(consecutiveFetchFailures)); next attempt on the regular cadence" + (retryAfter.map { " or after server retryAfter \($0)" } ?? ""))
         } else if consecutiveFetchFailures > 0 {
             logger.info("[iCloudTrace] fetchRecentV2 recovered — clearing failure streak (was \(consecutiveFetchFailures))")
             consecutiveFetchFailures = 0
@@ -982,7 +1186,24 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                 logger.warning("[SyncTransport] skipping invalid recordName for save: \(Self.escapeForLog(recordName)) type=\(portable.id.type)")
                 continue
             }
-            let recordID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+            // [T-ckrecordname-defense-in-depth] Belt AND braces, matching the
+            // CloudSyncEngine sites. The guard above is the primary defence and
+            // must stay primary: this enclosing `send` is `async`, and an
+            // NSException that crosses an `await` boundary escapes the ObjC
+            // @try frame entirely (see SyncV2Bootstrap's notes), so a try/catch
+            // can never be the thing we rely on here. It is safe and useful at
+            // THIS call site only because the wrapped work is purely
+            // synchronous — no `await` occurs between @try and @catch — so the
+            // frame is intact and it catches whatever the validator failed to
+            // anticipate about CloudKit's rules.
+            var recordIDOpt: CKRecord.ID?
+            let recordIDOk = noff_try_objc {
+                recordIDOpt = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+            }
+            guard recordIDOk, let recordID = recordIDOpt else {
+                logger.error("[SyncTransport] CKRecord.ID threw for save recordName \(Self.escapeForLog(recordName)) type=\(portable.id.type) — skipping")
+                continue
+            }
             // Reuse server record (preserves system fields + unknown fields)
             let ck = serverRecordCache[recordID] ?? CKRecord(recordType: portable.id.type, recordID: recordID)
             applyPortable(portable, to: ck)
@@ -1003,7 +1224,16 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                 logger.warning("[SyncTransport] skipping invalid recordName for delete: \(Self.escapeForLog(recordName)) type=\(d.type)")
                 continue
             }
-            let recordID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+            // [T-ckrecordname-defense-in-depth] Same shape as the save loop
+            // above — synchronous body, so the @try frame survives.
+            var recordIDOpt: CKRecord.ID?
+            let recordIDOk = noff_try_objc {
+                recordIDOpt = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+            }
+            guard recordIDOk, let recordID = recordIDOpt else {
+                logger.error("[SyncTransport] CKRecord.ID threw for delete recordName \(Self.escapeForLog(recordName)) type=\(d.type) — skipping")
+                continue
+            }
             pendingDeletes.append(recordID)
             logger.info("[iCloudTrace] queue delete \(d.type):\(d.id.prefix(8)) → zone=\(zoneName)")
         }
@@ -1350,21 +1580,68 @@ extension ICloudSharedZoneTransport: CKSyncEngineDelegate {
             let recs = self.pendingRecords; self.pendingRecords.removeAll()
             let dels = self.pendingDeletes; self.pendingDeletes.removeAll()
             guard !recs.isEmpty || !dels.isEmpty else { return nil }
-            // Smaller batches keep peak memory + CPU bounded during the
-            // initial migration push (each batch builds PortableRecord
-            // payloads + reads asset files). 400 was fine for steady
-            // state but observed to spike resident memory >2 GB on
-            // large backlogs; 20 cuts that to a manageable working
-            // set per send and lets the dirty queue drain in smaller
-            // visible steps for the migration progress UI.
-            let maxBatch = 20
-            let deleteSlice = Array(dels.prefix(maxBatch))
-            let recordSlice = Array(recs.prefix(maxBatch - deleteSlice.count))
-            // Spill overflow back for the next batch.
-            let overflowRecs = Array(recs.dropFirst(recordSlice.count))
+            // [T-icloud-batch-byte-budget] Bound the batch by BYTES, not by
+            // record count.
+            //
+            // History: this was 400, dropped to a flat 20 after resident memory
+            // spiked past 2 GB on a large backlog. That fixed the spike but
+            // mispriced the cost — peak memory here tracks payload size (each
+            // batch materializes PortableRecord payloads and reads asset files),
+            // not how many records are in it. A flat 20 therefore throttles the
+            // common case, which is thousands of small text records, to 1/20th
+            // of its former rate: OpenMinis#141's backlog became ~190 CKSyncEngine
+            // round trips at ~94 records/hour, every one of them able to draw a
+            // fresh retryAfter penalty and make the throttling worse.
+            //
+            // Budgeting by bytes keeps the 2 GB fix intact — a batch of large
+            // assets still cuts off early — while letting a batch of ordinary
+            // messages carry a useful number of records again. The record count
+            // remains capped as a backstop for pathological cases (very many
+            // near-empty records) and to keep the migration progress UI moving
+            // in visible steps.
+            // [T-icloud-sync-tier2-bytes-first] Two facts from the field
+            // logs drove this: a batch is bounded by BYTES long before the
+            // record cap (8.6 MB at 32 records), and what fills the bytes is
+            // SessionFileV2 assets (~270 KB each) while a message is 5–10 KB.
+            // A finished turn's three records were routinely queued behind
+            // megabytes of files. So: records WITHOUT assets go first, in
+            // their own batch capped at Apple's 250 and 1 MB; asset-bearing
+            // records only start once no small record is waiting, under the
+            // larger byte budget. Deletes ride with whichever batch is built.
+            let maxBatchRecords = 250
+            let smallBatchBytes = 1 * 1024 * 1024
+            let assetBatchBytes = 8 * 1024 * 1024
+
+            let deleteSlice = Array(dels.prefix(maxBatchRecords))
+            let recordRoom = maxBatchRecords - deleteSlice.count
+            let small = recs.filter { !Self.carriesAsset($0) }
+            let withAssets = recs.filter { Self.carriesAsset($0) }
+            let source: [CKRecord]; let maxBatchBytes: Int; let batchKind: String
+            if !small.isEmpty { source = small; maxBatchBytes = smallBatchBytes; batchKind = "records" }
+            else { source = withAssets; maxBatchBytes = assetBatchBytes; batchKind = "assets" }
+            var recordSlice: [CKRecord] = []
+            var budget = maxBatchBytes
+            for rec in source {
+                if recordSlice.count >= recordRoom { break }
+                // Always admit the first record even if it alone blows the
+                // budget — otherwise a single oversized record would stall the
+                // queue forever, never shipping and never making room.
+                if !recordSlice.isEmpty && budget <= 0 { break }
+                recordSlice.append(rec)
+                budget -= Self.estimatedRecordBytes(rec)
+            }
+            // Spill overflow back for the next batch, small ones ahead of assets.
+            let sentIDs = Set(recordSlice.map { $0.recordID })
+            let overflowRecs = small.filter { !sentIDs.contains($0.recordID) } + withAssets.filter { !sentIDs.contains($0.recordID) }
             let overflowDels = Array(dels.dropFirst(deleteSlice.count))
             self.pendingRecords.append(contentsOf: overflowRecs)
             self.pendingDeletes.append(contentsOf: overflowDels)
+            // [T-icloud-batch-byte-budget] Makes the batching decision visible:
+            // a backlog draining slowly should show large record counts here,
+            // and a run cut short by bytes should show a small count with the
+            // budget consumed. Without this the only observable was the record
+            // count, which is exactly what mispriced the original 400→20 change.
+            logger.info("[iCloudTrace] batch: kind=\(batchKind) records=\(recordSlice.count) deletes=\(deleteSlice.count) bytesUsed=\(maxBatchBytes - budget) overflow=\(overflowRecs.count + overflowDels.count)")
             return CKSyncEngine.RecordZoneChangeBatch(
                 recordsToSave: recordSlice,
                 recordIDsToDelete: deleteSlice,
@@ -1373,9 +1650,54 @@ extension ICloudSharedZoneTransport: CKSyncEngineDelegate {
         }
     }
 
+    /// [T-icloud-batch-byte-budget] Rough in-memory cost of one outbound record,
+    /// used only to decide where to cut a batch.
+    ///
+    /// Assets dominate and are the reason the batch needs a byte budget at all,
+    /// so they are counted from the `_size` field the writer already records
+    /// (see applyPortable) — the file is not opened here. Everything else is a
+    /// small flat estimate: precision doesn't matter for a cut-off decision, and
+    /// walking every value of every record on the main actor would cost more
+    /// than it saves.
+    /// True when any field of the record is a CKAsset. Keeps asset-bearing
+    /// records (SessionFileV2, large attachments) out of the small batch.
+    private static func carriesAsset(_ record: CKRecord) -> Bool {
+        record.allKeys().contains { record[$0] is CKAsset }
+    }
+
+    private static func estimatedRecordBytes(_ record: CKRecord) -> Int {
+        var total = 4096   // record overhead + typical small text fields
+        for key in record.allKeys() {
+            if record[key] is CKAsset {
+                // The writer stores the byte count alongside as "<key>_size".
+                if let size = record[key + "_size"] as? Int {
+                    total += size
+                } else {
+                    // Unknown asset size: assume it is large enough to matter,
+                    // so an un-sized asset can't silently blow the budget.
+                    total += assetInlineThreshold
+                }
+            } else if let s = record[key] as? String {
+                total += s.utf8.count
+            } else if let d = record[key] as? Data {
+                total += d.count
+            }
+        }
+        return total
+    }
+
     @MainActor
     private func handleFetchedZoneChanges(_ zoneChanges: CKSyncEngine.Event.FetchedRecordZoneChanges) {
-        logger.info("[iCloudTrace] handleFetchedZoneChanges called: mods=\(zoneChanges.modifications.count) dels=\(zoneChanges.deletions.count)")
+        // [T-icloud-sync-tier1-fetch-source-tag] Say WHO asked for this
+        // fetch. `fetchAccumulator` is non-nil only inside an explicit
+        // `fetchChanges(trigger:)` (poll tail, foreground resume, manual);
+        // when it is nil the engine fetched on its own — a silent push from
+        // its CKDatabaseSubscription, or its own periodic schedule. Until
+        // this tag existed nobody could tell from a log that the push path
+        // was working at all (it was: a session crossed devices 17 s after
+        // the server ack on 2026-09-19, between two poll ticks).
+        let source = (fetchAccumulator != nil || pollTailEngineFetchInFlight) ? "app-fetch" : "push/engine"
+        logger.info("[iCloudTrace] handleFetchedZoneChanges called: mods=\(zoneChanges.modifications.count) dels=\(zoneChanges.deletions.count) source=\(source)")
         let registry = SyncableTypeRegistry.shared
         let v2Zones: Set<String> = [Self.sharedZoneName, Self.devicesZoneName, Self.secretsZoneName]
         // [OwnEchoSkip transport-level] Prune expired echo-suppress entries
@@ -1658,6 +1980,17 @@ extension ICloudSharedZoneTransport: CKSyncEngineDelegate {
     }
 
     @MainActor
+    /// [T-icloud-sync-tier1-cursor-after-apply] Commit the fetchRecentV2
+    /// cursor. `stamp` is the FETCH time (not now), so records that arrived
+    /// on the server during a long apply are still inside the next window.
+    /// Monotonic: never moves the cursor backwards if two runs overlap.
+    private func commitRecentFetchCursor(_ stamp: TimeInterval) {
+        let prev = UserDefaults.standard.object(forKey: Self.recentFetchLastKey) as? Double ?? 0
+        guard stamp > prev else { return }
+        UserDefaults.standard.set(stamp, forKey: Self.recentFetchLastKey)
+        logger.info("[iCloudTrace] fetchRecentV2 cursor committed after apply (stamp=\(Int(stamp)))")
+    }
+
     private func persistState(_ state: CKSyncEngine.State.Serialization) {
         self.stateSerialization = state
         if let data = try? JSONEncoder().encode(state) {
@@ -1681,8 +2014,33 @@ extension ICloudSharedZoneTransport: CKSyncEngineDelegate {
         let v1Types: Set<String> = ["Session", "Message", "CompactMarker", "SessionFile", "ProviderConfig", "EnvVar"]
         guard v1Types.contains(v1Type) else { return nil }
         let v1Name = "\(v1Type):\(parts[1])"
+        // [T-ckrecordname-defense-in-depth] Validate here too, for consistency
+        // with every other construction site in this file.
+        //
+        // Today this cannot fail: the input is a recordID CloudKit itself
+        // accepted and echoed back, and the derivation only DROPS the "V2"
+        // suffix while copying the id verbatim, so the result is always shorter
+        // than an already-legal name. The one shape that would produce an
+        // illegal name is a `"<Type>V2:"` with an empty id (deriving a trailing
+        // `:`), and the save path above rejects those before they can reach the
+        // server. The guard exists so that reasoning does not have to be
+        // re-derived by the next person to touch this — and so a future change
+        // to either side cannot silently reintroduce the crash that 8af19b48
+        // fixed.
+        guard isValidCKRecordName(v1Name) else {
+            logger.warning("[SyncTransport] v1RecordID: derived invalid recordName \(escapeForLog(v1Name)) from \(escapeForLog(v2.recordName)) — skipping v1 delete")
+            return nil
+        }
         let zoneID = CKRecordZone.ID(zoneName: DeviceIdentity.zoneName)
-        return CKRecord.ID(recordName: v1Name, zoneID: zoneID)
+        var out: CKRecord.ID?
+        let ok = noff_try_objc {
+            out = CKRecord.ID(recordName: v1Name, zoneID: zoneID)
+        }
+        guard ok else {
+            logger.error("[SyncTransport] v1RecordID: CKRecord.ID threw for \(escapeForLog(v1Name)) — skipping v1 delete")
+            return nil
+        }
+        return out
     }
 
     @MainActor

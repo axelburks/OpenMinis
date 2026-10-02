@@ -93,6 +93,22 @@ class TerminalSession(private val context: Context) {
     private var masterFd: Int = -1
     private var childPid: Int = 0
     private var readerJob: Job? = null
+
+    /**
+     * [T-android-seccomp-selfheal / GH#186] Set once the interactive shell has
+     * been restarted with PROOT_NO_SECCOMP=1; also the one-shot guard that
+     * stops a crash-restart loop if the retry dies the same way.
+     */
+    @Volatile
+    private var useNoSeccomp = false
+
+    /**
+     * Whether this PTY ever emitted output. A terminal that printed something
+     * has begun a real session, so a later crash is the guest program's, not
+     * the loader's — and restarting would wipe visible scrollback.
+     */
+    @Volatile
+    private var sawOutput = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile private var cols: Int = DEFAULT_COLS
@@ -109,6 +125,9 @@ class TerminalSession(private val context: Context) {
         _state.value = State.BOOTING
         cols = initialCols
         rows = initialRows
+        // Fresh per PTY incarnation, so a retry is judged on its own output
+        // rather than inheriting the dead attempt's.
+        sawOutput = false
 
         scope.launch {
             try {
@@ -120,7 +139,7 @@ class TerminalSession(private val context: Context) {
                     }
                 }
 
-                val cmdList = buildInteractiveCommand()
+                val cmdList = buildInteractiveCommand(sessionId)
                 val cmd = cmdList.first()
                 val argv = cmdList.toTypedArray()
 
@@ -143,6 +162,12 @@ class TerminalSession(private val context: Context) {
                 for ((k, v) in PRootKernel.customEnvironment) envMap[k] = v
                 ExecutionCoordinator.envVarRepository?.allAsDict()?.forEach { (k, v) -> envMap[k] = v }
 
+                // [T-android-seccomp-selfheal / GH#186] Applied last so nothing
+                // above can clobber it once this device is known to need it.
+                if (useNoSeccomp) {
+                    envMap[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
+                }
+
                 val envp = envMap.map { (k, v) -> "$k=$v" }.toTypedArray()
                 val cwd = File(cmd).parentFile?.absolutePath
 
@@ -164,13 +189,50 @@ class TerminalSession(private val context: Context) {
                     kotlinx.coroutines.delay(300)
                     writeInput("cd /var/minis && clear\n".toByteArray())
                 }
+                // [T-android-session-private-mounts] Say which files this
+                // terminal sees. Written to the screen, not typed into the
+                // shell, so it never lands in history. Delayed past the
+                // `clear` above so it is not wiped.
+                scope.launch {
+                    kotlinx.coroutines.delay(if (sessionId != null) 600 else 300)
+                    _outputBytes.emit(banner(sessionId).toByteArray())
+                }
 
                 readerJob = scope.launch { readLoop() }
 
                 // Wait for child exit in a sibling coroutine.
+                val spawnedAt = System.currentTimeMillis()
                 scope.launch {
                     val status = PtyBridge.waitFor(childPid)
                     Log.i(TAG, "Child exited: status=$status")
+
+                    // [T-android-seccomp-selfheal / GH#186] PtyBridge reports a
+                    // signal death as -(128+signal) (pty_bridge.c:234), so
+                    // negate before consulting the policy. If the interactive
+                    // shell died on an early fatal signal, restart it once with
+                    // PROOT_NO_SECCOMP=1 rather than leaving the user staring
+                    // at a dead terminal they cannot fix from the UI.
+                    val aliveMs = System.currentTimeMillis() - spawnedAt
+                    if (SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
+                            exitCode = if (status < 0) -status else null,
+                            durationMs = aliveMs,
+                            producedOutput = sawOutput,
+                            alreadyRetried = useNoSeccomp,
+                        )
+                    ) {
+                        com.openminis.app.logging.AppLogger.warning(
+                            TAG,
+                            SeccompFallbackPolicy.retryLogLine(-status, aliveMs, "interactive terminal"),
+                        )
+                        useNoSeccomp = true
+                        masterFd = -1
+                        childPid = 0
+                        readerJob?.cancel()
+                        readerJob = null
+                        start(sessionId, cols, rows)
+                        return@launch
+                    }
+
                     _outputBytes.emit("\r\n[Process exited: $status]\r\n".toByteArray())
                     _state.value = State.STOPPED
                 }
@@ -192,6 +254,7 @@ class TerminalSession(private val context: Context) {
                 if (n < 0) Log.d(TAG, "readBytes returned errno=${-n}")
                 break
             }
+            sawOutput = true
             _outputBytes.emit(buf.copyOf(n))
         }
     }
@@ -342,7 +405,23 @@ class TerminalSession(private val context: Context) {
         }
     }
 
-    private fun buildInteractiveCommand(): List<String> {
+    /**
+     * One-line notice of what `/var/minis` means in this terminal. A chat's
+     * terminal shares that chat's workspace with its agent; the global one
+     * belongs to no chat, and saying so up front prevents "I saved it in the
+     * terminal and the agent can't see it".
+     */
+    private fun banner(sessionId: String?): String =
+        if (sessionId != null) {
+            "\u001b[2m[Minis] /var/minis/{workspace,attachments,offloads,browser} are this chat's " +
+                "(session ${sessionId.take(8)}) — the agent in that chat sees the same files.\u001b[0m\r\n"
+        } else {
+            "\u001b[2m[Minis] Global terminal — not tied to any chat. /var/minis/workspace here is NOT " +
+                "any chat's workspace; open the terminal from a chat's menu to work in its files. " +
+                "Shared: /var/minis/{shared,memory,skills}.\u001b[0m\r\n"
+        }
+
+    private fun buildInteractiveCommand(sessionId: String?): List<String> {
         check(PRootKernel.isBooted) { "PRootKernel must be booted" }
         val rootfsManager = RootfsManager.getInstance(context)
         val cmd = mutableListOf<String>()
@@ -357,14 +436,38 @@ class TerminalSession(private val context: Context) {
         cmd.add("-b"); cmd.add("/sys")
         cmd.add("-w"); cmd.add("/root")
 
-        for ((linuxPath, hostPath) in PRootKernel.bindMounts) {
-            cmd.add("-b"); cmd.add("$hostPath:$linuxPath")
-        }
+        // [T-android-session-private-mounts] The same mount set the agent's
+        // shell for [sessionId] gets (SessionMounts is the single builder), so
+        // a file saved here is the file the agent sees. This used to replay
+        // the global PRootKernel.bindMounts, whose per-session entries were
+        // whichever chat last built a shell — a random chat's workspace.
+        // No session (global entry): global dirs and external mounts only.
+        cmd.addAll(SessionMounts.toProotArgs(SessionMounts.forContext(context, sessionId).mounts))
 
         val handlers = NativeOffloadServer.registeredHandlers
         if (handlers.isNotEmpty()) {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
+
+        // [T-android-fake-netlink-tty-parity] Same rtnetlink emulation the
+        // agent's shell gets — see PRootKernel.buildProotCommand, which is the
+        // authoritative copy of this rationale.
+        //
+        // c9318f42f added `--fake-netlink` to that builder only, so the two
+        // ways into the sandbox disagreed: a tool run by the agent saw an
+        // (empty) interface list, while the SAME tool typed into this terminal
+        // hit the real AF_NETLINK refusal from Android's untrusted_app SELinux
+        // domain. A sandbox that behaves differently depending on which screen
+        // you launched from is a debugging trap regardless of which behaviour
+        // is the better one, so the flag is mirrored here.
+        //
+        // The ⚠️ on the original still stands, and now covers this call site
+        // too: an empty interface list is a deliberate lie that unblocks
+        // callers which only need enumeration to succeed, at the cost of
+        // moving the failure later for callers that then bind a local address.
+        // Whatever exposure decision that flag gets, both builders take it
+        // together.
+        cmd.add("--fake-netlink")
 
         // Login + interactive so /etc/profile is sourced (readline, history, color aliases).
         cmd.add("/bin/sh")

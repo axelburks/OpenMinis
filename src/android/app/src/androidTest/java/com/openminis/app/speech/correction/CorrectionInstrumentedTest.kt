@@ -79,7 +79,9 @@ class CorrectionInstrumentedTest {
 
     @Test fun textInputEditLearnsAfterConsent() {
         VoiceCorrectionConsent.setEnabled(ctx, true)
-        recorder().recordTextInputEdit("石塘", "食堂")
+        // [Minix] Keep the corrected span local to a sentence; v1.14 rejects
+        // whole-input replacement as a rewrite before phonetic admission.
+        recorder().recordTextInputEdit("我们去石塘吃饭", "我们去食堂吃饭")
         val rows = db().lookupConfusion(
             listOf(PinyinNormalizer.normalize("石塘")), "zh", 0.0, 10)
         assertTrue("got $rows", rows.isNotEmpty())

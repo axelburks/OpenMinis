@@ -3,6 +3,7 @@ package com.openminis.app.provider
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RequestBodyControl
@@ -133,7 +134,25 @@ data class RequestCustomization(
         )
     }
 
-    fun apply(body: JSONObject, headers: MutableMap<String, String>, apiKey: String?) {
+    fun thinkingDefinitionIdForRequest(
+        explicitDefinitionId: String?,
+        thinkingLevel: ThinkingLevel,
+    ): String? {
+        if (explicitDefinitionId != null) return explicitDefinitionId
+        if (!usesConversationRequestControlState) return null
+        return ThinkingLevelRegistry
+            .definitionForLevelId(
+                thinkingLevel.name.lowercase(),
+                context,
+            )?.definitionId
+    }
+
+    fun apply(
+        body: JSONObject,
+        headers: MutableMap<String, String>,
+        apiKey: String?,
+        includeControls: Boolean = true,
+    ) {
         val model = modelEntry?.model ?: LLMModel(id = "", displayName = "", provider = "")
         var requestContext = RequestCustomizationContext(provider, model, apiKey, sessionId, headers, body)
         applyHeaderExpressions(
@@ -151,6 +170,7 @@ data class RequestCustomization(
         )
         requestContext = RequestCustomizationContext(provider, model, apiKey, sessionId, headers, body)
         mergeInto(body, parseBodyExpressions(modelEntry?.overrides?.customRequestBody ?: emptyList(), requestContext))
+        if (!includeControls) return
         val state = RequestBodyControlRuntimeStore.state(
             context = context,
             sessionKey = sessionId,
@@ -221,7 +241,6 @@ data class RequestCustomization(
 
 object RequestBodyControlDefaults {
     fun thinkingOptionGroup(instance: ProviderInstance?): RequestBodyControl {
-        val responses = instance?.useResponsesAPI == true
         val levels = latestTemplateLevels(instance?.providerType)
         return RequestBodyControl(
             title = "Thinking Intensity",
@@ -242,7 +261,10 @@ object RequestBodyControlDefaults {
                     thinkingDefinitionId =
                         definition?.definitionId,
                     title = level.displayName,
-                    payloadExpressions = thinkingExpressions(instance?.providerType, responses, level),
+                    payloadExpressions = thinkingExpressions(
+                        instance,
+                        level,
+                    ),
                 )
             },
         )
@@ -252,20 +274,37 @@ object RequestBodyControlDefaults {
         providerType: ProviderType?,
     ): List<ThinkingLevel> {
         return when (providerType) {
-            ProviderType.openAI, ProviderType.kimiCode, ProviderType.openRouter ->
+            ProviderType.openAI, ProviderType.openAIResponses,
+            ProviderType.kimiCode, ProviderType.openRouter,
+            ProviderType.githubCopilot ->
                 listOf(ThinkingLevel.OFF, ThinkingLevel.MINIMAL, ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX)
             ProviderType.xAI ->
                 listOf(ThinkingLevel.OFF, ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH)
             ProviderType.anthropic ->
                 listOf(ThinkingLevel.OFF, ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX)
-            ProviderType.gemini ->
+            ProviderType.gemini, ProviderType.antigravity ->
                 listOf(ThinkingLevel.MINIMAL, ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH)
-            null ->
+            ProviderType.unsupported, null ->
                 listOf(ThinkingLevel.OFF, ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH, ThinkingLevel.XHIGH)
         }
     }
 
-    private fun thinkingExpressions(providerType: ProviderType?, responses: Boolean, level: com.openminis.app.data.model.ThinkingLevel): List<String> {
+    internal fun thinkingExpressions(
+        instance: ProviderInstance?,
+        level: ThinkingLevel,
+    ): List<String> {
+        // [Minix] Match ProviderFactory routing, not only the optional toggle:
+        // the dedicated type and first-party Codex OAuth also force Responses.
+        val responses = when {
+            instance == null -> false
+            instance.providerType == ProviderType.openAIResponses -> true
+            instance.providerType != ProviderType.openAI -> false
+            instance.useResponsesAPI -> true
+            instance.credentialType == ProviderCredential.oauth &&
+                instance.customBaseURL.isNullOrBlank() -> true
+            else -> false
+        }
+        val providerType = instance?.providerType
         return when {
             responses -> listOf("body.reasoning = {effort: \"${reasoningEffort(level)}\", summary: \"auto\"}")
             providerType == ProviderType.anthropic && level == com.openminis.app.data.model.ThinkingLevel.OFF ->
@@ -275,11 +314,20 @@ object RequestBodyControlDefaults {
                     "body.thinking = {type: \"adaptive\", display: \"summarized\"}",
                     "body.output_config.effort = \"${anthropicEffort(level)}\"",
                 )
-            providerType == ProviderType.gemini ->
+            providerType == ProviderType.gemini ||
+                providerType == ProviderType.antigravity ->
                 listOf("body.generationConfig.thinkingConfig = {thinkingLevel: \"${geminiEffort(level)}\", includeThoughts: true}")
             else -> listOf("body.reasoning_effort = \"${reasoningEffort(level)}\"")
         }
     }
+
+    internal fun thinkingExpressions(
+        instance: ProviderInstance?,
+        definition: com.openminis.app.data.model.ThinkingLevelDefinition,
+    ): List<String> =
+        ThinkingLevel.parseOrNull(definition.levelId)
+            ?.let { thinkingExpressions(instance, it) }
+            ?: emptyList()
 
     private fun reasoningEffort(level: com.openminis.app.data.model.ThinkingLevel): String =
         if (level == com.openminis.app.data.model.ThinkingLevel.OFF) "none" else level.name.lowercase()

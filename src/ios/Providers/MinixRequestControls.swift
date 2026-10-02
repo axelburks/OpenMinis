@@ -217,7 +217,10 @@ enum RequestBodyControlDefaults {
                     thinkingDefinitionId:
                         definition?.definitionId,
                     title: level.displayName,
-                    payloadExpressions: thinkingExpressions(providerType: instance?.providerType, level: level)
+                    payloadExpressions: thinkingExpressions(
+                        for: instance,
+                        level: level
+                    )
                 )
             }
         )
@@ -227,7 +230,7 @@ enum RequestBodyControlDefaults {
         providerType: ProviderType?
     ) -> [ThinkingLevel] {
         switch providerType {
-        case .openAI, .openAIResponses, .kimiCode, .openRouter:
+        case .openAI, .openAIResponses, .kimiCode, .openRouter, .githubCopilot:
             return [.off, .minimal, .low, .medium, .high, .xhigh, .max]
         case .xAI:
             return [.off, .low, .medium, .high]
@@ -240,7 +243,46 @@ enum RequestBodyControlDefaults {
         }
     }
 
-    static func thinkingExpressions(providerType: ProviderType?, level: ThinkingLevel) -> [String] {
+    static func thinkingExpressions(
+        for instance: ProviderInstance?,
+        level: ThinkingLevel
+    ) -> [String] {
+        // [Minix] Match LLMProviderFactory routing: first-party OpenAI OAuth
+        // uses Responses even though its persisted provider type is openAI.
+        let usesResponsesAPI =
+            instance?.providerType == .openAIResponses
+            || (
+                instance?.providerType == .openAI
+                    && instance?.credentialType == .oauth
+                    && instance?.effectiveCustomBaseURL == nil
+            )
+        return thinkingExpressions(
+            providerType: instance?.providerType,
+            usesResponsesAPI: usesResponsesAPI,
+            level: level
+        )
+    }
+
+    static func thinkingExpressions(
+        for definition: ThinkingLevelDefinition,
+        provider instance: ProviderInstance?
+    ) -> [String] {
+        guard let level = ThinkingLevel.builtInLevel(
+            id: definition.levelId
+        ) else {
+            return []
+        }
+        return thinkingExpressions(for: instance, level: level)
+    }
+
+    static func thinkingExpressions(
+        providerType: ProviderType?,
+        usesResponsesAPI: Bool = false,
+        level: ThinkingLevel
+    ) -> [String] {
+        if usesResponsesAPI {
+            return [#"body.reasoning = {effort: "\#(reasoningEffort(for: level))", summary: "auto"}"#]
+        }
         switch providerType {
         case .openAIResponses:
             return [#"body.reasoning = {effort: "\#(reasoningEffort(for: level))", summary: "auto"}"#]
@@ -446,7 +488,12 @@ struct RequestCustomization {
         return headers
     }
 
-    func apply(to body: inout [String: Any], headers: inout [String: String], apiKey: String?) {
+    func apply(
+        to body: inout [String: Any],
+        headers: inout [String: String],
+        apiKey: String?,
+        includeControls: Bool = true
+    ) {
         let model = modelEntry?.model ?? LLMModel(id: "", displayName: "", provider: "")
         var context = RequestCustomizationExpression.Context(
             provider: provider,
@@ -480,6 +527,7 @@ struct RequestCustomization {
            let overlay = try? RequestCustomizationExpression.parseBodyExpressions(modelBody, context: context) {
             body = RequestCustomizationExpression.merge(body, with: overlay)
         }
+        guard includeControls else { return }
         applyControls(
             modelControls,
             to: &body,

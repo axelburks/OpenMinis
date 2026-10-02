@@ -3,6 +3,10 @@ import os.log
 
 private let logger = AppLogger(category: "GeminiProvider")
 
+/// [T-thinking-rules-phase2] Shared category with the OpenAI/Anthropic paths so one grep
+/// shows every provider's thinking resolution (design §8).
+private let thinkingLogger = AppLogger(category: "Thinking")
+
 /// URLSession with a long read timeout for SSE streaming.
 /// URLSession.shared uses a 60-second timeoutIntervalForRequest which can kill
 /// long-running streams (e.g. large file_write generation). This session gives
@@ -255,8 +259,11 @@ final class GeminiProvider: LLMProvider {
             "maxOutputTokens": maxTokens,
             "temperature": 0.7,
         ]
-        let thinkCfg = self.minimalThinkingConfig()
-        if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        // [Minix] A semantic thinking control supplies the complete custom shape.
+        if requestCustomization?.disablesBuiltInThinkingInjection != true {
+            let thinkCfg = self.minimalThinkingConfig()
+            if !thinkCfg.isEmpty { genConfig["thinkingConfig"] = thinkCfg }
+        }
         body["generationConfig"] = genConfig
 
         if !tools.isEmpty {
@@ -292,92 +299,38 @@ final class GeminiProvider: LLMProvider {
     //   Gemini 2.5 Pro  — thinkingBudget, cannot disable, minimum 128
     //   Gemini 2.5 Flash — thinkingBudget 0 disables
     //   Gemini 2.5 Flash Lite — no thinking support
+    /// [T-thinking-rules-phase2] The per-family rules now live in
+    /// `ThinkingRuleResolver.geminiThinkingConfig` so every vendor's thinking contract is
+    /// described in ONE place. Behaviour is byte-for-byte unchanged — pinned by
+    /// ThinkingWireGeminiAnthropicSnapshotTests (182 rows generated from the previous
+    /// implementation of this method and committed before the migration).
+    /// True for models whose response modality is not text (TTS today; image/embedding
+    /// share the trait). The Gemini API rejects `systemInstruction` on these with
+    /// 400 "Developer instruction is not enabled for this model", exactly as it rejects
+    /// a thinking config.
+    ///
+    /// [T-gemini-tts-thinking-400 / OpenMinis#226] Keyed off the DECLARED MODALITY rather
+    /// than the model id, because that is the property actually responsible: the id-suffix
+    /// list in `ThinkingRuleResolver` exists only because the thinking rules are consulted
+    /// without a capability object in scope. Here we have one, so use it.
+    private var rejectsSystemInstruction: Bool {
+        model.capabilities.supportedModalities.contains(.audioOutput)
+    }
+
     private func minimalThinkingConfig() -> [String: Any] {
-        let id = model.id.lowercased()
-
-        // Gemini 3.x models use thinkingLevel
-        if id.contains("gemini-3") {
-            if id.contains("flash") {
-                logger.debug("[Gemini] thinkingLevel=minimal for model \(self.model.id)")
-                return ["thinkingLevel": "minimal"]
-            } else {
-                // Pro — cannot disable, use lowest
-                logger.debug("[Gemini] thinkingLevel=low for model \(self.model.id)")
-                return ["thinkingLevel": "low"]
-            }
-        }
-
-        // Gemini 2.5 models use thinkingBudget
-        if id.contains("2.5-pro") {
-            logger.debug("[Gemini] thinkingBudget=128 (minimum) for model \(self.model.id)")
-            return ["thinkingBudget": 128]
-        }
-        if id.contains("2.5-flash-lite") {
-            // Flash Lite doesn't think by default, no config needed
-            return [:]
-        }
-
-        // Specialized models (TTS, image-gen, embedding, etc.) don't support thinking at all
-        let noThinkingSuffixes = ["-tts", "-image", "-embedding", "-vision"]
-        if noThinkingSuffixes.contains(where: { id.hasSuffix($0) || id.contains("\($0)-") }) {
-            logger.debug("[Gemini] No thinking config for specialized model \(self.model.id)")
-            return [:]
-        }
-
-        // Default: disable thinking (works for 2.5 Flash and unknown models)
-        logger.debug("[Gemini] thinkingBudget=0 (disabled) for model \(self.model.id)")
-        return ["thinkingBudget": 0]
+        let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: model.id, level: .off)
+        thinkingLogger.info("[resolve] provider=gemini model=\(model.id) level=off keys=[\(cfg.keys.sorted().joined(separator: ","))]")
+        return cfg
     }
 
     /// Thinking config when user explicitly enables thinking mode.
+    /// Thinking config when the user explicitly enables thinking mode.
+    /// [T-thinking-rules-phase2] See `minimalThinkingConfig` — the family rules now live
+    /// in `ThinkingRuleResolver.geminiThinkingConfig`.
     private func elevatedThinkingConfig(level: ThinkingLevel) -> [String: Any] {
-        let id = model.id.lowercased()
-
-        if id.contains("gemini-3") {
-            let geminiLevel: String = switch level {
-            case .off, .minimal: "minimal"
-            case .low: "low"
-            case .medium: "medium"
-            case .high, .xhigh, .max, .ultra: "high"
-            }
-            logger.debug("[Gemini] thinkingLevel=\(geminiLevel), includeThoughts=true for model \(self.model.id)")
-            return ["thinkingLevel": geminiLevel, "includeThoughts": true]
-        }
-        if id.contains("2.5-pro") {
-            let budget: Int = switch level {
-            case .off: 128
-            case .minimal, .low: 2048
-            case .medium: 8192
-            case .high: 16384
-            case .xhigh, .max, .ultra: 32768
-            }
-            logger.debug("[Gemini] thinkingBudget=\(budget), includeThoughts=true for model \(self.model.id)")
-            return ["thinkingBudget": budget, "includeThoughts": true]
-        }
-        if id.contains("2.5-flash") && !id.contains("lite") {
-            let budget: Int = switch level {
-            case .off: 0
-            case .minimal, .low: 1024
-            case .medium: 4096
-            case .high: 8192
-            case .xhigh, .max, .ultra: 16384
-            }
-            logger.debug("[Gemini] thinkingBudget=\(budget), includeThoughts=true for model \(self.model.id)")
-            return ["thinkingBudget": budget, "includeThoughts": true]
-        }
-
-        // Unknown model with thinking enabled — use conservative budgets.
-        // thinkingBudget: 0 is invalid on models that require thinking (e.g.
-        // 2.5 Pro variants with non-standard IDs), so use 128 as the floor.
-        let budget: Int = switch level {
-        case .off: 128
-        case .minimal, .low: 1024
-        case .medium: 4096
-        case .high: 8192
-        case .xhigh, .max, .ultra: 16384
-        }
-        logger.debug("[Gemini] thinkingBudget=\(budget), includeThoughts=true (fallback) for model \(self.model.id)")
-        return ["thinkingBudget": budget, "includeThoughts": true]
+        let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: model.id, level: level)
+        thinkingLogger.info("[resolve] provider=gemini model=\(model.id) level=\(level.rawValue) keys=[\(cfg.keys.sorted().joined(separator: ","))]")
+        return cfg
     }
 
     private func buildRequestBody(
@@ -409,7 +362,10 @@ final class GeminiProvider: LLMProvider {
         }
         body["contents"] = contents
 
-        if let sys = systemPrompt, !sys.isEmpty {
+        // [OpenMinis#226] Audio-output models reject systemInstruction outright. Dropping
+        // it costs nothing here: the sub-agent preamble it carries is guidance for a text
+        // responder, and a TTS model's job is to speak `contents` verbatim.
+        if let sys = systemPrompt, !sys.isEmpty, !rejectsSystemInstruction {
             body["systemInstruction"] = ["parts": [["text": sys]]]
         }
 
@@ -446,14 +402,12 @@ final class GeminiProvider: LLMProvider {
 
     private func buildRequest(path: String, body: [String: Any]) async throws -> URLRequest {
         let urlString: String
-        var finalBody: [String: Any]
 
         if useCloudCode {
             // Cloud Code Assist endpoint — `<base>:<method>` (Google method syntax,
             // not a path segment). Pass the colon-form as a single trailing
             // segment so URLBuilding.join doesn't tokenize it.
             urlString = URLBuilding.join(cloudCodeBase + ":" + path)
-            finalBody = wrapCloudCodeBody(body)
         } else {
             switch authMode {
             case .apiKey(let key):
@@ -462,7 +416,6 @@ final class GeminiProvider: LLMProvider {
             case .oauth:
                 urlString = URLBuilding.join(basePath, "models", "\(model.id):\(path)")
             }
-            finalBody = body
         }
 
         guard let url = URL(string: urlString) else {
@@ -497,7 +450,11 @@ final class GeminiProvider: LLMProvider {
         case .oauth:
             apiKey = headers["Authorization"]?.replacingOccurrences(of: "Bearer ", with: "")
         }
-        requestCustomization?.apply(to: &finalBody, headers: &headers, apiKey: apiKey)
+        let finalBody = prepareRequestBodyForTransport(
+            body,
+            headers: &headers,
+            apiKey: apiKey
+        )
         // URLRequest header patching is set-only: a key the customization
         // deleted just vanishes from the dict, so we must explicitly clear it
         // with setValue(nil,...) or the pre-existing default header survives.
@@ -513,6 +470,24 @@ final class GeminiProvider: LLMProvider {
         // (Gemini implicit cache, disk-cached providers, etc.) can match across calls.
         request.httpBody = try JSONSerialization.data(withJSONObject: finalBody, options: [.sortedKeys])
         return request
+    }
+
+    /// [Minix] Expressions target the Gemini protocol body. OAuth Cloud Code
+    /// adds its transport envelope only after customization.
+    func prepareRequestBodyForTransport(
+        _ body: [String: Any],
+        headers: inout [String: String],
+        apiKey: String?
+    ) -> [String: Any] {
+        var customizedBody = body
+        requestCustomization?.apply(
+            to: &customizedBody,
+            headers: &headers,
+            apiKey: apiKey
+        )
+        return useCloudCode
+            ? wrapCloudCodeBody(customizedBody)
+            : customizedBody
     }
 
     // MARK: - Cloud Code Assist Helpers
@@ -608,19 +583,64 @@ final class GeminiProvider: LLMProvider {
         return (text, functionCalls, media)
     }
 
+    /// Parse `usageMetadata` into `LLMUsage`. [GH#384]
+    ///
+    /// Google's shape is not the one the rest of the app assumes, in two ways:
+    ///
+    /// 1. `candidatesTokenCount` counts ONLY the visible answer. Gemini 3.x
+    ///    bills thinking separately in `thoughtsTokenCount`, and the invariant
+    ///    the API maintains is
+    ///        totalTokenCount = prompt + candidates + thoughts
+    ///    so reading `candidatesTokenCount` alone drops every thinking token.
+    ///    Captured on gemini-3.8-flash: prompt 11, candidates 20, thoughts 310
+    ///    — i.e. 94%% of the output went unreported.
+    ///
+    /// 2. `promptTokenCount` is the FULL input, cache included, whereas this
+    ///    app's convention (see `TokenUsage.add` and the OpenAI/Anthropic
+    ///    providers) is that `inputTokens` means the FRESH, uncached part and
+    ///    the cached part travels in `cacheReadInputTokens`. Passing the full
+    ///    prompt through as `inputTokens` while also reporting the cache would
+    ///    double-count it: the hit-rate denominator is `input + cacheRead`, so
+    ///    a real 91.8%% hit (45026 of 49016) would render as 47.8%%.
+    ///
+    /// `cachedContentTokenCount` is only present on the FINAL chunk of a
+    /// stream, so most chunks legitimately report no cache. nil (not 0) is used
+    /// for "this chunk said nothing about caching" so downstream can tell that
+    /// apart from a measured zero.
     private func extractUsage(_ json: [String: Any]) -> LLMUsage? {
         let effective = unwrapCloudCodeResponse(json)
         guard let usage = effective["usageMetadata"] as? [String: Any] else { return nil }
-        let input = usage["promptTokenCount"] as? Int ?? 0
-        let output = usage["candidatesTokenCount"] as? Int ?? 0
-        return LLMUsage(inputTokens: input, outputTokens: output,
-                        cacheCreationInputTokens: nil, cacheReadInputTokens: nil)
+        return Self.parseUsageMetadata(usage)
+    }
+
+    /// Shared so the parsing rules can be exercised directly by tests and reused
+    /// by every Gemini-protocol endpoint (relays and proxies forward this block
+    /// unchanged).
+    static func parseUsageMetadata(_ usage: [String: Any]) -> LLMUsage {
+        let promptTokens = usage["promptTokenCount"] as? Int ?? 0
+        let candidatesTokens = usage["candidatesTokenCount"] as? Int ?? 0
+        let thoughtsTokens = usage["thoughtsTokenCount"] as? Int ?? 0
+        // Absent or 0 both mean "no cache to report" — keep nil so a cache-less
+        // chunk is distinguishable from a measured zero.
+        let cachedTokens = (usage["cachedContentTokenCount"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+
+        let totalOutput = candidatesTokens + thoughtsTokens
+        // Clamped: a relay that reports a cache larger than the prompt must not
+        // produce a negative input count.
+        let freshInput = cachedTokens.map { max(0, promptTokens - $0) } ?? promptTokens
+
+        return LLMUsage(inputTokens: freshInput, outputTokens: totalOutput,
+                        cacheCreationInputTokens: nil, cacheReadInputTokens: cachedTokens)
     }
 
     /// Parse a single SSE chunk from streaming response into events.
     private func parseStreamChunk(_ json: [String: Any]) -> [GeminiStreamEvent] {
         var events: [GeminiStreamEvent] = []
         let effective = unwrapCloudCodeResponse(json)
+        // [T-agent-model-identity] The served model, as the API names it.
+        if let mv = effective["modelVersion"] as? String, !mv.isEmpty {
+            events.append(.responseModel(mv))
+        }
 
         guard let candidates = effective["candidates"] as? [[String: Any]],
               let first = candidates.first,
@@ -712,7 +732,7 @@ final class GeminiProvider: LLMProvider {
         }
         let transientStatusCodes: Set<Int> = [500, 502, 503, 504, 529]
         if transientStatusCodes.contains(http.statusCode) {
-            throw LLMError.transientError(message: "Gemini API error \(http.statusCode): \(body.prefix(200))")
+            throw LLMError.transientError(message: "Gemini API error \(http.statusCode): \(body.prefix(200))", statusCode: http.statusCode)
         }
         throw LLMError.providerError(message: "Gemini API error \(http.statusCode): \(body.prefix(500))")
     }
@@ -743,7 +763,7 @@ final class GeminiProvider: LLMProvider {
             #endif
             let transientStatusCodes: Set<Int> = [500, 502, 503, 504, 529]
             if transientStatusCodes.contains(http.statusCode) {
-                throw LLMError.transientError(message: "Gemini API error \(http.statusCode): \(body.prefix(200))")
+                throw LLMError.transientError(message: "Gemini API error \(http.statusCode): \(body.prefix(200))", statusCode: http.statusCode)
             }
             throw LLMError.providerError(message: "Gemini API error \(http.statusCode): \(body.prefix(200))")
         }
@@ -865,6 +885,8 @@ final class GeminiProvider: LLMProvider {
                 parts.append("  → thinkingDelta(\(text.count) chars): \"\(preview)\"" + (text.count > 100 ? "..." : ""))
             case .usage(let usage):
                 parts.append("  → usage: in=\(usage.inputTokens) out=\(usage.outputTokens)")
+            case .responseModel(let m):
+                parts.append("  → modelVersion: \(m)")
             case .done:
                 parts.append("  → done")
             }
@@ -897,6 +919,8 @@ enum GeminiStreamEvent {
     case functionCall(name: String, args: [String: Any], thoughtSignature: String?)
     case finishReason(String)
     case usage(LLMUsage)
+    /// [T-agent-model-identity] `modelVersion` as reported by the API.
+    case responseModel(String)
     case done
 }
 

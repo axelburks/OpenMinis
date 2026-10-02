@@ -119,6 +119,132 @@ extension ConfigRegistry {
             }
         ))
 
+        // [T-soul-custom-icon] [T-soul-icon-config-images] Emoji OR an image.
+        //
+        // An image may be given as a data URI, bare base64, a `minis://`
+        // resource, a path inside the minis directories, or an http(s) URL.
+        // Whatever the source, it is decoded and pushed through the SAME
+        // `SoulIconImage.encode` the Settings picker uses — alpha check,
+        // square crop, 96px cap, PNG — and the RESULT is stored inline.
+        //
+        // An address is an import source only, never the stored value: keeping
+        // a path would leave the icon dangling the moment the attachment is
+        // cleaned up, the session is deleted, or the value syncs to a device
+        // where that path means nothing.
+        //
+        // The resolution (including the download) happens in
+        // `ConfigOffloadBridge.performWriteBatch`, which is `async`, so by the
+        // time this synchronous writer runs the value is already a finished
+        // data URI. See `SoulIconSource` for why.
+        //
+        // Reading stays summarized: a data URI is reported as `<image>` so
+        // `minis-config get` never floods the context with base64, and the
+        // same substitution keeps the confirmation sheet and the audit log
+        // clean. Clearing (empty string) restores the default sparkle.
+        r.register(ClosureField(
+            path: "soul.icon",
+            displayName: "Soul icon",
+            // [T-soul-icon-config-images] The description IS the API doc —
+            // `minis-config topic-help soul` renders it verbatim, so every
+            // accepted form is spelled out with a runnable example. Claims
+            // here are limited to what is actually implemented: the decodable
+            // formats were checked against ImageIO on-device rather than
+            // assumed, and SVG is absent because it genuinely does not decode.
+            description: "The Soul's identity icon — also called its avatar, its persona image, or its "
+                + "character image (中文：角色形象 / 图标 / 头像). All of those refer to THIS one setting; "
+                + "there is no separate avatar field. Shown beside the assistant name in the chat header "
+                + "and on the Soul settings card. Accepts an emoji or an image.\n"
+                + "\n"
+                + "EMOJI\n"
+                + "  A single emoji, e.g. \"⚡\". An empty string \"\" restores the default sparkle.\n"
+                + "\n"
+                + "IMAGE — any of these forms:\n"
+                + "  • data URI (preferred for inline bytes):\n"
+                + "      data:image/png;base64,iVBORw0KGgo...\n"
+                + "      MIME may be image/png, image/jpeg, image/webp, image/gif, image/heic or image/tiff.\n"
+                + "  • bare base64 (no data: prefix) — auto-detected, e.g. iVBORw0KGgo...\n"
+                + "  • minis:// resource, e.g. minis://attachments/icon.png or minis://workspace/icon.png\n"
+                + "  • local path inside the minis directories, e.g. /var/minis/attachments/icon.png\n"
+                + "  • https:// URL, e.g. https://example.com/icon.png (http:// also works; "
+                + "private/loopback/link-local hosts are refused)\n"
+                + "\n"
+                + "TRANSPARENCY — not required. Both transparent and opaque images are accepted "
+                + "(a JPEG or a flattened PNG is fine); the icon is displayed with rounded corners, "
+                + "so an opaque image still reads as a normal small avatar. Transparency is preserved "
+                + "when the source has it.\n"
+                + "\n"
+                + "PROCESSING — identical to picking an image in Settings → Soul: "
+                + "the image is centre-cropped to a square, downscaled to 96×96 and re-encoded as PNG, "
+                + "then stored inline. An address is only an import source — "
+                + "it is never persisted, so the file can be deleted afterwards and the icon survives "
+                + "attachment cleanup and syncing to other devices.\n"
+                + "\n"
+                + "READING — `get soul.icon` returns \"<image>\" for an image, never the base64.\n"
+                + "\n"
+                + "EXAMPLES (note the value is JSON, so the string needs its own quotes)\n"
+                + "  minis-config set soul.icon '\"⚡\"'\n"
+                + "  minis-config set soul.icon '\"minis://attachments/icon.png\"'\n"
+                + "  minis-config set soul.icon '\"https://example.com/icon.png\"'\n"
+                + "  minis-config set soul.icon '\"data:image/png;base64,iVBORw0KGgo...\"'\n"
+                + "  minis-config set soul.icon '\"\"'    # back to the default sparkle\n"
+                + "A long data URI is easier to pass via a file. --file reads the JSON VALUE "
+                + "(a quoted string), not the raw image — write the quoted data URI to the file first:\n"
+                + "  printf '\"%s\"' \"data:image/png;base64,$(base64 -w0 icon.png)\" > /tmp/icon-value.json\n"
+                + "  minis-config set soul.icon --file /tmp/icon-value.json\n"
+                + "Simpler still: point at the file directly with minis:// or a path and skip base64 entirely.",
+            // Wide enough for an inline base64 argument; `SoulIconSource`
+            // applies the real byte/pixel limits once it knows the source
+            // kind. Emoji validation below is unchanged.
+            valueSchema: .string(maxLength: SoulIconSource.maxInlineBase64Chars),
+            // .sensitive: this is the assistant's visible identity, and an
+            // image write cannot be rolled back from the audit log (see
+            // `revertable` below), so it deserves an explicit confirmation.
+            risk: .sensitive,
+            // An emoji write is trivially revertable, but an image write is
+            // not: the audit log stores `<image>` rather than the base64, so
+            // there is nothing to restore from. Claiming otherwise would give
+            // `audit revert` a button that silently does the wrong thing.
+            revertable: false,
+            reader: {
+                let raw = currentFile().metadata.icon
+                // Never surface the base64 payload.
+                return .string(SoulIconImage.isDataURI(raw) ? "<image>" : raw)
+            },
+            writer: { v in
+                guard case .string(let s) = v else { throw ConfigError.typeMismatch(expected: "string") }
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Empty clears back to the default sparkle.
+                guard !trimmed.isEmpty else {
+                    try updateMetadata { $0.icon = "" }
+                    return
+                }
+                // Already a stored icon: either the bridge resolved an image
+                // source into one, or a caller handed us the final form.
+                if SoulIconImage.isDataURI(trimmed) {
+                    guard trimmed.count <= SoulIconSource.maxStoredChars else {
+                        throw ConfigError.invalidValue(
+                            "encoded icon is \(trimmed.count) chars, over the \(SoulIconSource.maxStoredChars) limit")
+                    }
+                    try updateMetadata { $0.icon = trimmed }
+                    return
+                }
+                // An image source that reached the writer unresolved means the
+                // async resolve step was skipped. Fail loudly rather than
+                // storing a path that would dangle.
+                if SoulIconSource.looksLikeImageSource(trimmed) {
+                    throw ConfigError.invalidValue(
+                        "image source was not resolved before the write — this is a bug; "
+                        + "please report it")
+                }
+                // One grapheme cluster, so a flag or skin-toned/ZWJ emoji
+                // (several scalars, one glyph) counts as one.
+                guard trimmed.count == 1 else {
+                    throw ConfigError.invalidValue("icon must be a single emoji")
+                }
+                try updateMetadata { $0.icon = trimmed }
+            }
+        ))
+
         r.register(ClosureField(
             path: "soul.lang",
             displayName: "Soul language preference",
@@ -350,6 +476,36 @@ extension ConfigRegistry {
         throw ConfigError.invalidValue("Expected `entry:<uuid>` or `group:<id>`, got '\(s)'")
     }
 
+    /// One thinking rule rendered for the read-only `thinkingrules` summary.
+    /// `path` is the handle a caller needs for `set`/`remove`; it is omitted for
+    /// built-ins precisely because they have no writable path.
+    @MainActor
+    private static func describe(_ rule: ThinkingRule, instanceId: String) -> ConfigValue {
+        var obj: [String: ConfigValue] = [
+            "label": .string(rule.label),
+            "scope": .string({
+                switch rule.scope {
+                case .allModels: return "all"
+                case .modelPattern(let p): return p
+                }
+            }()),
+            "editable": .bool(rule.kind == .custom),
+        ]
+        if let wf = rule.wireFormat {
+            obj["wire_format"] = ThinkingRulesCollection.encodeWireFormat(wf)
+            obj["summary"] = .string(wf.displaySummary)
+        }
+        if let echo = rule.reasoningEcho {
+            obj["reasoning_echo"] = .object(["field": .string(echo.fieldName),
+                                             "timing": .string(echo.persistedTiming)])
+        }
+        if rule.kind == .custom {
+            obj["id"] = .string(rule.id)
+            obj["path"] = .string("thinkingrules.\(instanceId):\(rule.id)")
+        }
+        return .object(obj)
+    }
+
     // MARK: Collections (providers / models / groups / envvars)
 
     @MainActor
@@ -358,6 +514,92 @@ extension ConfigRegistry {
         r.register(ModelsCollection())
         r.register(GroupsCollection())
         r.register(EnvVarsCollection())
+        r.register(ThinkingRulesCollection())
+        // [T-sub-agents-cli] Sub agents are global (not per-provider), so the
+        // collection uses a plain id as its child key and needs only one
+        // `order` field rather than one per instance.
+        r.register(SubAgentsCollection())
+        r.register(SubAgentsCollection.orderField())
+
+        // [T-thinking-rules-minis-config] One `order` field per provider instance.
+        // These are flat fields rather than collection children because the collection
+        // keys its children `<instanceId>:<ruleId>`, so `<instanceId>.order` would not
+        // resolve as a child path. Registered at launch from the instances that exist
+        // then; a provider added later gets its order field on the next app start,
+        // which is acceptable because reordering requires rules to exist anyway.
+        for inst in ProviderConfigStore.shared.config.instances {
+            r.register(ThinkingRulesCollection.orderField(
+                instanceId: inst.id, instanceLabel: inst.label))
+        }
+
+        // Aggregate read-only summary. This is the ONLY place built-in rules are
+        // exposed: they are computed per request from code, never persisted and never
+        // synced, so they are shown for reference but have no writable path anywhere.
+        // [T-sub-agents-cli] Aggregate view so `get subagents` alone answers
+        // "what exists, which is writable, and what is each one's model" —
+        // without it a caller has to walk every child path to find out.
+        r.register(ReadOnlyField(
+            path: "subagents",
+            displayName: "Sub agents (summary)",
+            description: "Read-only roster view. Each entry's writable paths are subagents.<id>.{name,description,instructions,model_group}; the built-in one refuses name/description and cannot be removed. Reorder with subagents.order.",
+            valueSchema: .json,
+            reader: {
+                let store = ProviderConfigStore.shared
+                let items: [ConfigValue] = SubAgentStore.shared.subAgents.map { def in
+                    var obj: [String: ConfigValue] = [
+                        "id": .string(def.id),
+                        "name": .string(def.name),
+                        "description": .string(def.description),
+                        "built_in": .bool(def.isBuiltIn),
+                        "path": .string("subagents.\(def.id)"),
+                    ]
+                    if !def.instructions.isEmpty {
+                        obj["instructions"] = .string(def.instructions)
+                    }
+                    if let gid = def.modelGroupId {
+                        obj["model_group"] = .string(store.group(for: gid)?.name ?? gid)
+                    } else {
+                        // Spelled out rather than omitted: "Auto" is a real
+                        // setting, not an absence, and the reader should not
+                        // have to infer it from a missing key.
+                        obj["model_group"] = .string("")
+                        obj["model"] = .string("auto — chosen per task")
+                    }
+                    if def.isBuiltIn {
+                        obj["note"] = .string("Built-in: name and description are fixed and it cannot be deleted; model and instructions are writable.")
+                    }
+                    return .object(obj)
+                }
+                return .object([
+                    "count": .int(items.count),
+                    "max": .int(SubAgentLimits.maxCount),
+                    "agents": .array(items),
+                ])
+            }
+        ))
+
+        r.register(ReadOnlyField(
+            path: "thinkingrules",
+            displayName: "Thinking rules (summary)",
+            description: "Read-only per-provider view: custom rules (writable via thinkingrules.<instanceId>:<ruleId>.*) followed by the built-in fallbacks that apply to that provider.",
+            valueSchema: .json,
+            reader: {
+                let store = ProviderConfigStore.shared
+                var out: [ConfigValue] = []
+                for inst in store.config.instances {
+                    let custom = ThinkingRuleCache.shared.rules(for: inst.id).filter { $0.kind == .custom }
+                    let builtIn = ThinkingRuleResolver.builtInRulesForDisplay(instanceId: inst.id)
+                    if custom.isEmpty && builtIn.isEmpty { continue }
+                    out.append(.object([
+                        "provider": .string(inst.label),
+                        "provider_id": .string(inst.id),
+                        "custom": .array(custom.map { describe($0, instanceId: inst.id) }),
+                        "builtin": .array(builtIn.map { describe($0, instanceId: inst.id) }),
+                    ]))
+                }
+                return .array(out)
+            }
+        ))
 
         // Aggregate read-only summary so `minis-config get providers`
         // returns a useful list of configured instances. Credentials
@@ -654,6 +896,37 @@ extension ConfigRegistry {
 
     // MARK: iCloud sync
 
+    /// True when the v2 engine is the one actually running on this device.
+    ///
+    /// [GH#101] Not simply `SyncV2Bootstrap.isEnabled`: `shouldPauseV1()`
+    /// deliberately keeps v1 alive when a v2 migration has FAILED, so a user in
+    /// that state is really running v1 and must not be shown v2's flags. This
+    /// mirrors the exact condition MinisApp uses to decide which engine to boot.
+    @MainActor
+    private static func syncV2Live() -> Bool {
+        guard #available(iOS 17.0, *) else { return false }
+        return SyncV2Bootstrap.isEnabled && SyncV2Bootstrap.shouldPauseV1()
+    }
+
+    /// Stable `sync.<suffix>` path for an upload category.
+    ///
+    /// [GH#101] Deliberately NOT `category.rawValue`: the pre-existing field
+    /// paths (`sync.sessions`, `sync.files`, `sync.environments`) are already
+    /// documented and used by agents, so they are preserved rather than renamed
+    /// to the raw case names (`chatSessions`, `sessionFiles`, `envVars`). New
+    /// categories fall through to the raw value, which is why `.memory` becomes
+    /// `sync.memory` for free.
+    private static func syncFieldSuffix(for category: UploadPolicy.Category) -> String {
+        switch category {
+        case .chatSessions: return "sessions"
+        case .sessionFiles: return "files"
+        case .skills:       return "skills"
+        case .providers:    return "providers"
+        case .envVars:      return "environments"
+        case .memory:       return "memory"
+        }
+    }
+
     @MainActor
     private static func registerSync(into r: ConfigRegistry) {
         // The whole sync stack (CloudSyncEngine V2 + its Settings entry) is
@@ -666,61 +939,109 @@ extension ConfigRegistry {
         var syncFields: [ConfigField] = []
         func reg(_ field: ConfigField) { syncFields.append(field) }
 
-        // The master sync flag is sensitive — flipping mid-upload can
-        // strand data — but recoverable, so we mark it sensitive (not
-        // destructive). The CloudSyncEngine reads its UserDefaults
-        // value directly on init; we update both sides here so the
-        // running engine and a future cold-launch agree.
-        reg(AppStorageBoolField(
+        // [GH#101] These fields USED to read/write the v1 `cloudSync.*`
+        // UserDefaults keys while the Settings UI and the engine that actually
+        // runs (SyncCore/v2) use `cloudSync.v2.*`. The two sets diverge
+        // permanently after `SyncV2Bootstrap.isEnabled` inherits v1 once, so
+        // `minis-config get sync.enabled` could report `false` while the UI
+        // showed "ON / Running" — and, worse, `set sync.files false` wrote a key
+        // no running engine reads and still reported success. Both sides were
+        // "current"; they described different subsystems.
+        //
+        // The fields now mirror whichever engine is actually live. v1 is NOT
+        // dead code: MinisApp starts it when v2 is off, and `shouldPauseV1()`
+        // deliberately lets it keep running when a v2 migration has failed, so
+        // reading v2 unconditionally would misreport state for those users.
+        // `syncV2Live` is the single predicate both the reader and writer use.
+        reg(ClosureField(
             path: "sync.enabled",
             displayName: "iCloud sync enabled",
-            description: "Master switch for iCloud sync.",
-            userDefaultsKey: "cloudSync.enabled",
-            defaultValue: false,
-            risk: .sensitive
+            description: "Master switch for iCloud sync. Reflects the engine that is actually running (v2 when active, otherwise the legacy v1 engine).",
+            valueSchema: .bool,
+            risk: .sensitive, revertable: true,
+            reader: {
+                if syncV2Live() {
+                    if #available(iOS 17.0, *) { return .bool(SyncV2Bootstrap.isEnabled) }
+                }
+                return .bool(UserDefaults.standard.bool(forKey: "cloudSync.enabled"))
+            },
+            writer: { v in
+                guard case .bool(let on) = v else { throw ConfigError.typeMismatch(expected: "bool") }
+                if #available(iOS 17.0, *) {
+                    if syncV2Live() {
+                        // Goes through setEnabled so the engine start/stop side
+                        // effects fire exactly as they do from the Settings toggle.
+                        SyncV2Bootstrap.setEnabled(on)
+                    } else {
+                        // v1 is the live engine (v2 off, or its migration failed).
+                        // The property's didSet persists cloudSync.enabled.
+                        CloudSyncEngine.shared.isEnabled = on
+                    }
+                    return
+                }
+                // Pre-iOS 17 never reaches here: the whole sync block registers
+                // as UnavailableField below. Kept total for exhaustiveness.
+                UserDefaults.standard.set(on, forKey: "cloudSync.enabled")
+            }
         ))
-        reg(AppStorageBoolField(
-            path: "sync.sessions",
-            displayName: "Sync sessions",
-            description: "Include chat sessions in iCloud sync.",
-            userDefaultsKey: "cloudSync.syncSessions",
-            defaultValue: true
-        ))
-        reg(AppStorageBoolField(
-            path: "sync.files",
-            displayName: "Sync files",
-            description: "Include workspace / attachments / shared files.",
-            userDefaultsKey: "cloudSync.syncFiles",
-            defaultValue: true
-        ))
-        reg(AppStorageBoolField(
-            path: "sync.skills",
-            displayName: "Sync skills",
-            description: "Sync custom skills across devices.",
-            userDefaultsKey: "cloudSync.syncSkills",
-            defaultValue: true
-        ))
-        reg(AppStorageBoolField(
-            path: "sync.providers",
-            displayName: "Sync providers",
-            description: "Sync provider config (excluding credentials) across devices.",
-            userDefaultsKey: "cloudSync.syncProviders",
-            defaultValue: true
-        ))
-        reg(AppStorageBoolField(
-            path: "sync.environments",
-            displayName: "Sync env-var metadata",
-            description: "Sync env-var keys & notes (values stay device-local in Keychain).",
-            userDefaultsKey: "cloudSync.syncEnvironments",
-            defaultValue: true
-        ))
-        reg(AppStorageIntField(
+
+        // Per-category upload switches, DERIVED from UploadPolicy.Category
+        // rather than hand-listed. The previous hand-written set was modelled on
+        // v1's categories and silently missed `.memory` (the "Memory Files"
+        // toggle visible in Settings had no CLI field at all — GH#101.2).
+        // Deriving means a future category cannot drift out of the CLI again;
+        // same pattern as registerRootfsMirror below.
+        for category in UploadPolicy.Category.allCases {
+            reg(ClosureField(
+                path: "sync.\(syncFieldSuffix(for: category))",
+                displayName: "Sync \(category.displayName.lowercased())",
+                description: "Include \(category.displayName) in iCloud sync uploads. Turning this off stops NEW uploads; records already in iCloud are not pulled back.",
+                valueSchema: .bool,
+                risk: .normal, revertable: true,
+                reader: { .bool(UploadPolicy.isEnabled(category)) },
+                writer: { v in
+                    guard case .bool(let on) = v else { throw ConfigError.typeMismatch(expected: "bool") }
+                    UploadPolicy.setEnabled(category, on)
+                }
+            ))
+        }
+
+        reg(ClosureField(
             path: "sync.maxFileSize",
             displayName: "Max sync file size (bytes)",
             description: "Files larger than this are skipped during iCloud sync.",
-            userDefaultsKey: "cloudSync.maxSyncFileSize",
-            defaultValue: 1_048_576,
-            min: 0, max: 100_000_000
+            valueSchema: .int(min: 0, max: 100_000_000),
+            risk: .normal, revertable: true,
+            reader: { .int(UploadPolicy.maxFileSizeBytes) },
+            writer: { v in
+                guard case .int(let n) = v else { throw ConfigError.typeMismatch(expected: "int") }
+                UploadPolicy.maxFileSizeBytes = n
+            }
+        ))
+
+        // Read-only view of the live engine, so an agent asking "is it safe to
+        // re-enable sync / will my local delete propagate?" can distinguish
+        // "switch is on" from "engine is actually running". The toggle's own
+        // footer says it takes effect on next launch, so these genuinely differ.
+        reg(ReadOnlyField(
+            path: "sync.status",
+            displayName: "iCloud sync status",
+            description: "Live engine state: running, stopped, or disabled. Read-only.",
+            valueSchema: .string(maxLength: 64),
+            reader: {
+                if #available(iOS 17.0, *), syncV2Live() {
+                    return .string(SyncCore.shared.isRunning ? "running" : "stopped")
+                }
+                let v1On = UserDefaults.standard.bool(forKey: "cloudSync.enabled")
+                return .string(v1On ? "running_v1" : "disabled")
+            }
+        ))
+        reg(ReadOnlyField(
+            path: "sync.engine",
+            displayName: "Active sync engine",
+            description: "Which sync implementation is live on this device: v2 or v1. Read-only.",
+            valueSchema: .string(maxLength: 16),
+            reader: { .string(syncV2Live() ? "v2" : "v1") }
         ))
 
         if #available(iOS 17.0, *) {
@@ -762,6 +1083,38 @@ extension ConfigRegistry {
         // most of these calls when the switch is off; the registration
         // exists for the rare case where the agent reads while we're
         // still enabled, plus to surface the switch in topic-help.
+        // [T-ish-container-identity GH#99] Storage-identity fields. Users and
+        // agents had NO sanctioned way to tell which session's storage
+        // /var/minis currently points at, or that the iOS data container UUID
+        // rotates on every app update (contents migrate) — so a per-session
+        // empty workspace or a post-update path change read as "my files are
+        // gone". Read-only, side-effect-free.
+        r.register(ReadOnlyField(
+            path: "system.containerId",
+            displayName: "Data container UUID",
+            description: "iOS app data container UUID. iOS assigns a NEW UUID on every app update/reinstall and migrates contents — a changed UUID does not mean data loss, but absolute paths recorded before an update are stale. Read-only.",
+            valueSchema: .string(maxLength: 64),
+            reader: {
+                .string(URL(fileURLWithPath: NSHomeDirectory()).lastPathComponent)
+            }
+        ))
+        r.register(ReadOnlyField(
+            path: "system.rootfsDataPath",
+            displayName: "Rootfs data path",
+            description: "Host filesystem path backing the Linux rootfs (fakefs data root). Read-only.",
+            valueSchema: .string(maxLength: 512),
+            reader: { .string(RootfsManager.shared.dataPath.path) }
+        ))
+        r.register(ReadOnlyField(
+            path: "system.mountedSession",
+            displayName: "Mounted session",
+            description: "Chat session whose storage /var/minis currently points at. Each session has its own attachments/offloads/workspace — files from other sessions are not visible here. Empty when no session is mounted. Read-only.",
+            valueSchema: .string(maxLength: 64),
+            reader: {
+                .string(ISHExecutionCoordinator.mountedSessionIdSnapshot ?? "")
+            }
+        ))
+
         r.register(ClosureField(
             path: "permissions.minisConfig.enabled",
             displayName: "Allow minis-config",
@@ -846,6 +1199,29 @@ extension ConfigRegistry {
             description: "Prevents auto-lock while the agent is busy.",
             userDefaultsKey: "keepScreenAwakeDuringTasks",
             defaultValue: false
+        ))
+        // [T-tools-switches-cli] The two optional-tool switches, same keys the
+        // Settings toggles write (AgentToolSwitch.browser / .agents). Exposed so
+        // they can be scripted and so their cost can be measured — each one adds
+        // its tool schema AND its system-prompt section to every request, which
+        // is invisible until you diff the token usage with them on and off.
+        //
+        // Registered as plain AppStorage fields rather than through
+        // AgentToolSwitch so the CLI reads and writes exactly the stored value;
+        // `isEnabled` applies the same `?? defaultValue` fallback on read.
+        r.register(AppStorageBoolField(
+            path: "chat.tools.browserUse",
+            displayName: "Browser Use tool",
+            description: "Whether the assistant is offered browser_use. When off the tool is removed from the schema entirely and the system prompt drops the sentences advertising it — the model never learns it exists.",
+            userDefaultsKey: AgentToolSwitch.browser.key,
+            defaultValue: AgentToolSwitch.browser.defaultValue
+        ))
+        r.register(AppStorageBoolField(
+            path: "chat.tools.subAgents",
+            displayName: "Sub Agents tool",
+            description: "Whether the assistant is offered subagent_task. When off that tool and the sub agent roster both leave the request. Configure the agents themselves under `subagents`.",
+            userDefaultsKey: AgentToolSwitch.agents.key,
+            defaultValue: AgentToolSwitch.agents.defaultValue
         ))
         r.register(AppStorageBoolField(
             path: "chat.toolPreview",

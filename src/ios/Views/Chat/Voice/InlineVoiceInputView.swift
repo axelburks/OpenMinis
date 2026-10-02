@@ -15,6 +15,9 @@ struct InlineVoiceInputView: View {
     @Binding var inputText: String
     var onPasteImage: ((UIImage) -> Void)?
     var onPasteFile: ((URL) -> Void)?
+    /// [T-paste-placeholder] Long pasted text → vm stash, returns the
+    /// `[pasted#N]` literal to append to the transcript. See ChatInputBar.
+    var onPasteLongText: ((String) -> String?)?
     /// [voice-correction §6] Supplies the current conversation's recent turns as the
     /// third correction signal.
     ///
@@ -24,6 +27,16 @@ struct InlineVoiceInputView: View {
     /// "张山说食堂今天关门" comes back unchanged; with context, "石塘"→"食堂" is caught
     /// immediately. Context is what makes the feature work on day one.
     var conversationContext: (() -> ConversationContext)?
+    /// [T-ios-context-usage-hint] The composer's context-window usage request
+    /// (AIChatViewModel.contextUsageHint), handed down from AIChatView. The
+    /// voice panel shows it in its status line for a few seconds; see
+    /// `voiceUsageHint` for the display rules.
+    var contextUsageHint: ContextUsageHint? = nil
+    /// The hint currently on the status line, or nil for the normal label.
+    @State private var voiceUsageHint: ContextUsageHint? = nil
+    /// Last hint generation this panel acted on, so re-renders carrying the
+    /// same request are no-ops.
+    @State private var voiceUsageHintGeneration = 0
     /// Tear down voice mode (X button / done).
 
     @FocusState private var editFocused: Bool
@@ -79,10 +92,34 @@ struct InlineVoiceInputView: View {
     /// Expanded height WITHOUT any transcript (status + mic + chip + spacing + padding).
     /// Tuned to leave minimal blank space below the model chip when no transcript
     /// is present. The Spacer between status and controls absorbs any remaining gap.
-    private static let expandedBaseHeight: CGFloat = 160
+    ///
+    /// [T-voice-status-mic-gap] Measured content in the empty-transcript state is
+    /// ~198pt (vpad 16 + band floor 28 + spacing 32 + status 20 + mic 72 + chip 24
+    /// + controls top pad 6), against a 212pt panel — so ~14pt fell to the Spacer
+    /// and the gap under the status line read as slack precisely when there was
+    /// least to show. Trimmed by 12pt here; `expandedStatusSlack` caps what the
+    /// Spacer may keep, and `expandedStackSpacing` tightens the rows, so the
+    /// reclaimed space leaves the panel instead of moving elsewhere in it.
+    private static let expandedBaseHeight: CGFloat = 148
     /// Compact mic diameter (the expanded layout uses a larger focal mic).
     private static let compactMic: CGFloat = 60
     private static let expandedMic: CGFloat = 72
+
+    /// [T-voice-status-mic-gap] Row spacing of the expanded VStack. Named because
+    /// `expandedChromeOverhead` has to reserve exactly one of these gaps — the two
+    /// were previously both the literal 8 and could drift apart silently.
+    private static let expandedStackSpacing: CGFloat = 6
+
+    /// [T-voice-status-mic-gap] Ceiling on the status→controls Spacer.
+    ///
+    /// That Spacer is deliberately the first thing to compress as the transcript
+    /// grows (see `expandedBody`), which is right — but with an empty transcript
+    /// nothing was competing for the room, so it kept every spare point and the
+    /// panel looked emptiest exactly when it held the least. Capping it means the
+    /// surplus is given back to `effectiveHeight` (the panel gets shorter) rather
+    /// than parked under the status line. Long transcripts are unaffected: there
+    /// the Spacer is already at 0, far below this cap.
+    private static let expandedStatusSlack: CGFloat = 4
 
     private var micDiameter: CGFloat { expanded ? Self.expandedMic : Self.compactMic }
 
@@ -111,14 +148,32 @@ struct InlineVoiceInputView: View {
     private var maxPanelHeight: CGFloat { UIScreen.main.bounds.height * 0.6 }
 
     /// Tallest the transcript band may grow before it starts scrolling.
+    /// [T-ios-voice-transcript-blank-band] Subtract the in-frame chrome too, so
+    /// a saturated band still fits inside the 60% panel cap instead of being
+    /// clipped by it (the cap is applied by `min(maxPanelHeight, …)` in
+    /// `effectiveHeight`, which would otherwise silently shave the band).
     private var transcriptMaxHeight: CGFloat {
-        max(40, maxPanelHeight - Self.expandedBaseHeight)
+        max(40, maxPanelHeight - Self.expandedBaseHeight - Self.expandedChromeOverhead)
     }
+
+    /// [T-ios-voice-transcript-blank-band] Chrome that lives INSIDE the panel's
+    /// `.frame(height: effectiveHeight)` but is not part of `expandedBaseHeight`:
+    /// the body's own `.padding(.vertical, 8)` (applied before the frame, so it
+    /// eats into it) plus the `VStack(spacing: 8)` gap between the transcript
+    /// band and the status line. `effectiveHeight` has to reserve these on top
+    /// of the band, or the band is handed less room than it asked for.
+    private static let expandedChromeOverhead: CGFloat = 8 * 2 + expandedStackSpacing   // vpad + spacing
+
+    /// Minimum band height. One line of `.body` is ~20-22pt, so the old 28pt
+    /// floor was already tight; it is kept as the floor for the band ITSELF, but
+    /// `effectiveHeight` now budgets the chrome separately so the floor is
+    /// actually delivered instead of being eaten by padding.
+    private static let transcriptMinHeight: CGFloat = 28
 
     /// Visible transcript band height = content height, clamped to the cap.
     private var transcriptBandHeight: CGFloat {
         guard viewModel.isEditingTranscript || !viewModel.transcript.isEmpty else { return 0 }
-        return min(max(transcriptContentHeight, 28), transcriptMaxHeight)
+        return min(max(transcriptContentHeight, Self.transcriptMinHeight), transcriptMaxHeight)
     }
 
     /// [T-voice-scroll-gesture-priority] Should the panel's drag gesture step
@@ -157,7 +212,19 @@ struct InlineVoiceInputView: View {
     private var effectiveHeight: CGFloat {
         guard expanded else { return Self.compactHeight }
         let band = transcriptBandHeight
-        return min(maxPanelHeight, Self.expandedBaseHeight + (band > 0 ? band + 8 : 0))
+        // [T-ios-voice-transcript-blank-band] Reserve the in-frame chrome, not
+        // just `band + 8`.
+        //
+        // The old arithmetic added a bare 8pt for the VStack spacing and ignored
+        // the body's `.padding(.vertical, 8)` — which is applied BEFORE
+        // `.frame(height: effectiveHeight)` and therefore consumes 16pt from
+        // INSIDE that height. The band then asked for more room than the layout
+        // could give it and was squeezed: with a short/not-yet-measured
+        // transcript (the 28pt floor) the panel reserved 196pt but left only
+        // 12pt for the band — less than one line of body text — so the panel
+        // rendered as a tall block with a blank transcript area even though the
+        // text was there. That is the reported "面板展开但看不到文字".
+        return min(maxPanelHeight, Self.expandedBaseHeight + (band > 0 ? band + Self.expandedChromeOverhead : 0))
     }
 
     var body: some View {
@@ -193,23 +260,24 @@ struct InlineVoiceInputView: View {
                     }
                     if UIPasteboard.general.hasStrings {
                         Button {
-                            guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-                            let asciiLetters = text.unicodeScalars.filter { ($0.value >= 0x41 && $0.value <= 0x5A) || ($0.value >= 0x61 && $0.value <= 0x7A) }.count
-                            let isEnglishDominant = asciiLetters > text.count / 2
-                            let isLong: Bool
-                            if isEnglishDominant {
-                                let wordCount = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.count
-                                isLong = wordCount > 1000
-                            } else {
-                                isLong = text.count > 1200
-                            }
-                            if isLong, let onPasteFile {
-                                let tmp = FileManager.default.temporaryDirectory
-                                    .appendingPathComponent("pasted_\(UUID().uuidString.prefix(8)).txt")
-                                if let data = text.data(using: .utf8) {
-                                    try? data.write(to: tmp)
-                                    onPasteFile(tmp)
-                                    VoiceLog.log("voice panel paste: long text → file (\(text.count) chars)")
+                            guard var text = UIPasteboard.general.string, !text.isEmpty else { return }
+                            // [T-paste-placeholder] Long paste: stash in the
+                            // vm buffer and append only the `[pasted#N]`
+                            // literal to the transcript (it rides into the
+                            // composer text and expands at send). Replaces
+                            // the old inline copy of the .txt conversion —
+                            // threshold now shared via PastePlaceholder.
+                            if PastePlaceholder.isLong(text), let onPasteLongText {
+                                let chars = text.count
+                                if let placeholder = onPasteLongText(text) {
+                                    VoiceLog.log("voice panel paste: long text (\(chars) chars) → \(placeholder)")
+                                    text = placeholder
+                                } else {
+                                    // [T-paste-huge-to-file] nil = the paste became
+                                    // a .txt attachment. Appending `text` here would
+                                    // dump the whole paste into the transcript, which
+                                    // is exactly what the attachment exists to avoid.
+                                    VoiceLog.log("voice panel paste: huge text (\(chars) chars) → file attachment, transcript unchanged")
                                     return
                                 }
                             }
@@ -545,7 +613,7 @@ struct InlineVoiceInputView: View {
     // MARK: - Expanded mode (full status + controls + transcript space)
 
     private var expandedBody: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Self.expandedStackSpacing) {
             // ── Transcript — wraps, grows with content, then scrolls once the
             // panel hits the 60%-screen cap. Double-tap to correct by keyboard. ──
             if viewModel.isEditingTranscript || !viewModel.transcript.isEmpty {
@@ -555,7 +623,7 @@ struct InlineVoiceInputView: View {
 
             // ── Status line (with Exit chip while editing). ──
             HStack(spacing: 8) {
-                Text(stateLabel)
+                statusLineText
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -573,13 +641,43 @@ struct InlineVoiceInputView: View {
                     .buttonStyle(.plain)
                 }
             }
+            // [T-ios-context-usage-hint] Debounce + fixed display window for
+            // the usage line, driven by the request's generation. A newer
+            // generation restarts the task (cancelling the old window); the
+            // task owns no stored closure capturing the view.
+            .task(id: contextUsageHint?.generation) {
+                guard let hint = contextUsageHint,
+                      hint.generation != voiceUsageHintGeneration else { return }
+                voiceUsageHintGeneration = hint.generation
+                try? await Task.sleep(nanoseconds: UInt64(Self.usageHintDebounce * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { voiceUsageHint = hint }
+                try? await Task.sleep(nanoseconds: UInt64(Self.usageHintDuration * 1_000_000_000))
+                guard !Task.isCancelled, voiceUsageHint?.generation == hint.generation else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { voiceUsageHint = nil }
+            }
+            // Starting a recording is the voice-panel analogue of "input
+            // began": the line yields immediately instead of finishing its
+            // window over the live recording tips.
+            .onChange(of: viewModel.state) { newState in
+                if newState == .recording, voiceUsageHint != nil {
+                    withAnimation(.easeInOut(duration: 0.2)) { voiceUsageHint = nil }
+                }
+            }
             .animation(.easeInOut(duration: 0.2), value: viewModel.state)
             .animation(.easeInOut(duration: 0.2), value: viewModel.isEditingTranscript)
 
             // Absorbs spare vertical space so the controls below are pushed to the
             // bottom of the panel. When transcript text grows, this spacer shrinks
             // first — controls stay pinned — before the panel expands upward.
+            //
+            // [T-voice-status-mic-gap] Capped: uncapped it also absorbed the slack
+            // of the EMPTY state, leaving a ~14pt void under the status line with
+            // nothing above it to justify the space. `effectiveHeight` was trimmed
+            // by the same budget, so the panel closes up instead of the gap merely
+            // relocating.
             Spacer(minLength: 0)
+                .frame(maxHeight: Self.expandedStatusSlack)
 
             // ── Transcription error tip (with retry countdown / manual retry) ──
             if viewModel.transcribeError != nil || viewModel.retryCountdown != nil {
@@ -673,11 +771,22 @@ struct InlineVoiceInputView: View {
         // both branches uniformly (if/else is a statement, not chainable).
         Group {
         if viewModel.isEditingTranscript {
-            ScrollView(.vertical, showsIndicators: true) {
-                TextField("", text: Binding(
-                    get: { viewModel.transcript },
-                    set: { viewModel.setTranscript($0); inputText = $0 }
-                ), axis: .vertical)
+            // [T-voice-edit-nested-scroll] NO outer ScrollView here.
+            // `TextField(axis: .vertical)` is backed by a UITextView, which IS a
+            // UIScrollView. Wrapping it in a SwiftUI ScrollView nested two
+            // scrollers: `.fixedSize(vertical:)` asked SwiftUI for the field's
+            // full intrinsic height, but the UITextView still clipped itself to
+            // the band height and kept its own scrolling, while the outer
+            // ScrollView measured content that "fit" and refused to scroll. With
+            // a transcript taller than the band, the text above the caret became
+            // unreachable by EITHER scroller — the reported "can't drag the top
+            // half back into view" freeze. The text view scrolls itself here,
+            // which also restores native caret-tracking that the wrapped form
+            // lost.
+            TextField("", text: Binding(
+                get: { viewModel.transcript },
+                set: { viewModel.setTranscript($0); inputText = $0 }
+            ), axis: .vertical)
                 .focused($editFocused)
                 .font(.body)
                 .multilineTextAlignment(.center)
@@ -699,13 +808,16 @@ struct InlineVoiceInputView: View {
                         }
                     }
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity)
+                // Fill the band and let the text view scroll inside it. Without
+                // an explicit height the field would size to its content and
+                // overflow the fixed-height band instead of scrolling.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 // [T-voice-scroll-gesture-priority] Boundary probe (zero-size,
-                // non-interactive) — reports this ScrollView's scroll position to
-                // the panel gesture.
+                // non-interactive) — reports the text view's scroll position to
+                // the panel gesture. In this branch the enclosing UIScrollView
+                // IS the UITextField's text view, which is exactly the scroller
+                // the panel drag must yield to while editing.
                 .background(TranscriptScrollProbe(state: transcriptScroll).frame(width: 0, height: 0))
-            }
             // [T-voice-edit-gesture-exclusive] NO drag recognizer on the editor.
             // While editing, the panel installs no gesture (PanelDragGestureModifier
             // isEditing:true) and this branch adds none either — so the ONLY things
@@ -733,7 +845,7 @@ struct InlineVoiceInputView: View {
                                 viewModel.clearTranscript()
                                 VoiceLog.log("cleared transcript via long-press")
                             } label: {
-                                Label(String(localized: "Clear", comment: "Clear transcript context menu"), systemImage: "trash")
+                                Label(AppLocalized("Clear", comment: "Clear transcript context menu"), systemImage: "trash")
                             }
                         }
                         // [T-voice-scroll-gesture-priority] Same boundary probe as
@@ -747,6 +859,19 @@ struct InlineVoiceInputView: View {
                 .onPreferenceChange(TranscriptContentHeightKey.self) { h in
                     if abs(h - transcriptContentHeight) > 1 {
                         VoiceLog.log("[panel-lifecycle] transcriptContentHeight \(Int(transcriptContentHeight))→\(Int(h)) effectiveH=\(Int(effectiveHeight))")
+                        // [T-voice-inputbar-collapse-selfheal] Mark the LARGE
+                        // single-frame collapse specifically. The 2026-08-18
+                        // 01:29 blank-composer failure began with 262→42 (a
+                        // short transcript replacing a tall dictation band) in
+                        // one frame, immediately followed by an intermediate
+                        // panel frame past the window bottom and then permanent
+                        // silence from the composer's geometry reporting.
+                        // Grepping [panel-collapse] gives the next investigation
+                        // the trigger instant directly instead of having to
+                        // reconstruct it from the height stream.
+                        if transcriptContentHeight - h > 120 {
+                            VoiceLog.log("[panel-collapse] LARGE transcript shrink \(Int(transcriptContentHeight))→\(Int(h)) (Δ\(Int(transcriptContentHeight - h))) effectiveH=\(Int(effectiveHeight)) — watch the next [InputBarHealth] line for a stalled composer")
+                        }
                     }
                     transcriptContentHeight = h
                 }
@@ -882,15 +1007,15 @@ struct InlineVoiceInputView: View {
         }
         .disabled(isCorrecting)
         .accessibilityLabel(Text("Correct transcript with AI", comment: "Voice manual-correction button"))
-        .alert(String(localized: "Improve voice corrections?",
+        .alert(AppLocalized("Improve voice corrections?",
                       comment: "One-time prompt: enable correction data collection"),
                isPresented: $showCollectionConsentPrompt) {
-            Button(String(localized: "Enable", comment: "Enable correction data collection")) {
+            Button(AppLocalized("Enable", comment: "Enable correction data collection")) {
                 VoiceCorrectionCollectionConsent.shared.isEnabled = true
                 VoiceCorrectionCollectionConsent.shared.hasPrompted = true
                 runManualCorrection()
             }
-            Button(String(localized: "Not Now", comment: "Decline correction data collection"),
+            Button(AppLocalized("Not Now", comment: "Decline correction data collection"),
                    role: .cancel) {
                 VoiceCorrectionCollectionConsent.shared.hasPrompted = true
                 runManualCorrection()
@@ -920,7 +1045,8 @@ struct InlineVoiceInputView: View {
             let suggestion = await VoiceCorrectionEngine.shared.correct(
                 transcript: text,
                 locale: PhoneticNormalizerRegistry.normalizedLocaleKey(viewModel.language),
-                context: context)
+                context: context,
+                trigger: "manual")
             await MainActor.run {
                 isCorrecting = false
                 // Bail if the transcript changed under us (re-recorded / edited / sent while
@@ -951,13 +1077,13 @@ struct InlineVoiceInputView: View {
                         // needed". Saying "No corrections needed" here disguises
                         // an outage as a semantic verdict (exactly how the
                         // adaptive-thinking token-burn bug stayed hidden).
-                        MinisToast.show(String(localized: "Correction failed, original kept",
+                        MinisToast.show(AppLocalized("Correction failed, original kept",
                                                comment: "Voice: AI correction call failed (timeout/error); transcript left unchanged"),
                                         systemImage: "exclamationmark.triangle.fill")
                     } else {
                         // Model genuinely found nothing to fix — tell the user so
                         // the tap doesn't read as "nothing happened".
-                        MinisToast.show(String(localized: "No corrections needed",
+                        MinisToast.show(AppLocalized("No corrections needed",
                                                comment: "Voice: AI found nothing to fix"),
                                         systemImage: "sparkles")
                     }
@@ -1023,41 +1149,98 @@ struct InlineVoiceInputView: View {
             : Text("Toggle recording", comment: "Inline voice mic"))
     }
 
+    // MARK: - [T-ios-context-usage-hint] Usage line in the status row
+
+    /// The status text: the usage line while one is showing, else `stateLabel`.
+    ///
+    /// Unlike the text composer's placeholder (which now holds the line until
+    /// the user types), the voice panel shows it for a fixed window and then
+    /// returns to whatever `stateLabel` says at that moment — the user may be
+    /// recording or reading a transcript by then, and the label must follow
+    /// `viewModel.state`, not snap back to "Tap to speak". Starting a recording
+    /// cuts the window short (see the onChange below).
+    ///
+    /// Number segments are tinted via AttributedString runs so the rest of the
+    /// line keeps the `.secondary` style of the row. Colours are chosen for the
+    /// panel's DARK surface — the composer's alpha-toned UIColors were tuned
+    /// against a pale glass wall and would go muddy here — kept restrained so
+    /// the line reads as a status note, not an alert.
+    @ViewBuilder
+    private var statusLineText: some View {
+        if let hint = voiceUsageHint {
+            Text(Self.highlightedUsageLine(hint))
+                .transition(.opacity)
+                .id("usage-\(hint.generation)")
+        } else {
+            Text(stateLabel)
+                .transition(.opacity)
+        }
+    }
+
+    /// Fixed display window for the usage line on the voice panel.
+    static let usageHintDuration: TimeInterval = 3.5
+    /// Same debounce as the composer: a burst of quick turns shows one line.
+    static let usageHintDebounce: TimeInterval = 0.4
+
+    /// Applies the panel-side tint to the number segments.
+    static func highlightedUsageLine(_ hint: ContextUsageHint) -> AttributedString {
+        var attributed = AttributedString(hint.text)
+        guard let tone = usageTint(for: hint.tier) else { return attributed }
+        for segment in hint.highlights {
+            guard let range = attributed.range(of: segment) else { continue }
+            attributed[range].foregroundColor = tone
+            attributed[range].font = .subheadline.weight(.medium)
+        }
+        return attributed
+    }
+
+    /// Tints for the dark voice surface. System hues at reduced opacity over
+    /// the dark panel come out as a dimmed, desaturated version of themselves
+    /// — visible, still clearly "warning" vs "danger", not glaring. Red keeps
+    /// a touch more presence than orange so it reads as the more urgent tier.
+    static func usageTint(for tier: ContextUsage.Tier) -> Color? {
+        switch tier {
+        case .normal: return nil
+        case .warning: return Color(UIColor.systemOrange).opacity(0.70)
+        case .critical: return Color(UIColor.systemRed).opacity(0.78)
+        }
+    }
+
     private var stateLabel: String {
         if viewModel.permissionDenied {
-            return String(localized: "Microphone access denied — enable it in Settings", comment: "Inline voice permission denied")
+            return AppLocalized("Microphone access denied — enable it in Settings", comment: "Inline voice permission denied")
         }
         if let err = viewModel.startError {
-            return String(localized: "Couldn't start microphone: \(err)", comment: "Inline voice start error")
+            return AppLocalized("Couldn't start microphone: \(err)", comment: "Inline voice start error")
         }
         if viewModel.isEditingTranscript {
-            return String(localized: "Editing — tap mic to resume", comment: "Inline voice editing state")
+            return AppLocalized("Editing — tap mic to resume", comment: "Inline voice editing state")
         }
         switch viewModel.state {
         case .waiting:
             if !viewModel.transcript.isEmpty {
                 let tips = [
-                    String(localized: "Double-tap text to edit", comment: "Voice tip: edit transcript"),
-                    String(localized: "Tap mic to continue", comment: "Voice tip: resume dictation"),
-                    String(localized: "Hold ⌫ to clear all", comment: "Voice tip: long press delete to clear"),
+                    AppLocalized("Double-tap text to edit", comment: "Voice tip: edit transcript"),
+                    AppLocalized("Tap mic to continue", comment: "Voice tip: resume dictation"),
+                    AppLocalized("Hold ⌫ to clear all", comment: "Voice tip: long press delete to clear"),
                 ]
                 return tips[viewModel.resultTipIndex % tips.count]
             }
-            return String(localized: "Tap to speak", comment: "Inline voice waiting")
+            return AppLocalized("Tap to speak", comment: "Inline voice waiting")
         case .recording:
             let tips = [
-                String(localized: "Tap to transcribe", comment: "Voice tip: tap mic to stop and transcribe"),
-                String(localized: "Listening…", comment: "Voice tip: steady recording"),
-                String(localized: "Long press to paste", comment: "Voice tip: paste from clipboard"),
-                String(localized: "Listening…", comment: "Voice tip: steady recording"),
+                AppLocalized("Tap to transcribe", comment: "Voice tip: tap mic to stop and transcribe"),
+                AppLocalized("Listening…", comment: "Voice tip: steady recording"),
+                AppLocalized("Long press to paste", comment: "Voice tip: paste from clipboard"),
+                AppLocalized("Listening…", comment: "Voice tip: steady recording"),
             ]
             return tips[viewModel.recordingTipIndex % tips.count]
-        case .processing: return String(localized: "Recognizing…", comment: "Inline voice processing")
+        case .processing: return AppLocalized("Recognizing…", comment: "Inline voice processing")
         case .result:
             let tips = [
-                String(localized: "Double-tap text to edit", comment: "Voice tip: edit transcript"),
-                String(localized: "Tap mic to continue", comment: "Voice tip: resume dictation"),
-                String(localized: "Hold ⌫ to clear all", comment: "Voice tip: long press delete to clear"),
+                AppLocalized("Double-tap text to edit", comment: "Voice tip: edit transcript"),
+                AppLocalized("Tap mic to continue", comment: "Voice tip: resume dictation"),
+                AppLocalized("Hold ⌫ to clear all", comment: "Voice tip: long press delete to clear"),
             ]
             return tips[viewModel.resultTipIndex % tips.count]
         }

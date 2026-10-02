@@ -94,6 +94,14 @@ final class ICloudBackupManager: ObservableObject {
 
     private var backupDirectoryURL: URL? {
         guard let container = iCloudContainerURL else { return nil }
+        // Deliberately NOT `DeviceIdentity.displayName`, even though the user
+        // can now rename this device ([T-backup-device-name-setting]). This
+        // string is a DIRECTORY PATH in the ubiquity container, not a label:
+        // honouring a rename would point the app at a new, empty folder and
+        // silently strand every backup already sitting in the old one. The
+        // folder keeps the name it was created under; renaming what a user
+        // sees is the settings field's job, relocating their existing iCloud
+        // backups is not.
         let deviceName = UIDevice.current.name
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")

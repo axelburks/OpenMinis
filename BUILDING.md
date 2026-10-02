@@ -2,13 +2,25 @@
 
 Minis ships a full Linux sandbox inside the app, so a first build is not just
 "open the project and press Run": the native dependencies (iSH on iOS, PRoot on
-Android, FFmpeg, LAME) and the Alpine rootfs are **built from source by the
-scripts in `deps/`**, not committed as binaries. Budget ~30–60 minutes for the
-first build; afterwards the artifacts are cached on disk and normal builds are
-fast.
+Android, FFmpeg, LAME, rclone) and the Alpine rootfs are **built from source**.
+Budget ~30–60 minutes for the first build; afterwards source fingerprints and
+artifacts are cached locally.
 
-Read the section for your platform end to end before starting — the steps are
-ordered by dependency, and skipping one produces confusing link errors later.
+The supported first-build entry point for the Minix branch is:
+
+```sh
+./scripts/minix-bootstrap.sh ios       # or android / both
+```
+
+It initializes submodules, creates missing customization templates, reconciles
+native dependencies in the correct order, and produces a Debug build. It does
+not install Xcode, Android Studio, SDK licenses, or signing secrets. When a
+prerequisite is missing, satisfy the reported requirement and rerun the same
+command.
+
+The commands below document the underlying build steps for maintenance and
+troubleshooting. Routine builds should use `scripts/minix-debug.sh`; dependency
+work should use `scripts/minix-deps.sh`.
 
 ---
 
@@ -17,9 +29,13 @@ ordered by dependency, and skipping one produces confusing link errors later.
 Clone with submodules — the iSH and PRoot forks are submodules, and a clone
 without them will fail at the native build step:
 
+The Minix bootstrap and invariant checks also require
+[ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep`).
+
 ```sh
-git clone --recurse-submodules https://github.com/OpenMinis/OpenMinis.git
+git clone --recurse-submodules https://github.com/axelburks/OpenMinis.git
 cd OpenMinis
+git switch minix
 
 # Already cloned without --recurse-submodules?
 git submodule update --init --recursive
@@ -32,8 +48,9 @@ git submodule update --init --recursive
 
 ### Build-time customization
 
-Some values are injected at build time and are **not** in this repository.
-Copy the templates before building:
+Some values are injected at build time and may be absent from a fresh checkout.
+`minix-bootstrap.sh` creates missing files from these templates without
+overwriting existing values. The equivalent manual commands are:
 
 ```sh
 cp src/ios/Configs/ProviderCustomization.xcconfig.example \
@@ -77,22 +94,35 @@ without setting this.
 |---|---|
 | macOS | Apple Silicon strongly recommended (see the simulator note below) |
 | Xcode | With the iOS SDK; the project targets **iOS 26.2** and **Swift 6.0** |
-| Homebrew packages | `brew install ninja llvm libarchive pkg-config` |
+| Metal Toolchain | `xcodebuild -downloadComponent MetalToolchain` — recent Xcode ships it as a separate component |
+| Homebrew packages | `brew install ninja llvm lld libarchive pkg-config` |
 | Python 3 + Meson | `pip3 install meson` |
+| Go | **1.25+** (`brew install go`), for rclone |
 
 `llvm` is needed to compile the guest VDSO, `libarchive` to unpack the rootfs,
 and Meson/Ninja to build the iSH kernel.
 
+The Metal Toolchain matters even though the build succeeds without it: FFmpeg's
+`configure` probes for the `metal` compiler and, when it is missing, **silently
+drops** the Metal-backed `yadif_videotoolbox` deinterlace filter. Check with
+`xcrun -sdk iphoneos metal --version` before running `build_ffmpeg.sh`.
+
 ### 1. Build the native dependencies
 
-Run these from the repository root, **in this order** — FFmpeg links against
-LAME, so LAME must exist first or MP3 encoding is silently dropped:
+Preferred:
+
+```sh
+./scripts/minix-deps.sh ios
+```
+
+For maintenance, the equivalent low-level order is:
 
 ```sh
 ./deps/build_lame.sh          # → deps/lame-build/lib/libmp3lame.a
 ./deps/build_ffmpeg.sh        # → deps/frameworks/*.framework  (LGPL config)
 ./deps/build_ish.sh           # → deps/libs/*.a, deps/include/, deps/resources/
 ./deps/prepare_alpine_rootfs.sh   # → deps/resources/alpine-rootfs.zip
+./deps/build_rclone_ios.sh    # → deps/frameworks/Rclone.xcframework
 ```
 
 What each produces:
@@ -105,6 +135,10 @@ What each produces:
   submodule, plus headers and the VDSO.
 - **`prepare_alpine_rootfs.sh`** — downloads Alpine aarch64 minirootfs and
   converts it to iSH's fakefs format.
+- **`build_rclone_ios.sh`** — rclone as a static-library XCFramework (device
+  and simulator slices) for the backup feature's remote destinations (SMB /
+  WebDAV / SFTP / S3 / FTP). Needs only the Go toolchain, not gomobile. The
+  linked backends are listed in `deps/rclone-mobile/backends/backends.go`.
 
 The Xcode project references `deps/libs/`, `deps/include/`, `deps/frameworks/`
 and `deps/resources/` relative to the project, so nothing needs to be copied
@@ -113,12 +147,18 @@ by hand.
 ### 2. Build the app
 
 ```sh
+./scripts/minix-debug.sh ios
+```
+
+The lower-level Xcode workflow is:
+
+```sh
 open src/ios/Minis.xcodeproj
 ```
 
 Select the **Minis** scheme and build. For a device build, set your own team
-under *Signing & Capabilities* — the project ships with an empty
-`DEVELOPMENT_TEAM`.
+under *Signing & Capabilities* if this Mac does not have access to the team
+configured by the Minix branch.
 
 From the command line:
 
@@ -139,6 +179,15 @@ xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
 `Minis` (app), `MinisShare` (share extension), `AgentWidgetExtension`,
 `MinisFileProvider`, plus `MinisTests` / `MinisUITests`.
 
+### Tests
+
+iOS tests require a physical device because the native dependencies are built
+for device arm64:
+
+```sh
+./scripts/minix-test.sh ios --device UDID
+```
+
 ---
 
 ## Android
@@ -151,7 +200,8 @@ xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
 | Android SDK | **compileSdk 36**, targetSdk 35, **minSdk 26** |
 | Android NDK | **r28+** — set `$ANDROID_NDK_HOME`, or install via Android Studio |
 | CMake | 3.22.1 (install through the SDK Manager) |
-| Shell tools | `curl`, `tar`, `make`, `awk`, `sed` |
+| Go + gomobile | Go **1.25+**, then `go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init` — for rclone |
+| Shell tools | `curl`, `tar`, `make`, `sed`; GNU awk (`brew install gawk` on macOS) |
 
 Gradle itself comes from the wrapper (Gradle 8.11.1, AGP 8.7.3, Kotlin 2.1.0) —
 do not install it separately.
@@ -161,19 +211,52 @@ image.
 
 ### 1. Build the native dependencies
 
+Preferred:
+
+```sh
+./scripts/minix-deps.sh android
+```
+
+For maintenance, the equivalent low-level order is:
+
 ```sh
 ./deps/build_proot.sh              # → assets/proot-aarch64, jniLibs/arm64-v8a/*.so
 ./scripts/prepare_android_sandbox.sh   # → assets/alpine-minirootfs.tar.gz
+./deps/build_rclone_android.sh     # → deps/build/rclone/rclone.aar
+mkdir -p src/android/app/libs && cp deps/build/rclone/rclone.aar src/android/app/libs/
 ```
 
 - **`build_proot.sh`** cross-compiles a static `libtalloc` and the
-  `deps/proot` fork with the NDK, then installs the binary into the app's
-  `assets/` and `jniLibs/arm64-v8a/`.
+  `deps/proot` fork with the NDK, then installs the proot binary into the app's
+  `assets/` and `jniLibs/arm64-v8a/`. It also verifies the tracked
+  **`libproot-loader.so` and `libproot-loader32.so`** files and fails if the
+  pinned Termux binaries are missing or changed. Those loaders are inputs, not
+  outputs of the local PRoot build.
+
+  The loaders are required, not optional. Android 10+ enforces W^X for
+  `untrusted_app`: nothing labelled `app_data_file` — which includes the whole
+  extracted Alpine rootfs under the app's `files/` dir — can ever be executed.
+  Only `nativeLibraryDir`, populated from `lib/**/*.so` in the APK, is
+  executable, so the loader lives there and maps guest binaries itself instead
+  of relying on the kernel's `execve`. (proot can normally extract an embedded
+  loader at runtime, but on Android it writes it into the app's temp dir and
+  hits the same W^X wall.) That is also why they carry a `.so` suffix despite
+  being executables rather than shared objects — only `*.so` gets extracted.
+
 - **`prepare_android_sandbox.sh`** downloads the Alpine aarch64 minirootfs into
   `assets/`.
+- **`build_rclone_android.sh`** binds rclone with gomobile into an `.aar` for
+  the backup feature's remote destinations. It needs `ANDROID_NDK_HOME` (or
+  `ANDROID_HOME`) set, and it writes to `deps/build/rclone/`; Gradle reads the
+  `.aar` from `src/android/app/libs/`, so copy it there as shown above.
 
-Both write into `src/android/app/src/main/`, and their outputs are gitignored —
-they are build artifacts, so rerun the scripts rather than committing them.
+All of these outputs are gitignored — they are build artifacts, so rerun the
+scripts rather than committing them.
+
+`minix-deps.sh` stores source fingerprints under `build/deps-state/`. Use
+`./scripts/minix-deps.sh both --check` for a read-only status check or
+`--force` when a clean rebuild is intentionally required. The script fails if
+a new `deps/build_*.sh` has not been registered in its component list.
 
 The small JNI libraries in `src/main/cpp/` (`pty_bridge`, the crash handler,
 `jieba_jni`) are built by CMake as part of the normal Gradle build; no separate
@@ -182,20 +265,23 @@ step is needed.
 ### 2. Build the app
 
 ```sh
-cd src/android
-./gradlew :app:assembleDebug          # → app/build/outputs/apk/debug/
-./gradlew :app:installDebug           # install onto a connected device
+./scripts/minix-debug.sh android
+./scripts/minix-debug.sh android --install --device SERIAL
 ```
 
-Release builds are configured with the debug signing config, so no keystore is
-required to produce one locally.
+Official Minix Debug, Perf, and Release variants use the same persistent
+certificate so they remain mutually upgradeable. `minix-bootstrap.sh android`
+creates the out-of-repository credential template when absent and fails before
+the build until it is filled in.
 
 ### Tests
 
 ```sh
-./gradlew :app:testDebugUnitTest        # JVM unit tests
-./gradlew :app:connectedAndroidTest     # instrumented; needs a device/emulator
+./scripts/minix-test.sh android
 ```
+
+Android instrumentation tests still run through Gradle and require a device:
+`cd src/android && ./gradlew :app:connectedAndroidTest`.
 
 ---
 
@@ -214,6 +300,18 @@ the simulator note above.
 **iOS: MP3 encoding unavailable** — `build_lame.sh` did not run before
 `build_ffmpeg.sh`. Rerun both in order.
 
+**iOS: `There is no XCFramework found at '…/deps/frameworks/Rclone.xcframework'`**
+— rclone was not built. Run `./deps/build_rclone_ios.sh`.
+
+**iOS: `cannot execute tool 'metal' due to missing Metal Toolchain`** in the
+FFmpeg build log, or the `yadif_videotoolbox` filter is absent — install it with
+`xcodebuild -downloadComponent MetalToolchain`, then rerun
+`./deps/build_ffmpeg.sh`.
+
+**Android: `Could not find :rclone:`** — `rclone.aar` is not in
+`src/android/app/libs/`. Run `./deps/build_rclone_android.sh` and copy
+`deps/build/rclone/rclone.aar` there.
+
 **Android: `Android NDK not found`** — set `ANDROID_NDK_HOME` to your NDK r28+
 installation, e.g.
 `export ANDROID_NDK_HOME=~/Library/Android/sdk/ndk/28.0.12433566`.
@@ -221,6 +319,22 @@ installation, e.g.
 **Android: app starts but the shell does not** — the sandbox assets are
 missing. Rerun `./deps/build_proot.sh` and
 `./scripts/prepare_android_sandbox.sh`, then rebuild.
+
+**Android: every command returns `[Shell not running] (exit code: -1)`** —
+the proot ELF loaders are missing from the APK. Check that
+`src/android/app/src/main/jniLibs/arm64-v8a/` contains `libproot-loader.so`
+(and `libproot-loader32.so`); these are tracked, SHA-pinned Termux binaries.
+Restore missing files from Git, then run `./scripts/minix-deps.sh android`.
+Confirm with
+`unzip -l app-debug.apk | grep libproot` — all three `.so` files must be
+present.
+
+This failure is deliberately hard to spot from the outside: proot still
+launches and logs its `native_offload` initialisation, so the sandbox looks
+healthy and any "does it start?" check passes. Only the first
+`execve("/bin/sh")` fails, with `Permission denied` in logcat under the
+`PRootStderr` tag. When touching this area, verify by **running a command and
+asserting exit code 0** — starting the sandbox is not enough.
 
 **A feature throws about a missing configuration value** — that value comes
 from the customization file; see [Build-time customization](#build-time-customization).

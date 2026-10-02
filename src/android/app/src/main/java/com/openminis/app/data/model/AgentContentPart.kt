@@ -17,6 +17,25 @@ sealed class AgentContentPart {
         val id: String,
         val name: String,
         val input: JSONObject,
+        // [T-android-gemini3-thoughtsig / #179] Opaque Gemini 3.x thought
+        // signature captured at tool-call time; replayed on the historical
+        // functionCall part (required by gemini-3.x or the request 400s). Null
+        // for non-Gemini providers and for pre-fix / migrated history.
+        val thoughtSignature: String? = null,
+        /**
+         * [T-offload-stub-system-reminder] (GH#374) True when the context
+         * offloader replaced this call's `content` argument with a
+         * pruned-argument notice because the real payload was moved to
+         * `/var/minis/offloads/…`.
+         *
+         * Provenance, not presentation: the notice text is also detectable with
+         * [com.openminis.app.data.ContextOffload.isOffloadPlaceholder], but that
+         * is a string test on a payload the model can imitate, whereas this flag
+         * is set only by the offloader. Defaults to false so every existing
+         * construction site and all history persisted before this change decode
+         * unchanged. Mirrors iOS `isOffloadedArgument`.
+         */
+        val isOffloadedArgument: Boolean = false,
     ) : AgentContentPart()
 
     data class ToolResult(
@@ -61,17 +80,25 @@ sealed class AgentContentPart {
          * any. See [LLMMessage.ImagePart.linuxPath] for usage notes.
          */
         val linuxPath: String? = null,
+        /**
+         * [T-android-vision-group / GH#182] Provider substitutes this for the
+         * pixels on the T264 no-native-vision path. See
+         * [LLMMessage.ImagePart.noVisionPlaceholder]. Seeded by ChatViewModel
+         * only when a Vision Group is configured; null → provider default literal.
+         */
+        val noVisionPlaceholder: String? = null,
     ) : AgentContentPart() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is ImageData) return false
             return data.contentEquals(other.data) && mimeType == other.mimeType &&
-                linuxPath == other.linuxPath
+                linuxPath == other.linuxPath && noVisionPlaceholder == other.noVisionPlaceholder
         }
 
         override fun hashCode(): Int {
             var result = 31 * data.contentHashCode() + mimeType.hashCode()
             result = 31 * result + (linuxPath?.hashCode() ?: 0)
+            result = 31 * result + (noVisionPlaceholder?.hashCode() ?: 0)
             return result
         }
     }

@@ -10,20 +10,95 @@ extension AIChatViewModel {
 
     static let retryDelays = [3, 5, 10, 15, 30]
 
+    /// [Minix] Upstream fallback prompt rebuilds omit skills, MCP, memory, and
+    /// the memory-status footer. Keep construction centralized here until
+    /// upstream fixes that omission, then reconcile this helper during merge.
+    func assembledAgentSystemPrompt(
+        baseSystemPrompt: String,
+        model: LLMModel
+    ) -> String {
+        var prompt = baseSystemPrompt
+        if let fragment = model.capabilityPromptFragment {
+            prompt += "\n\n" + fragment
+        }
+        if let fragment = model.agentBehaviorPromptFragment {
+            prompt += "\n\n" + fragment
+        }
+        // Helpers inherit the parent conversation's enabled skills and MCPs.
+        if let sid = helperConfig?.parentSessionId ?? sessionId,
+           let fragment =
+                SkillStore.shared.skillPromptFragment(for: sid) {
+            prompt += "\n\n" + fragment
+        }
+        if let sid = helperConfig?.parentSessionId ?? sessionId,
+           let fragment =
+                MCPStore.shared.systemPromptSnippet(for: sid) {
+            prompt += "\n\n" + fragment
+        }
+        if memoryEnabled {
+            if let fragment = Self.loadGlobalMemoryFragment() {
+                prompt += "\n\n" + fragment
+            }
+            if let fragment =
+                Self.loadRecentDailyMemoryFragment() {
+                prompt += "\n\n" + fragment
+            }
+        }
+        prompt += memoryStatusFragment
+        return prompt
+    }
+
+    /// [T-fallback-503-budget] Budget for a transient the SERVER answered with
+    /// a 5xx (`isServerCapacityTransient`). Waiting 63s across five attempts is
+    /// the right shape for a flaky link, but the wrong one for "this deployment
+    /// has no workers": another group member is likely free right now, so try
+    /// twice, briefly, then let the caller fall back. Only reached in a group
+    /// context — a session with no group keeps the full budget, since there is
+    /// nothing to fall back to.
+    static let serverCapacityRetryDelays = [2, 5]
+
+    /// [T-fallback-503-budget] Which retry budget this error gets on the
+    /// current model before the group falls back.
+    ///
+    /// The short budget applies ONLY to a transient the server answered with a
+    /// 5xx status AND only inside a group. Deliberately not applied to every
+    /// `transientError`: a dropped connection, a DNS failure, a TTFB stall or
+    /// an empty response carries no status code, and switching models does not
+    /// fix any of them — those keep the full 3/5/10/15/30s ladder. `always`
+    /// never reaches here (it falls back before auto-retry), and `rateLimited`
+    /// / `providerError` are `isFallbackable` and never reach here either.
+    nonisolated static func retryDelaysFor(error: Error, hasGroup: Bool) -> [Int] {
+        guard hasGroup, (error as? LLMError)?.isServerCapacityTransient == true else {
+            return retryDelays
+        }
+        return serverCapacityRetryDelays
+    }
+
+    nonisolated func retryDelaysFor(error: Error, hasGroup: Bool) -> [Int] {
+        Self.retryDelaysFor(error: error, hasGroup: hasGroup)
+    }
+
     func streamWithAutoRetry(
         provider initialProvider: any AgentProvider,
         messages: [AgentMessage],
         systemPrompt: String?,
         tools: [AgentToolDefinition],
         maxTokens: Int,
-        chatMessage: ChatMessage?
+        chatMessage: ChatMessage?,
+        delays: [Int]? = nil,
+        usesFallbackRequestControlDefaults: Bool = false,
+        entry initialEntry: ModelEntry? = nil
     ) async throws -> AsyncThrowingStream<AgentStreamEvent, Error> {
         var lastError: Error?
         var currentProvider = initialProvider
-        var currentEntryId = resolveCurrentEntry()?.id
-        for attempt in 0...Self.retryDelays.count {
+        var currentEntry = initialEntry ?? resolveCurrentEntry()
+        var currentEntryId = currentEntry?.id
+        var usesFallbackDefaults =
+            usesFallbackRequestControlDefaults
+        let retryDelays = delays ?? Self.retryDelays
+        for attempt in 0...retryDelays.count {
             if attempt > 0 {
-                let delay = Self.retryDelays[attempt - 1]
+                let delay = retryDelays[attempt - 1]
                 self.autoRetryAttempt = attempt
                 // Show the network error on the message during countdown
                 if let lastError {
@@ -44,7 +119,9 @@ extension AIChatViewModel {
                     if entry.id != currentEntryId {
                         logger.info("🔄 Retry: model entry changed during countdown \(currentEntryId ?? "nil") → \(entry.id)")
                         currentProvider = newProvider
+                        currentEntry = entry
                         currentEntryId = entry.id
+                        usesFallbackDefaults = false
                     }
                 }
             }
@@ -58,12 +135,12 @@ extension AIChatViewModel {
                 // persisted level may exceed what this (possibly re-resolved)
                 // model accepts, and the protocol-extension clamp only knows
                 // the catalog max, not the entry-level override.
-                let entry = resolveCurrentEntry()
-                let thinkingDefinitionId =
-                    clampedThinkingDefinitionId(
-                    storedDefinitionId,
-                    for: entry
-                )
+                let thinkingDefinitionId = currentEntry.map {
+                    Self.resolvedThinkingDefinitionId(
+                        storedDefinitionId,
+                        forModelEntry: $0
+                    )
+                } ?? storedDefinitionId
                 let thinkLvl = ThinkingLevelRegistry.nativeLevel(
                     forDefinitionId:
                         thinkingDefinitionId
@@ -71,7 +148,7 @@ extension AIChatViewModel {
                 let stream = try await RequestCustomizationRuntime.$sessionId.withValue(sessionId) {
                     try await RequestCustomizationRuntime
                         .$usesConversationRequestControlState
-                        .withValue(true) {
+                        .withValue(!usesFallbackDefaults) {
                             try await RequestCustomizationRuntime
                                 .$thinkingDefinitionId
                                 .withValue(
@@ -104,6 +181,26 @@ extension AIChatViewModel {
     }
 
 
+    // MARK: - Exhausted-group error
+
+    /// The error the three exhaustion branches of `streamWithGroupFallback`
+    /// throw: the "⚠️ model (instance): reason" trail plus the last model's own
+    /// words, so the user sees why every candidate was passed over.
+    ///
+    /// [T-compact-last-resort-removed] This used to return a sentinel asking the
+    /// agent loop for one forced compaction and another lap. That layer is
+    /// gone by product decision: "every candidate failed" is equally true when
+    /// the link drops, and a compaction triggered by a network blip threw away
+    /// the user's history to fix a failure it could not fix. Exhaustion now
+    /// surfaces the real errors and nothing else.
+    func groupExhaustedError(fallbackTrail: [(model: String, instance: String, reason: String)],
+                             finalError: Error) -> Error {
+        guard !fallbackTrail.isEmpty else { return finalError }
+        let trailLines = fallbackTrail.map { "⚠️ \($0.model) (\($0.instance)): \($0.reason)" }
+        let finalDesc = (finalError as? LocalizedError)?.errorDescription ?? finalError.localizedDescription
+        return LLMError.providerError(message: trailLines.joined(separator: "\n") + "\n" + finalDesc)
+    }
+
     // MARK: - Group-Level Fallback
 
     /// Resolve the entry and open a stream. This is the entry point for EVERY
@@ -128,7 +225,8 @@ extension AIChatViewModel {
         lastContextTokens: Int = 0,
         chatMessage: ChatMessage?,
         activeGroupId: inout String?,
-        activeEntryId: inout String?
+        activeEntryId: inout String?,
+        usesFallbackRequestControlDefaults: inout Bool
     ) async throws -> AsyncThrowingStream<AgentStreamEvent, Error> {
         var currentProvider = initialProvider
         var currentSystemPrompt = initialSystemPrompt
@@ -162,11 +260,12 @@ extension AIChatViewModel {
                 let currentEntry = currentEntryId.flatMap {
                     ProviderConfigStore.shared.entry(for: $0)
                 }
-                let thinkingDefinitionId =
-                    clampedThinkingDefinitionId(
-                    storedDefinitionId,
-                    for: currentEntry
-                )
+                let thinkingDefinitionId = currentEntry.map {
+                    Self.resolvedThinkingDefinitionId(
+                        storedDefinitionId,
+                        forModelEntry: $0
+                    )
+                } ?? storedDefinitionId
                 let thinkLvl = ThinkingLevelRegistry.nativeLevel(
                     forDefinitionId:
                         thinkingDefinitionId
@@ -174,7 +273,9 @@ extension AIChatViewModel {
                 let stream = try await RequestCustomizationRuntime.$sessionId.withValue(sessionId) {
                     try await RequestCustomizationRuntime
                         .$usesConversationRequestControlState
-                        .withValue(true) {
+                        .withValue(
+                            !usesFallbackRequestControlDefaults
+                        ) {
                             try await RequestCustomizationRuntime
                                 .$thinkingDefinitionId
                                 .withValue(
@@ -192,20 +293,41 @@ extension AIChatViewModel {
                                 }
                         }
                 }
-                // Success — update binding if we fell back to a different entry
+                // Success — update binding if we fell back to a different entry.
                 let prevEntryId = activeEntryId
                 if currentEntryId != activeEntryId, let currentEntryId,
                    let groupId = activeGroupId, let sid = sessionId {
                     logger.info("🔀ROUTE success with different entry: \(prevEntryId ?? "nil") → \(currentEntryId)")
                     activeEntryId = currentEntryId
+                    // [T-ios-switch-model-fallback-clobber] A pending user
+                    // switch owns the binding; only this request uses fallback.
+                    if pendingModelSwitch {
+                        logger.info("🔀ROUTE binding NOT updated — user switch pending, keeping their pick")
+                        return stream
+                    }
                     let binding = SessionModelBinding(
                         sessionId: sid,
-                        primarySource: .group(groupId: groupId, resolvedEntryId: currentEntryId),
-                        subModelSource: ProviderConfigStore.shared.binding(for: sid)?.subModelSource
+                        primarySource: .group(
+                            groupId: groupId,
+                            resolvedEntryId: currentEntryId
+                        ),
+                        subModelSource:
+                            ProviderConfigStore.shared
+                                .binding(for: sid)?
+                                .subModelSource
                     )
                     ProviderConfigStore.shared.setBinding(binding, for: sid)
-                    if let entry = ProviderConfigStore.shared.entry(for: currentEntryId) {
-                        Task { await ChatStore.shared.updateSessionModelId(sid, modelId: entry.model.id) }
+                    if let entry =
+                        ProviderConfigStore.shared.entry(
+                            for: currentEntryId
+                        ) {
+                        Task {
+                            await ChatStore.shared
+                                .updateSessionModelId(
+                                    sid,
+                                    modelId: entry.model.id
+                                )
+                        }
                     }
                     logger.info("🔀ROUTE binding updated to entry \(currentEntryId)")
                 } else {
@@ -241,27 +363,18 @@ extension AIChatViewModel {
                     logger.error("🔀ROUTE exhausted: nextEntryId=\(nextEntryId ?? "nil") alreadyTried=\(nextEntryId.map { triedEntries.contains($0) } ?? false)")
                     let skipped = ModelGroupRouter.unavailableMembers(group: group, store: ProviderConfigStore.shared)
                     fallbackReasons.append(contentsOf: skipped)
-                    if !fallbackReasons.isEmpty {
-                        let trailLines = fallbackReasons.map { "⚠️ \($0.model) (\($0.instance)): \($0.reason)" }
-                        let finalDesc = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                        throw LLMError.providerError(message: trailLines.joined(separator: "\n") + "\n" + finalDesc)
-                    }
-                    throw error
+                    throw groupExhaustedError(fallbackTrail: fallbackReasons, finalError: error)
                 }
 
                 logger.info("🔀ROUTE advancing: \(currentEid) → \(nextEntryId) (model=\(nextEntry.model.id) instance=\(nextEntry.providerInstanceId))")
                 triedEntries.insert(nextEntryId)
                 currentEntryId = nextEntryId
                 currentProvider = await makeAgentProvider(for: nextEntry)
-                // Rebuild system prompt for the new model's capabilities
-                var rebuiltPrompt = baseSystemPrompt
-                if let capFragment = nextEntry.model.capabilityPromptFragment {
-                    rebuiltPrompt += "\n\n" + capFragment
-                }
-                if let behaviorFragment = nextEntry.model.agentBehaviorPromptFragment {
-                    rebuiltPrompt += "\n\n" + behaviorFragment
-                }
-                currentSystemPrompt = rebuiltPrompt
+                usesFallbackRequestControlDefaults = true
+                currentSystemPrompt = assembledAgentSystemPrompt(
+                    baseSystemPrompt: baseSystemPrompt,
+                    model: nextEntry.model
+                )
                 // continue loop — will try next entry immediately
             } catch {
                 // Check if group uses "always" fallback strategy — if so, treat all
@@ -272,7 +385,7 @@ extension AIChatViewModel {
                     logger.error("🔀ROUTE entry=\(currentEntryId ?? "nil") always-strategy, immediate fallback for: \(error.localizedDescription)")
                     if let eid = currentEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                         let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
-                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: (error as? LLMError)?.fallbackReason ?? String(localized: "Error")))
+                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: (error as? LLMError)?.fallbackReason ?? AppLocalized("Error")))
                     }
 
                     let gid = activeGroupId
@@ -295,26 +408,18 @@ extension AIChatViewModel {
                         logger.error("🔀ROUTE always-strategy exhausted: nextEntryId=\(nextEntryId ?? "nil") alreadyTried=\(nextEntryId.map { triedEntries.contains($0) } ?? false)")
                         let skipped = ModelGroupRouter.unavailableMembers(group: group, store: ProviderConfigStore.shared)
                         fallbackReasons.append(contentsOf: skipped)
-                        if !fallbackReasons.isEmpty {
-                            let trailLines = fallbackReasons.map { "⚠️ \($0.model) (\($0.instance)): \($0.reason)" }
-                            let finalDesc = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                            throw LLMError.providerError(message: trailLines.joined(separator: "\n") + "\n" + finalDesc)
-                        }
-                        throw error
+                        throw groupExhaustedError(fallbackTrail: fallbackReasons, finalError: error)
                     }
 
                     logger.info("🔀ROUTE always-strategy advancing: \(currentEid) → \(nextEntryId) (model=\(nextEntry.model.id) instance=\(nextEntry.providerInstanceId))")
                     triedEntries.insert(nextEntryId)
                     currentEntryId = nextEntryId
                     currentProvider = await makeAgentProvider(for: nextEntry)
-                    var rebuiltPrompt = baseSystemPrompt
-                    if let capFragment = nextEntry.model.capabilityPromptFragment {
-                        rebuiltPrompt += "\n\n" + capFragment
-                    }
-                    if let behaviorFragment = nextEntry.model.agentBehaviorPromptFragment {
-                        rebuiltPrompt += "\n\n" + behaviorFragment
-                    }
-                    currentSystemPrompt = rebuiltPrompt
+                    usesFallbackRequestControlDefaults = true
+                    currentSystemPrompt = assembledAgentSystemPrompt(
+                        baseSystemPrompt: baseSystemPrompt,
+                        model: nextEntry.model
+                    )
                     continue
                 }
 
@@ -322,6 +427,22 @@ extension AIChatViewModel {
                 // on the *current* entry first. If retries are exhausted, fallback to
                 // the next model in the group.
                 logger.error("🔀ROUTE entry=\(currentEntryId ?? "nil") non-fallbackable error, using auto-retry: \(error.localizedDescription)")
+                // [T-fallback-503-budget] The short ladder is only worth taking
+                // when there is somewhere to fall back TO. Gating on "has a
+                // group" alone cut a single-member group (or one whose other
+                // members are disabled / uncredentialed / hidden) from 63s to
+                // ~7s and then threw with nowhere to go — strictly worse than
+                // the full ladder it used to get. Ask the router, which applies
+                // the same availability filter the fallback branch will.
+                let hasFallbackTarget: Bool = {
+                    guard let gid = activeGroupId, let eid = currentEntryId,
+                          let group = ProviderConfigStore.shared.group(for: gid) else { return false }
+                    return ModelGroupRouter.nextFallback(group: group, currentEntryId: eid, store: ProviderConfigStore.shared) != nil
+                }()
+                if (error as? LLMError)?.isServerCapacityTransient == true, hasFallbackTarget {
+                    let code = (error as? LLMError)?.httpStatusCode ?? 0
+                    logger.info("🔀ROUTE HTTP \(code) from the server — short retry budget \(Self.serverCapacityRetryDelays)s before falling back")
+                }
                 let retryModel = currentEntryId.flatMap { ProviderConfigStore.shared.entry(for: $0)?.model } ?? model
                 do {
                     let stream = try await streamWithAutoRetry(
@@ -330,22 +451,52 @@ extension AIChatViewModel {
                         systemPrompt: currentSystemPrompt,
                         tools: tools,
                         maxTokens: dynamicMaxTokens(provider: currentProvider, model: retryModel, lastContextTokens: lastContextTokens),
-                        chatMessage: chatMessage
+                        chatMessage: chatMessage,
+                        delays: retryDelaysFor(
+                            error: error,
+                            hasGroup: hasFallbackTarget
+                        ),
+                        usesFallbackRequestControlDefaults:
+                            usesFallbackRequestControlDefaults,
+                        entry: currentEntryId.flatMap {
+                            ProviderConfigStore.shared.entry(for: $0)
+                        }
                     )
-                    // Auto-retry succeeded
+                    // Auto-retry succeeded.
                     let prevEntryId = activeEntryId
-                    if currentEntryId != activeEntryId, let currentEntryId,
-                       let groupId = activeGroupId, let sid = sessionId {
+                    if currentEntryId != activeEntryId,
+                       let currentEntryId,
+                       let groupId = activeGroupId,
+                       let sid = sessionId {
                         logger.info("🔀ROUTE auto-retry success with different entry: \(prevEntryId ?? "nil") → \(currentEntryId)")
                         activeEntryId = currentEntryId
-                        let binding = SessionModelBinding(
-                            sessionId: sid,
-                            primarySource: .group(groupId: groupId, resolvedEntryId: currentEntryId),
-                            subModelSource: ProviderConfigStore.shared.binding(for: sid)?.subModelSource
-                        )
-                        ProviderConfigStore.shared.setBinding(binding, for: sid)
-                        if let entry = ProviderConfigStore.shared.entry(for: currentEntryId) {
-                            Task { await ChatStore.shared.updateSessionModelId(sid, modelId: entry.model.id) }
+                        // [T-ios-switch-model-fallback-clobber] A pending user
+                        // switch owns the binding.
+                        if !pendingModelSwitch {
+                            let binding = SessionModelBinding(
+                                sessionId: sid,
+                                primarySource: .group(
+                                    groupId: groupId,
+                                    resolvedEntryId: currentEntryId
+                                ),
+                                subModelSource:
+                                    ProviderConfigStore.shared
+                                        .binding(for: sid)?
+                                        .subModelSource
+                            )
+                            ProviderConfigStore.shared.setBinding(binding, for: sid)
+                            if let entry =
+                                ProviderConfigStore.shared.entry(
+                                    for: currentEntryId
+                                ) {
+                                Task {
+                                    await ChatStore.shared
+                                        .updateSessionModelId(
+                                            sid,
+                                            modelId: entry.model.id
+                                        )
+                                }
+                            }
                         }
                     }
                     return stream
@@ -354,7 +505,7 @@ extension AIChatViewModel {
                     logger.error("🔀ROUTE auto-retry exhausted for entry=\(currentEntryId ?? "nil"), attempting group fallback")
                     if let eid = currentEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                         let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
-                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: String(localized: "Retries exhausted")))
+                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: AppLocalized("Retries exhausted")))
                     }
 
                     let gid = activeGroupId
@@ -377,26 +528,18 @@ extension AIChatViewModel {
                         logger.error("🔀ROUTE exhausted all entries after retry: nextEntryId=\(nextEntryId ?? "nil") alreadyTried=\(nextEntryId.map { triedEntries.contains($0) } ?? false)")
                         let skipped = ModelGroupRouter.unavailableMembers(group: group, store: ProviderConfigStore.shared)
                         fallbackReasons.append(contentsOf: skipped)
-                        if !fallbackReasons.isEmpty {
-                            let trailLines = fallbackReasons.map { "⚠️ \($0.model) (\($0.instance)): \($0.reason)" }
-                            let finalDesc = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                            throw LLMError.providerError(message: trailLines.joined(separator: "\n") + "\n" + finalDesc)
-                        }
-                        throw error
+                        throw groupExhaustedError(fallbackTrail: fallbackReasons, finalError: error)
                     }
 
                     logger.info("🔀ROUTE after retry exhaustion, advancing: \(currentEid) → \(nextEntryId) (model=\(nextEntry.model.id) instance=\(nextEntry.providerInstanceId))")
                     triedEntries.insert(nextEntryId)
                     currentEntryId = nextEntryId
                     currentProvider = await makeAgentProvider(for: nextEntry)
-                    var rebuiltPrompt = baseSystemPrompt
-                    if let capFragment = nextEntry.model.capabilityPromptFragment {
-                        rebuiltPrompt += "\n\n" + capFragment
-                    }
-                    if let behaviorFragment = nextEntry.model.agentBehaviorPromptFragment {
-                        rebuiltPrompt += "\n\n" + behaviorFragment
-                    }
-                    currentSystemPrompt = rebuiltPrompt
+                    usesFallbackRequestControlDefaults = true
+                    currentSystemPrompt = assembledAgentSystemPrompt(
+                        baseSystemPrompt: baseSystemPrompt,
+                        model: nextEntry.model
+                    )
                     // continue loop — will try next entry
                 }
             }
@@ -421,28 +564,46 @@ extension AIChatViewModel {
         chatMessage: ChatMessage?,
         msgIdx: Int,
         activeGroupId: inout String?,
-        activeEntryId: inout String?
+        activeEntryId: inout String?,
+        usesFallbackRequestControlDefaults: inout Bool
     ) async throws -> StreamResult {
         // Track entries we've gotten empty responses from to avoid infinite loops.
         var emptyResponseEntries: Set<String> = []
+        var fallbackProvider = provider
+        var fallbackSystemPrompt = systemPrompt
 
         while true {
+            let requestEntryId = activeEntryId
             let fbStream = try await streamWithGroupFallback(
-                provider: provider,
+                provider: fallbackProvider,
                 messages: messages,
                 baseSystemPrompt: baseSystemPrompt,
-                systemPrompt: systemPrompt,
+                systemPrompt: fallbackSystemPrompt,
                 tools: tools,
                 model: model,
                 lastContextTokens: lastContextTokens,
                 chatMessage: chatMessage,
                 activeGroupId: &activeGroupId,
-                activeEntryId: &activeEntryId
+                activeEntryId: &activeEntryId,
+                usesFallbackRequestControlDefaults:
+                    &usesFallbackRequestControlDefaults
             )
+            if activeEntryId != requestEntryId,
+               let entryId = activeEntryId,
+               let entry =
+                    ProviderConfigStore.shared.entry(for: entryId) {
+                fallbackProvider =
+                    await makeAgentProvider(for: entry)
+                fallbackSystemPrompt =
+                    assembledAgentSystemPrompt(
+                        baseSystemPrompt: baseSystemPrompt,
+                        model: entry.model
+                    )
+            }
             let result = try await processStreamEvents(
                 stream: fbStream,
                 msgIdx: msgIdx,
-                provider: provider
+                provider: fallbackProvider
             )
 
             // Empty-response detection: HTTP 200 + stream finished, but no text,
@@ -460,10 +621,20 @@ extension AIChatViewModel {
             guard isEmpty else {
                 if let entryId = activeEntryId,
                    let entry =
-                    ProviderConfigStore.shared
-                        .entry(for: entryId) {
+                        ProviderConfigStore.shared.entry(
+                            for: entryId
+                        ) {
+                    let preferredDefinitionId =
+                        usesFallbackRequestControlDefaults
+                        ? Self.resolvedThinkingDefinitionId(
+                            currentThinkingDefinitionId,
+                            forModelEntry: entry
+                        )
+                        : nil
                     activateRuntime(
                         for: entry,
+                        preferredThinkingDefinitionId:
+                            preferredDefinitionId,
                         sessionKey:
                             currentRequestBodyControlSessionKey
                     )
@@ -477,7 +648,7 @@ extension AIChatViewModel {
             logger.error("🔀ROUTE-CONTENT entry=\(entryKey) returned empty response, advancing")
             if let eid = activeEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                 let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
-                fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: String(localized: "Empty response")))
+                fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: AppLocalized("Empty response")))
             }
 
             emptyResponseEntries.insert(entryKey)
@@ -525,13 +696,36 @@ extension AIChatViewModel {
                 if let nextEid, !emptyResponseEntries.contains(nextEid) {
                     logger.info("🔀ROUTE-CONTENT manually advancing: \(currentEid) → \(nextEid)")
                     activeEntryId = nextEid
-                    if let sid = sessionId {
+                    usesFallbackRequestControlDefaults = true
+                    if let sid = sessionId,
+                       !pendingModelSwitch {
                         let binding = SessionModelBinding(
                             sessionId: sid,
-                            primarySource: .group(groupId: gid, resolvedEntryId: nextEid),
-                            subModelSource: ProviderConfigStore.shared.binding(for: sid)?.subModelSource
+                            primarySource: .group(
+                                groupId: gid,
+                                resolvedEntryId: nextEid
+                            ),
+                            subModelSource:
+                                ProviderConfigStore.shared
+                                    .binding(for: sid)?
+                                    .subModelSource
                         )
                         ProviderConfigStore.shared.setBinding(binding, for: sid)
+                    }
+                    if let nextEntry =
+                        ProviderConfigStore.shared.entry(
+                            for: nextEid
+                        ) {
+                        fallbackProvider =
+                            await makeAgentProvider(
+                                for: nextEntry
+                            )
+                        fallbackSystemPrompt =
+                            assembledAgentSystemPrompt(
+                                baseSystemPrompt:
+                                    baseSystemPrompt,
+                                model: nextEntry.model
+                            )
                     }
                 } else {
                     logger.error("🔀ROUTE-CONTENT no more untried entries")

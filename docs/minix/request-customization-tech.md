@@ -69,10 +69,10 @@ customRequestBody: [String]
 - 不创建 `custom_user_agent` 或 `customUserAgent`。
 - 空数组解码为空配置。
 
-Minix 是全新 App，没有历史用户和旧数据，因此 `request_customization_json` 直接作为 `ProviderInstanceEntity` 的内联列声明，由 Room 在首次建库时随表创建。Provider DB 版本保持在官方基线 v3，不新增 v3→v4 迁移，也不保留任何开发阶段的中间 schema：
+Minix 是全新 App，没有历史用户和旧数据，因此 `request_customization_json` 直接作为 `ProviderInstanceEntity` 的内联列声明，由 Room 在首次建库时随表创建。本功能自身不新增迁移；当前 Provider DB 跟随上游 Thinking Rules 升级到 v4：
 
 ```text
-ProviderDatabase.version = 3   // 官方基线，不升级
+ProviderDatabase.version = 4   // 上游 v3→v4 新增 provider_thinking_rules
 ProviderInstanceEntity.requestCustomizationJson  // 内联列，无迁移
 ```
 
@@ -157,6 +157,8 @@ AUTHORIZATION
 
 三者指向同一 Header。实现必须保留最终写入名称，但比较和引用不区分大小写。
 
+`Authorization` 和 `Content-Type` 由传输层管理，约定用户不覆盖或删除；表达式帮助明确提示该限制，但不增加额外校验。Header `delete()` 只删除表达式当前可见的工作值，不增加 OAuth 刷新重放、OkHttp network interceptor 或跨构建阶段 tombstone。
+
 Provider/模型 Header 编辑器左值直接表示 Header 名称；quoted path 可处理空格、点和标点：
 
 ```text
@@ -178,9 +180,11 @@ Provider 先生成：
 - 协议默认 Body
 - Codex OAuth 客户端身份
 
-随后调用 `RequestCustomization`。用户 Header、Body 结果直接发送，不在定制后重新写回默认字段。
+随后调用 `RequestCustomization`。普通自定义 Header 和 Body 按现有 Provider 接线发送；保留 Header 仍遵循传输层行为。
 
-OpenAI 兼容 Provider 不再按第三方厂商、Base URL 或模型 ID 注入私有 thinking 格式；差异由模型 Request Controls 表达。
+OpenAI Chat Completions 保留上游 `ThinkingRuleResolver` 集中维护的兼容规则；Minix 不在 Provider 主体中复制这些分支。模型启用语义思考 Request Control 后会跳过 resolver，由控制表达式完整接管 thinking 字段。
+
+`minis-model-use` 的 raw、image 和 image-edit 不是会话模型请求：它们仍依次应用 Provider/Model Header 与 Body，但调用 `RequestCustomization` 时显式跳过 Request Controls。Codex OAuth 的 image generation 工具路径遵循同一规则。
 
 ### 7.2 Gemini
 

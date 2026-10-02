@@ -117,11 +117,17 @@ private let logger = AppLogger(category: "SessionsOffload")
     /// Load a page of messages for a specific session. Returns NSDictionary with "messages" array and pagination info.
     /// `full` switches the per-message text cap from 1000 to 50000 chars; messages whose
     /// stored text exceeds the cap are still truncated and marked with "truncated": true.
+    /// [T-sessions-cli-messages-date-filter] (GH#200) `startDate`/`endDate`
+    /// forward the CLI's `--start`/`--end` down to ChatStore. They were absent
+    /// from this signature entirely, which is why the ObjC layer had nothing to
+    /// pass and the flags were silently dropped.
     @objc public static func loadMessages(
         sessionId: String,
         offset: Int,
         limit: Int,
-        full: Bool
+        full: Bool,
+        startDate: Date?,
+        endDate: Date?
     ) -> NSDictionary {
         let sem = DispatchSemaphore(value: 0)
         var result: [[String: Any]] = []
@@ -133,9 +139,15 @@ private let logger = AppLogger(category: "SessionsOffload")
                 sessionId: sessionId,
                 offset: offset,
                 limit: limit,
-                maxChars: maxChars
+                maxChars: maxChars,
+                startDate: startDate,
+                endDate: endDate
             )
-            totalCount = await ChatStore.shared.messageCount(sessionId: sessionId)
+            // Counted over the SAME range so `total` describes the filtered set
+            // the caller is paging through, not the whole session.
+            totalCount = await ChatStore.shared.messageCount(sessionId: sessionId,
+                                                             startDate: startDate,
+                                                             endDate: endDate)
 
             let dateFmt = DateFormatter()
             dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
@@ -231,11 +243,20 @@ private let logger = AppLogger(category: "SessionsOffload")
     ///                   non-nil → install a session-level directEntry binding before send().
     ///   - source: Written to `vm.sessionSource` on new sessions (e.g. "cli").
     ///
-    /// Always returns immediately with status "Running" once the prompt has
-    /// been dispatched. The caller polls via `getSessionStatus` — the prior
+    /// Returns immediately once the prompt has been dispatched. `status` is
+    /// the truthful outcome of `submitProgrammaticPrompt`: "Running" (a new
+    /// loop started), "Queued" (the session was busy — the prompt runs as a
+    /// fresh turn when its loop ends), or ok:false with `error` when the vm
+    /// declined it. The caller polls via `getSessionStatus` — the prior
     /// `--wait` / `--timeout` blocking mode was removed because the iSH
     /// shell is single-threaded and blocking it deadlocked agent loops that
     /// dispatched prompts then tried to do further work.
+    ///
+    /// [T-p0-programmatic-prompt] This used to do `vm.inputText = prompt;
+    /// vm.send()` and answer `ok: true, status: Running` unconditionally.
+    /// `send()` silently returns while `isProcessing` is true, so a send into
+    /// a busy session — including an agent sending to ITSELF from a
+    /// shell_execute — reported success and did nothing.
     @objc public static func sendPrompt(
         sessionId: String?,
         prompt: String,
@@ -293,9 +314,8 @@ private let logger = AppLogger(category: "SessionsOffload")
             // Attachments.
             _ = stageAttachments(paths: attachmentPaths, on: vm)
 
-            // Send.
-            vm.inputText = prompt
-            vm.send()
+            // Send through the one programmatic channel.
+            let outcome = vm.submitProgrammaticPrompt(prompt, origin: .cli, silent: true)
 
             // Resolve model name for the response.
             var modelName = vm.selectedModel.displayName
@@ -304,16 +324,32 @@ private let logger = AppLogger(category: "SessionsOffload")
                 modelName = resolved
             }
 
-            output = [
-                "ok": true,
-                "action": "send",
-                "session_id": sid,
-                "is_new_session": isNew,
-                "model_name": modelName,
-                "status": "Running",
-                "prompt": prompt,
-                "response_text": "",
-            ]
+            switch outcome {
+            case .sent, .queued:
+                output = [
+                    "ok": true,
+                    "action": "send",
+                    "session_id": sid,
+                    "is_new_session": isNew,
+                    "model_name": modelName,
+                    "status": outcome == .sent ? "Running" : "Queued",
+                    "queued": outcome == .queued,
+                    "queue_position": outcome == .queued ? vm.promptQueue.count : 0,
+                    "prompt": prompt,
+                    "response_text": "",
+                ]
+            case .rejected(let reason):
+                output = [
+                    "ok": false,
+                    "action": "send",
+                    "session_id": sid,
+                    "is_new_session": isNew,
+                    "model_name": modelName,
+                    "error": "send_rejected",
+                    "reason": reason,
+                    "prompt": prompt,
+                ]
+            }
             sem.signal()
         }
         sem.wait()

@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -115,7 +116,12 @@ class ShellExecutorInstrumentedTest {
 
         val result = ShellExecutor.execute(context, "cat /etc/resolv.conf")
         assertEquals(0, result.exitCode)
-        assertTrue("Should contain DNS config", result.output.contains("8.8.8.8"))
+        val nameservers = result.output.lineSequence()
+            .filter { it.startsWith("nameserver ") }
+            .map { it.removePrefix("nameserver ").trim() }
+            .toList()
+        assertTrue("Should contain at least one DNS server", nameservers.isNotEmpty())
+        assertTrue("DNS servers should be valid IP addresses", nameservers.all(ContainerDns::isValidServer))
     }
 
     @Test
@@ -288,20 +294,18 @@ class ShellExecutorInstrumentedTest {
     // ==================== Helpers ====================
 
     private fun canBoot(): Boolean {
-        return try {
-            context.assets.open("alpine-minirootfs.tar.gz").use { }
-            context.assets.open("proot-aarch64").use { }
-            true
-        } catch (_: Exception) {
-            false
+        // [Minix] AAPT exposes no-compress tar.gz assets without the final
+        // compression suffix on this toolchain; production supports both.
+        val hasRootfs = listOf("alpine-minirootfs.tar.gz", "alpine-minirootfs.tar").any { name ->
+            runCatching { context.assets.open(name).use { } }.isSuccess
         }
+        if (!hasRootfs) return false
+        // [Minix] v1.14 packages PRoot as libproot.so in nativeLibraryDir.
+        return RootfsManager.getInstance(context).prootBinary.run { exists() && canExecute() }
     }
 
     private fun skipIfNoBoot() {
-        if (!PRootKernel.isBooted) {
-            println("SKIP: PRoot not booted (assets not available)")
-            return
-        }
+        assumeTrue("PRoot not booted (assets not available)", PRootKernel.isBooted)
     }
 
     private fun resetKernel() {
@@ -309,6 +313,11 @@ class ShellExecutorInstrumentedTest {
             val field = PRootKernel::class.java.getDeclaredField("isBooted")
             field.isAccessible = true
             field.set(PRootKernel, false)
+        } catch (_: Exception) { }
+        try {
+            val field = PRootKernel::class.java.getDeclaredField("rootfsManager")
+            field.isAccessible = true
+            field.set(PRootKernel, null)
         } catch (_: Exception) { }
         PRootKernel.clearBindMounts()
         PRootKernel.customEnvironment.clear()

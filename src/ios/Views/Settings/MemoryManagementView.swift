@@ -21,9 +21,9 @@ struct MemoryManagementView: View {
     var body: some View {
         List {
             Section {
-                Toggle(String(localized: "settings_memory_global_enabled"), isOn: $memoryGlobalEnabled)
+                Toggle(AppLocalized("settings_memory_global_enabled"), isOn: $memoryGlobalEnabled)
             } footer: {
-                Text(String(localized: "settings_memory_global_enabled_footer"))
+                Text(AppLocalized("settings_memory_global_enabled_footer"))
             }
 
             ForEach(memoryFiles) { file in
@@ -60,13 +60,15 @@ struct MemoryManagementView: View {
         .navigationTitle("Memory")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if #available(iOS 17.0, *), iCloudSyncEnabled {
+            // [Minix] Xcode 27 resolves this ToolbarContentBuilder branch via
+            // buildLimitedAvailability, whose SDK availability starts at 17.5.
+            if #available(iOS 17.5, *), iCloudSyncEnabled {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
                             Task { await forceSyncMemory() }
                         } label: {
-                            Label(String(localized: "Force iCloud Sync"),
+                            Label(AppLocalized("Force iCloud Sync"),
                                   systemImage: "arrow.triangle.2.circlepath.icloud")
                         }
                     } label: {
@@ -102,7 +104,7 @@ struct MemoryManagementView: View {
         let count = await ForceSyncHelper.markMemoryDirty()
         await ForceSyncHelper.bidirectionalSync(
             recordTypes: ["MemoryGlobalV2", "MemoryDailyV2"])
-        forceSyncToast = String(localized: "Synced \(count) memory files")
+        forceSyncToast = AppLocalized("Synced \(count) memory files")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             forceSyncToast = nil
         }
@@ -297,7 +299,7 @@ private struct MemoryFileEditView: View {
             // [T-toast-feedback] Confirm the save succeeded — the screen
             // doesn't dismiss or change, so without this the user gets no
             // signal that the write landed.
-            MinisToast.show(String(localized: "Saved"))
+            MinisToast.show(AppLocalized("Saved"))
             // Enqueue for iCloud v2 sync. GLOBAL.md uses its own singleton
             // record; per-day logs use the dateKey from the filename.
             if isGlobal {

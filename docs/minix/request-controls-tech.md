@@ -26,6 +26,8 @@ Request Controls 由四层组成：
 - 聊天弹层编排：`Views/Chat/AIChatView.swift`
 - 会话控制状态与解析：`Agent/Chat/AIChatViewModel+MinixRequestControls.swift`
 - fallback：`Agent/Chat/AIChatViewModel+Fallback.swift`
+- 上游默认兼容规则：`Providers/Thinking/ThinkingRuleResolver.swift`
+- 上游规则持久化/UI：`Providers/ProviderConfigDB.swift`、`Views/Providers/ThinkingRulesSection.swift`
 
 ### 2.2 Android
 
@@ -38,6 +40,8 @@ Request Controls 由四层组成：
 - 聊天面板：`ui/chat/MinixChatRequestControls.kt`
 - 聊天弹层编排：`ui/chat/ChatScreen.kt`
 - 会话与 fallback：`ui/chat/ChatViewModel.kt`
+- 上游默认兼容规则：`provider/thinking/ThinkingRuleResolver.kt`
+- 上游规则持久化/UI：`data/db/ProviderDatabase.kt`、`ui/settings/ThinkingRulesSection.kt`
 
 ## 3. 控制数据模型
 
@@ -111,6 +115,7 @@ useConversationRequestControlState
 - 普通聊天：当前 session + `true`。
 - 标题、压缩、已有会话语音纠错：当前 session + `false`。
 - Quick Test、模型列表刷新、`minis-model-use`：`nil` + `false`。
+- `minis-model-use` 的 raw、image、image-edit 额外设置 `includeControls = false`：仍执行 Provider/Model Header 与 Body，但不执行 Request Controls。
 - iOS 使用两个独立 `TaskLocal`；Anthropic OAuth pending patcher 同时捕获两者。
 - Android 使用 `LLMProvider.requestSessionId` 和 `usesConversationRequestControlState` 两个独立属性。
 
@@ -197,8 +202,8 @@ disablesBuiltInThinkingInjection =
 
 Provider 路径必须遵守：
 
-- `false`：执行协议默认 thinking 映射。
-- `true`：跳过内置 thinking 字段，只执行控制表达式。
+- `false`：执行完整上游默认链路。上游已接线的 OpenAI Chat Completions 路径进入 `ThinkingRuleResolver`（Provider 用户规则优先、内置规则兜底）；Responses、Anthropic、Gemini 和 Antigravity 执行各自的上游协议映射。
+- `true`：跳过 resolver 或协议默认 thinking 字段，只执行控制表达式。
 
 不得通过搜索表达式是否包含 `thinking`、`reasoning` 或 `effort` 推断语义。
 
@@ -234,6 +239,8 @@ Antigravity 复用 Gemini 模板：其请求定制作用于信封内层的 Gemin
 
 模板档位集合按 Provider 最新协议生成，不按旧模型 ID 生成兼容分支。用户保存后，表达式文本是唯一事实来源。
 
+后续向思考控制加入档位时复用同一模板入口，并按 Provider 的实际路由判断 Chat Completions 或 Responses；因此 Codex OAuth 不会误生成 `reasoning_effort`。只有内置档位自动生成表达式，自定义档位保持空白，由用户定义 wire shape。
+
 ## 9. 控制执行
 
 伪代码：
@@ -258,22 +265,22 @@ for control in controls where control.isEnabled:
 
 每条表达式执行后立即更新 Header、Body，保证后续控制和后续行可读取结果。
 
-## 10. Provider 协议默认
+## 10. Provider 默认链路
 
-无自定义控制时，Provider 只保留协议级映射：
+无自定义思考控制时，Provider 保留上游默认行为：
 
-- OpenAI Chat：`reasoning_effort`
+- OpenAI Chat：保留上游 `ThinkingRuleResolver` 及其原有 `providerInstanceId` 接线边界，不借助 Minix `requestCustomization` 扩大 Provider 用户规则的适用范围；Android Mistral 继续使用独立传输门禁。
 - OpenAI Responses：`reasoning.effort`
 - OpenRouter：`reasoning.effort`
 - Anthropic：Provider 原生 thinking 格式
 - Gemini：Provider 原生 thinking 格式
 
-OpenAI 兼容路径不得恢复以下分支：
+Provider 主体不得复制 `ThinkingRuleResolver` 已拥有的分支：
 
-- 按第三方厂商名称注入
-- 按 Base URL 注入
-- 按 model ID 注入私有 thinking 对象
-- xhigh 等档位的厂商特定降级
+- 不在 `OpenAIAgentProvider` / `OpenAIProvider` 中重新展开按厂商、Base URL 或模型 ID 的 thinking 分支。
+- 上游新增或修正的兼容规则保留在 `ThinkingRuleResolver` 中。
+- Provider Thinking Rules 的用户规则只适用于 OpenAI Chat Completions；Responses、Anthropic、Gemini 和 Antigravity 的设置页继续显示不支持提示。
+- Minix 语义思考控制优先级高于 resolver：启用时整个默认链路被短路，随后由 Request Control 表达式写入最终字段。
 
 用户差异由 Request Controls 表达。
 
@@ -315,8 +322,10 @@ OpenAI 兼容路径不得恢复以下分支：
 4. 将解析后的实际有效 ID 写回会话，由现有响应式状态同步 UI 和 Provider。
 5. 切换分组或分组成员时，有分组默认档位则先覆盖；否则保留当前值再下调。
 6. Request Control snapshot 在模型切换时整体替换，A→B→A 不恢复旧 A。
-7. fallback 候选使用默认 Request Controls；完整流成功且非空后才替换 snapshot 并保存降级档位。
-8. 失败或空响应候选不得修改 Request Control snapshot 或会话思考档位。
+7. fallback 候选的普通 Request Controls 使用候选默认状态；语义思考控制继承会话 `definitionId`，再按候选可用档位向下 clamp。内部标题、压缩和语音纠错把 `thinkingDefinitionId` 保持为 `nil`，让控件的 `defaultOptionID` 决策，不得用调用参数的 `off` 覆盖默认项。
+8. fallback 请求的 system prompt 统一从基础 prompt、候选模型 capability/behavior、父会话 skills/MCP、memory 内容和 memory 状态 footer 组装；取得 stream handle 后再补片段为时已晚。
+9. fallback 取得候选 stream 后沿用上游行为立即提交会话模型 binding；若请求期间用户已选择其他模型，则保持该用户选择。
+10. 候选档位沿既有流完成和运行时激活路径写回，不额外引入终态白名单、跨字段事务或思考选择 revision。
 
 `ThinkingLevel` 只是 Provider 兼容投影，不作为持久外键。
 
@@ -334,7 +343,13 @@ OpenAI 兼容路径不得恢复以下分支：
 CloudKit：
 
 - `ThinkingLevelDefinitionsV3` 同步完整定义列表。
+- `ProviderThinkingRuleV3` 保留上游 Provider 用户规则同步。
 - 按 `updatedAt` 做 LWW。
+
+备份：
+
+- iOS 和 Android 均保留上游 Provider Thinking Rules 的导出与恢复。
+- Android 规则表位于 Provider DB v4 的 `provider_thinking_rules`。
 
 分享导入：
 
@@ -366,15 +381,21 @@ CloudKit：
 - 新会话隔离和 A→B→A 默认值
 - 草稿单 snapshot 迁移
 - 表达式 session ID 与交互状态读取解耦
-- fallback 成功写入、失败不污染
+- fallback 候选普通控件默认状态、语义档位继承/clamp、即时模型 binding 与用户模型切换保护
 - Header/Body 混合表达式
 - `semanticKind` 检测
 - 自定义档位精确匹配
 - 自定义档位突破 `ultra`
+- 新增内置档位复用实际 Provider 路由模板，自定义档位保持空表达式
 - rank 向下 clamp
 - 悬空 ID fallback
 - 模型 fallback 保持 definition ID
+- raw、image、image-edit 保留 Provider/Model 层并跳过 Request Controls
 - CloudKit、分享和数据库 round trip
+- Provider Thinking Rules 的 DB/UI/缓存/同步/备份链路
+- 无语义思考控制时 resolver 生效，启用时 resolver 被短路
+- Codex Responses 在无自定义控制且选择 Off 时保留上游 `low` 兜底
+- Gemini `minimal` 作为启用档位请求 `includeThoughts`
 - 聊天面板自动化
 
 ## 16. 上游合并参考
@@ -384,7 +405,9 @@ CloudKit：
 - `definitionId` 持久引用
 - 自定义思考控制精确替代内置注入
 - 自定义控制不受 Catalog/`ultra` 限制
-- OpenAI 兼容路径无厂商 thinking 特例
+- 上游 Provider Thinking Rules 的 DB、UI、缓存、同步、备份和 resolver 接线
+- OpenAI Chat Completions 的用户规则优先、内置规则兜底
+- Provider 主体不重复实现 resolver 已拥有的厂商 thinking 分支
 - 独立 `MinixChatRequestControls.*`
 - `/`、Mention、Request Controls 弹层互斥
 

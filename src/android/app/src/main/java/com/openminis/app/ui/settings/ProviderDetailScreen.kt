@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.ButtonDefaults
@@ -37,6 +38,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -97,6 +100,11 @@ fun ProviderDetailScreen(
     // mirrors DebugProviderMutationMethods note "Built-in entries can't be
     // deleted — set isHidden=true instead".
     var entryToDelete by remember { mutableStateOf<com.openminis.app.data.model.ModelEntry?>(null) }
+    // [T-android-model-row-hide-action] Id of the entry whose long-press menu is
+    // open. Keyed by id rather than holding the ModelEntry so the menu re-reads
+    // the CURRENT entry after a hide toggle — holding a stale copy would leave
+    // the item labelled "Hide" right after hiding it.
+    var menuEntryId by remember { mutableStateOf<String?>(null) }
     var deleted by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -113,7 +121,39 @@ fun ProviderDetailScreen(
     // flushed and show the OLD key, making Save look like a no-op. Keeping it in
     // remember + updating it synchronously in onSave reflects the just-saved
     // value immediately, independent of the async flush.
-    var storedKey by remember(instanceId) { mutableStateOf(providerRepository.loadApiKey(instanceId) ?: "") }
+    // [T-android-copilot-not-connected] An OAuth credential does not have to
+    // live in the API-key store, so `loadApiKey` alone cannot answer for it.
+    //
+    // Every other OAuth provider here mirrors its token into that store on
+    // login (Kimi, Claude, OpenAI, xAI, OpenRouter all call `saveApiKey`), which
+    // is why reading it works for them. Copilot deliberately does not: its
+    // credential is the two-tier GitHub/session pair under its own keys, and the
+    // API-key path is excluded for it on purpose (T-android-copilot-oauth-only).
+    // The result was a sign-in that fully succeeded — device flow complete,
+    // session token minted, 28 models loaded — and a detail screen that still
+    // said "Not connected", because it was asking the one store the credential
+    // is never written to.
+    //
+    // Asked of the OAuth manager instead, which is what iOS does
+    // (`CopilotOAuthManager.shared.isAuthenticated(instanceId:)` in
+    // ProviderInstancesView). The placeholder below only has to be non-empty —
+    // it drives the connected dot and the Sign In/Sign Out branch; the masked
+    // display is meaningless for a credential the user never types, and showing
+    // a masked GitHub token here would leak it into a screenshot for no reason.
+    val detailContext = androidx.compose.ui.platform.LocalContext.current
+    // Ask the same question the provider LIST already asks
+    // (`OAuthManager.isAuthenticated()`), so the two screens cannot disagree —
+    // and so a provider storing its credential elsewhere is handled by its own
+    // manager rather than by a special case here.
+    val oauthConnected = instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth &&
+        com.openminis.app.auth.OAuthManager.forInstance(detailContext, instance)
+            ?.isAuthenticated() == true
+    var storedKey by remember(instanceId) {
+        mutableStateOf(
+            providerRepository.loadApiKey(instanceId)
+                ?: if (oauthConnected) OAUTH_CONNECTED_PLACEHOLDER else "",
+        )
+    }
     var isEditingKey by remember { mutableStateOf(false) }
     var editKeyValue by remember { mutableStateOf("") }
     var keyVisible by remember { mutableStateOf(false) }
@@ -154,6 +194,11 @@ fun ProviderDetailScreen(
 
     val entries = providerRepository.entriesFor(instanceId)
     var isRefreshing by remember { mutableStateOf(false) }
+    // [T-codex-dynamic-discovery GH#319] Set when the Codex discovery endpoint
+    // rejects the stored credential. Shown as a dialog rather than silently
+    // leaving the old list on screen, which would read as a successful refresh
+    // while the account is signed out.
+    var refreshAuthError by remember { mutableStateOf(false) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
 
@@ -270,7 +315,13 @@ fun ProviderDetailScreen(
         }
 
         // Manual Bearer Token (OAuth providers only — proxy override)
-        if (isOAuthProvider) {
+        //
+        // [T-android-copilot-oauth-only] …except Copilot, whose factory branch
+        // never looks this token up: it wires `oauthTokenProvider` straight to
+        // the session-token minter. A token pasted here was stored, shown as
+        // configured, and then ignored on every request — a dead end that looks
+        // like a feature. Mirrors iOS ProviderInstanceDetailView.
+        if (isOAuthProvider && instance.providerType != ProviderType.githubCopilot) {
             SettingsSection(
                 header = stringResource(R.string.provider_detail_manual_bearer_token),
                 footer = stringResource(R.string.provider_detail_use_a_static_bearer_token_instead_of_the) +
@@ -322,7 +373,7 @@ fun ProviderDetailScreen(
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier.weight(1f),
                     )
-                    Switch(
+                    SettingsSwitch(
                         checked = appendV1Suffix,
                         onCheckedChange = { appendV1Suffix = it },
                     )
@@ -369,9 +420,9 @@ fun ProviderDetailScreen(
             SettingsSection(
                 header = stringResource(R.string.provider_detail_api_format),
                 footer = if (instance.useResponsesAPI) {
-                    "Uses /v1/responses endpoint format. Required for some Responses-API-only services."
+                    stringResource(R.string.provider_detail_api_format_footer_responses)
                 } else {
-                    "Standard /v1/chat/completions format. Compatible with most OpenAI-compatible services."
+                    stringResource(R.string.provider_detail_api_format_footer_chat)
                 },
             ) {
                 SettingsCardBlock {
@@ -420,6 +471,7 @@ fun ProviderDetailScreen(
                 )
             }
         }
+
 
         // ─── Image Generation Endpoint ──────────────────────────────
         // [T-android-image-endpoint-mode] OpenAI-compatible providers only.
@@ -536,6 +588,9 @@ fun ProviderDetailScreen(
             }
         }
 
+        // ─── Thinking Rules [T-android-thinking-rules-phase2 §3] ─────
+        ThinkingRulesSection(instance = instance, providerRepository = providerRepository)
+
         // ─── Models ─────────────────────────────────────────────────
         SettingsSection(
             header = stringResource(R.string.provider_detail_models_count_header, entries.size),
@@ -549,10 +604,18 @@ fun ProviderDetailScreen(
                 } else {
                     {
                         isRefreshing = true
+                        refreshAuthError = false
                         scope.launch {
                             try {
-                                providerRepository.refreshModels(instance)
+                                // [T-codex-dynamic-discovery GH#319]
+                                // forceRefresh: this is the manual Refresh tap,
+                                // which must bypass the discovery cache — a
+                                // Refresh that returns a cached list is not one.
+                                providerRepository.refreshModels(instance, forceRefresh = true)
                                 AppLogger.info(TAG, "Refreshed models for ${instance.id}")
+                            } catch (e: com.openminis.app.data.repository.CodexDiscoveryAuthException) {
+                                AppLogger.warning(TAG, "Refresh rejected credential: ${e.message}")
+                                refreshAuthError = true
                             } finally {
                                 isRefreshing = false
                             }
@@ -572,9 +635,7 @@ fun ProviderDetailScreen(
 
             entries.forEachIndexed { idx, entry ->
                 // Drive both tap and long-press from a Box wrapper so we
-                // don't have to expand SettingsRow's signature. Long-press
-                // is a no-op for built-in entries (they reappear on the next
-                // model refresh anyway).
+                // don't have to expand SettingsRow's signature.
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -587,12 +648,32 @@ fun ProviderDetailScreen(
                         .then(if (entry.isHidden) Modifier.alpha(0.45f) else Modifier)
                         .combinedClickable(
                             onClick = { onModelEntryClick(entry.id) },
-                            onLongClick = if (entry.isCustom) {
-                                { entryToDelete = entry }
-                            } else null,
+                            // [T-android-model-row-hide-action] Long-press now
+                            // opens a menu instead of going straight to delete.
+                            // Hiding was previously reachable ONLY by opening
+                            // the model's detail screen, flipping the
+                            // Visibility switch and pressing Save — five steps
+                            // for what iOS does with one tap on an eye button
+                            // in this very list (ProviderInstanceDetailView).
+                            //
+                            // A menu rather than a trailing icon button because
+                            // the row's trailing slot is a FIXED 72dp capability
+                            // -badge area, deliberately sized so the chevron
+                            // lands at the same x on every row; adding a button
+                            // there would reintroduce the ragged column that
+                            // sizing exists to prevent.
+                            //
+                            // It also fills a dead gesture: long-press used to
+                            // be null for built-in entries, so they had no
+                            // context action at all. They still cannot be
+                            // deleted (the repo re-creates them from
+                            // ProviderType.builtInModels on the next refresh),
+                            // but hiding is exactly the supported way to get one
+                            // out of the picker.
+                            onLongClick = { menuEntryId = entry.id },
                         ),
                 ) {
-                    // [T-android-model-capability-output-tags] (XIN msg 38847)
+                    // [T-android-model-capability-output-tags]
                     // The list previously read INPUT modalities only, so a
                     // generator like gpt-image-2 (image_output) or an
                     // audio_output model showed no capability badge at all.
@@ -634,6 +715,67 @@ fun ProviderDetailScreen(
                             }
                         },
                     )
+
+                    // [T-android-model-row-hide-action] Row context menu. Anchored
+                    // inside the row's Box so it opens over the entry the user
+                    // pressed. Delete stays custom-only, matching the previous
+                    // long-press behaviour and the repo's constraint.
+                    DropdownMenu(
+                        expanded = menuEntryId == entry.id,
+                        onDismissRequest = { menuEntryId = null },
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    stringResource(
+                                        if (entry.isHidden) R.string.provider_detail_show_model
+                                        else R.string.provider_detail_hide_model,
+                                    ),
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    if (entry.isHidden) Icons.Filled.Visibility
+                                    else Icons.Filled.VisibilityOff,
+                                    contentDescription = null,
+                                )
+                            },
+                            onClick = {
+                                menuEntryId = null
+                                // Write straight through — no Save step. This is
+                                // the whole point of the affordance, and it
+                                // mirrors iOS, whose eye button calls
+                                // store.updateEntry immediately.
+                                providerRepository.updateEntry(entry.copy(isHidden = !entry.isHidden))
+                                AppLogger.info(
+                                    TAG,
+                                    "Model entry ${entry.id} (${entry.model.displayName}) " +
+                                        "isHidden ${entry.isHidden} -> ${!entry.isHidden}",
+                                )
+                            },
+                        )
+                        if (entry.isCustom) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        stringResource(R.string.common_delete),
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                onClick = {
+                                    menuEntryId = null
+                                    entryToDelete = entry
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -671,6 +813,25 @@ fun ProviderDetailScreen(
         }
 
         Spacer(modifier = Modifier.height(32.dp))
+    }
+
+    // [T-codex-dynamic-discovery GH#319] An expired / revoked Codex credential
+    // must be named as such. Without this the refresh would quietly fall back
+    // to the built-in list and look like it worked.
+    if (refreshAuthError) {
+        MinisAlertDialog(
+            onDismissRequest = { refreshAuthError = false },
+            title = stringResource(R.string.provider_refresh_auth_failed_title),
+            text = stringResource(R.string.provider_refresh_auth_failed_body),
+            // Both buttons dismiss: this is an acknowledgement, not a choice.
+            // MinisAlertDialog always renders two, and rather than invent a
+            // second action that would only pretend to do something, the real
+            // next step ("sign in again") is stated in the body — the sign-in
+            // control is the Credential row on this same screen.
+            confirmText = stringResource(R.string.ok),
+            dismissText = stringResource(R.string.common_close),
+            onConfirm = { refreshAuthError = false },
+        )
     }
 
     if (showDeleteDialog) {
@@ -711,6 +872,13 @@ fun ProviderDetailScreen(
 
 // ─── Credential blocks ─────────────────────────────────────────────────────────
 
+/**
+ * [T-android-copilot-not-connected] Stands in for a credential that exists but
+ * has no displayable form — Copilot's GitHub token, which the user never types
+ * and which should not be rendered even masked. Only its non-emptiness is read.
+ */
+private const val OAUTH_CONNECTED_PLACEHOLDER = "oauth"
+
 @Composable
 private fun OAuthCredentialBlock(
     instance: com.openminis.app.data.model.ProviderInstance,
@@ -731,6 +899,12 @@ private fun OAuthCredentialBlock(
     // ProviderInstanceDetailView's `oauthRefreshTrigger.toggle()`.
     var displayedKey by remember(instance.id) { mutableStateOf(storedKey) }
     var isAuthenticating by remember(instance.id) { mutableStateOf(false) }
+    // [T-android-oauth-foreground-exchange] Sign-in progress and failure, made
+    // visible. Before, a pending sign-in looked identical to signed-out, and a
+    // failure was only written to the log — after authorizing Anthropic in the
+    // browser the user came back to an unchanged screen and no explanation.
+    var authError by remember(instance.id) { mutableStateOf<String?>(null) }
+    val oauthPhase by com.openminis.app.auth.OAuthForegroundGate.phase.collectAsState()
     // [T-kimi-oauth] Device-code dialog state for Kimi re-auth (see
     // AddProviderScreen.OAuthConfigSection for the rationale).
     var kimiDeviceAuth by remember(instance.id) {
@@ -746,6 +920,81 @@ private fun OAuthCredentialBlock(
                 kimiDeviceAuth = null
             },
         )
+    }
+
+    // [T-oauth-keep-credentials] Refresh rejected: the credential is kept (never
+    // auto-deleted) but unusable until the user signs in again.
+    var needsReauth by remember(instance.id) {
+        mutableStateOf(com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id))
+    }
+
+    // Shared by the Sign In button and, for a rejected refresh, Sign In Again.
+    fun startSignIn() {
+        if (isAuthenticating) return
+        isAuthenticating = true
+        authError = null
+        com.openminis.app.auth.OAuthForegroundGate.begin()
+        kimiLoginJob = scope.launch {
+            try {
+                val token = when (instance.providerType) {
+                    ProviderType.kimiCode ->
+                        com.openminis.app.auth.KimiOAuthManager.login(
+                            context, instance.id, providerRepository,
+                            onDeviceCode = { auth -> kimiDeviceAuth = auth },
+                        ).also { kimiDeviceAuth = null }
+                    ProviderType.anthropic ->
+                        com.openminis.app.auth.ClaudeOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    ProviderType.openAI ->
+                        com.openminis.app.auth.OpenAIOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    ProviderType.openRouter ->
+                        com.openminis.app.auth.OpenRouterOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    ProviderType.xAI ->
+                        com.openminis.app.auth.XAIOAuthManager.login(
+                            context, instance.id, providerRepository,
+                        )
+                    else -> null
+                }
+                // login() persists the token via providerRepository.saveApiKey;
+                // reflect it locally so the UI flips to the connected state
+                // without needing the parent to recompose.
+                if (token != null) {
+                    displayedKey = providerRepository.loadApiKey(instance.id) ?: token
+                    needsReauth = false
+                    AppLogger.info(TAG, "OAuth signed in for ${instance.id}")
+                    // [T-provider-refresh-outlives-screen] (GH#265) A fresh
+                    // sign-in (including Sign In Again after a rejected refresh)
+                    // is when the account's real catalog becomes reachable —
+                    // reconcile it now instead of waiting for a manual Refresh.
+                    // Forced, so a cached discovery result cannot stand in for
+                    // the new account's list. Repository scope: the user may
+                    // leave this screen straight after signing in.
+                    providerRepository.triggerAsyncModelReconcile(instance.id, forceRefresh = true)
+                }
+            } catch (e: Exception) {
+                // A cancelled sign-in (user backed out, screen left) is not
+                // an error to show.
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLogger.warning(TAG, "OAuth sign-in failed for ${instance.id}: ${e.message}")
+                authError = if (e is com.openminis.app.auth.OAuthNetworkUnreachableException) {
+                    context.getString(R.string.add_provider_oauth_network_unreachable)
+                } else {
+                    context.getString(
+                        R.string.oauth_sign_in_failed,
+                        e.message ?: e.javaClass.simpleName,
+                    )
+                }
+            } finally {
+                isAuthenticating = false
+                kimiDeviceAuth = null
+                com.openminis.app.auth.OAuthForegroundGate.end()
+            }
+        }
     }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -766,18 +1015,38 @@ private fun OAuthCredentialBlock(
                 modifier = Modifier
                     .padding(horizontal = 8.dp)
                     .size(8.dp)
-                    .background(Color(0xFF34C759), CircleShape),
+                    .background(
+                        if (needsReauth) MaterialTheme.colorScheme.error else Color(0xFF34C759),
+                        CircleShape,
+                    ),
             )
         } else {
             Spacer(modifier = Modifier.weight(1f))
             Text(
-                "Not connected",
-                color = MaterialTheme.colorScheme.error,
+                if (isAuthenticating) stringResource(R.string.oauth_status_signing_in) else "Not connected",
+                color = if (isAuthenticating) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
+    if (displayedKey.isNotEmpty() && needsReauth) {
+        Text(
+            stringResource(R.string.provider_oauth_sign_in_expired_detail),
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        MinisSmallButton(
+            enabled = !isAuthenticating,
+            onClick = { startSignIn() },
+        ) {
+            Text(stringResource(R.string.provider_oauth_sign_in_again))
+        }
+        OAuthProgressLine(isAuthenticating = isAuthenticating, phase = oauthPhase, error = authError)
+        Spacer(modifier = Modifier.height(8.dp))
+    }
     if (displayedKey.isNotEmpty()) {
         MinisSmallButton(
             onClick = {
@@ -793,6 +1062,7 @@ private fun OAuthCredentialBlock(
                 com.openminis.app.auth.OAuthManager.forInstance(context, instance)?.logout()
                 providerRepository.deleteApiKey(instance.id)
                 displayedKey = ""
+                needsReauth = false
                 AppLogger.info(TAG, "OAuth signed out for ${instance.id} (tokens + apiKey cleared)")
             },
             colors = ButtonDefaults.buttonColors(
@@ -804,53 +1074,56 @@ private fun OAuthCredentialBlock(
         }
     } else {
         MinisSmallButton(
-            onClick = {
-                if (isAuthenticating) return@MinisSmallButton
-                isAuthenticating = true
-                kimiLoginJob = scope.launch {
-                    try {
-                        val token = when (instance.providerType) {
-                            ProviderType.kimiCode ->
-                                com.openminis.app.auth.KimiOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                    onDeviceCode = { auth -> kimiDeviceAuth = auth },
-                                ).also { kimiDeviceAuth = null }
-                            ProviderType.anthropic ->
-                                com.openminis.app.auth.ClaudeOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            ProviderType.openAI ->
-                                com.openminis.app.auth.OpenAIOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            ProviderType.openRouter ->
-                                com.openminis.app.auth.OpenRouterOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            ProviderType.xAI ->
-                                com.openminis.app.auth.XAIOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
-                            else -> null
-                        }
-                        // login() persists the token via providerRepository.saveApiKey;
-                        // reflect it locally so the UI flips to the connected state
-                        // without needing the parent to recompose.
-                        if (token != null) {
-                            displayedKey = providerRepository.loadApiKey(instance.id) ?: token
-                            AppLogger.info(TAG, "OAuth signed in for ${instance.id}")
-                        }
-                    } catch (e: Exception) {
-                        AppLogger.warning(TAG, "OAuth sign-in failed for ${instance.id}: ${e.message}")
-                    } finally {
-                        isAuthenticating = false
-                        kimiDeviceAuth = null
-                    }
-                }
-            },
+            // Disabled while a sign-in runs, rather than silently ignoring taps.
+            enabled = !isAuthenticating,
+            onClick = { startSignIn() },
         ) {
             Text(stringResource(R.string.provider_detail_sign_in))
         }
+        OAuthProgressLine(isAuthenticating = isAuthenticating, phase = oauthPhase, error = authError)
+    }
+}
+
+/**
+ * [T-android-oauth-foreground-exchange] What a sign-in is doing right now, or
+ * why it failed. The waiting line is the point: without it, coming back from
+ * the browser looked exactly like never having started.
+ */
+@Composable
+private fun OAuthProgressLine(
+    isAuthenticating: Boolean,
+    phase: com.openminis.app.auth.OAuthForegroundGate.Phase?,
+    error: String?,
+) {
+    if (isAuthenticating) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(top = 8.dp),
+        ) {
+            androidx.compose.material3.CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                stringResource(
+                    if (phase == com.openminis.app.auth.OAuthForegroundGate.Phase.COMPLETING) {
+                        R.string.oauth_completing_sign_in
+                    } else {
+                        R.string.oauth_waiting_for_authorization
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else if (error != null) {
+        Text(
+            error,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = 8.dp),
+        )
     }
 }
 

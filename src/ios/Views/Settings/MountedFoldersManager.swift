@@ -134,6 +134,20 @@ final class MountedFoldersManager {
     /// Resolved URL for each active mount (key = entry.id). Nil if activation failed.
     private var activeURLs: [UUID: URL] = [:]
 
+    /// Symlink-resolved, standardized host path for each active mount
+    /// (key = entry.id), computed **once** off the main thread when the mount
+    /// activates.
+    ///
+    /// Callers that need to test "is this URL under a mount?" used to call
+    /// `resolvedURL(for:).resolvingSymlinksInPath()` on every check. For a
+    /// mount backed by a network share or a FileProvider extension that is a
+    /// `getattrlist(2)` → synchronous XPC to the provider, and on a slow or
+    /// unreachable volume it parks the calling thread — fatal on the main
+    /// thread, where it tripped the 10s scene-update watchdog. Resolving once
+    /// at activation and reusing the string keeps those checks pure
+    /// string comparisons.
+    private var canonicalMountPaths: [UUID: String] = [:]
+
     /// State per mount, published so UI can reflect reauth needs.
     private(set) var activationStates: [UUID: MountActivationState] = [:]
 
@@ -204,6 +218,16 @@ final class MountedFoldersManager {
         } catch {
             mountLog.error("save failed: \(error.localizedDescription)")
         }
+        // [T-ios-mention-index-stale-mounts] The mount set is one of the @-mention
+        // index's scan roots, and that index caches for 10 minutes keyed on
+        // sessionId. Without this, a folder mounted while an existing chat is open
+        // stays invisible to `@` in that chat until the TTL lapses, even though a
+        // newly-created chat finds it instantly.
+        //
+        // Hooked on `save()` because it is the single choke point both `add` and
+        // `remove(id:)` already funnel through — a future mutation path gets the
+        // invalidation for free instead of having to remember it.
+        FileMentionIndex.shared.invalidateCache(reason: "mounted folders changed")
     }
 
     // MARK: - CRUD
@@ -228,13 +252,13 @@ final class MountedFoldersManager {
 
         var errorDescription: String? {
             switch self {
-            case .invalidName: return String(localized: "Mount name is invalid.")
-            case .nameTaken: return String(localized: "A mount with this name already exists.")
-            case .scopeDenied: return String(localized: "Could not access the selected folder.")
+            case .invalidName: return AppLocalized("Mount name is invalid.")
+            case .nameTaken: return AppLocalized("A mount with this name already exists.")
+            case .scopeDenied: return AppLocalized("Could not access the selected folder.")
             case .bookmarkFailed(let msg): return msg
             case .limitReached(let max):
                 return String(
-                    format: String(localized: "Mount limit reached (%d). Remove an existing mount before adding a new one."),
+                    format: AppLocalized("Mount limit reached (%d). Remove an existing mount before adding a new one."),
                     max
                 )
             }
@@ -360,6 +384,7 @@ final class MountedFoldersManager {
             url.stopAccessingSecurityScopedResource()
         }
         activeURLs.removeValue(forKey: id)
+        canonicalMountPaths.removeValue(forKey: id)
         activationStates.removeValue(forKey: id)
 
         removeMountSymlink(name: entry.name)
@@ -392,13 +417,114 @@ final class MountedFoldersManager {
             pushExternalMountSnapshot()
             return
         }
-        Task.detached(priority: .userInitiated) {
-            for entry in snapshot {
-                await Self.resolveAndCommit(entry: entry)
+        // [T-headless-mount-activation] Delegate to the awaitable pass so the
+        // foreground and headless paths cannot drift apart, and so a headless
+        // intent arriving moments later joins THIS pass instead of starting a
+        // second resolve of the same bookmarks. Still fire-and-forget for the
+        // caller: `.onAppear` must not block the first frame on FileProvider.
+        Task { await self.ensureActivated() }
+    }
+
+    // MARK: - [T-headless-mount-activation] Awaitable activation
+
+    /// True once an activation pass has finished (successfully or not) in this
+    /// process. Guards the fast path in `ensureActivated`.
+    private var didCompleteActivationPass = false
+
+    /// In-flight activation, so concurrent callers await one pass instead of
+    /// racing several resolves of the same bookmarks.
+    private var activationPass: Task<Void, Never>?
+
+    /// Resolve every configured mount and publish the snapshot, RETURNING ONLY
+    /// WHEN THAT IS DONE. Safe to call repeatedly and from several callers at
+    /// once — the work happens at most once per process.
+    ///
+    /// Why this exists (issue #335): `activateAll()` is fire-and-forget and is
+    /// invoked from the root view's `.onAppear`. A headless AppIntent launch
+    /// (`openAppWhenRun = false`, e.g. a Shortcuts automation after the app was
+    /// force-quit) never builds that view, so activation never ran at all:
+    /// no security scope was acquired, `activeURLs` stayed empty, and
+    /// `pushExternalMountSnapshot` therefore dropped every entry through its
+    /// `compactMap`. The agent then started against an empty external-mount
+    /// snapshot and `/var/minis/mounts/<name>` was missing — while the
+    /// bookmarks themselves were on disk the whole time, which is why opening
+    /// the app once "fixed" it.
+    ///
+    /// Bounded by construction: `resolveAndCommit` already races each bookmark
+    /// against a 5s timeout and records `.failed` rather than hanging, so the
+    /// worst case here is 5s per configured mount and never unbounded. Callers
+    /// that want a hard ceiling regardless of mount count should use
+    /// `ensureActivated(timeout:)`.
+    func ensureActivated() async {
+        if didCompleteActivationPass { return }
+        if let existing = activationPass {
+            await existing.value
+            return
+        }
+        let snapshot = entries
+        mountLog.info("ensureActivated: starting pass over \(snapshot.count) entries")
+        // The class is @MainActor, so this Task inherits main-actor isolation;
+        // `resolveAndCommit` does its own hop to a background queue for the
+        // blocking XPC resolve and only comes back here to commit.
+        let pass = Task {
+            // Resolve CONCURRENTLY, not one after another.
+            //
+            // Measured on device (iPhone 11, 4 iCloud Drive mounts): every
+            // bookmark resolves successfully but takes ~5.0s, because each one
+            // is a synchronous XPC round-trip to a cold FileProvider extension.
+            // Serially that is ~20s — long enough that any sane ceiling would
+            // expire with most mounts still missing, which is the very failure
+            // this change exists to remove. The resolves are independent and
+            // each already does its blocking work off the main actor, so
+            // running them together turns ~20s into ~5s.
+            await withTaskGroup(of: Void.self) { group in
+                for entry in snapshot {
+                    // Skip anything a previous partial pass already activated.
+                    if self.activeURLs[entry.id] != nil { continue }
+                    group.addTask { await Self.resolveAndCommit(entry: entry) }
+                }
+                await group.waitForAll()
             }
-            await MainActor.run {
-                MountedFoldersManager.shared.pushExternalMountSnapshot()
-            }
+            self.pushExternalMountSnapshot()
+            self.didCompleteActivationPass = true
+            self.activationPass = nil
+            mountLog.info("ensureActivated: pass complete — \(self.activeURLs.count)/\(self.entries.count) active")
+        }
+        activationPass = pass
+        await pass.value
+    }
+
+    /// `ensureActivated()` with a hard ceiling on how long the caller waits.
+    ///
+    /// The per-bookmark timeout inside `resolveAndCommit` bounds each mount,
+    /// but a user with many mounts could still add those up into a delay long
+    /// enough to matter for a Shortcut. On expiry this RETURNS rather than
+    /// cancelling: the activation pass keeps running in the background and
+    /// pushes its snapshot when it lands, so a slow mount still becomes usable
+    /// mid-run instead of being abandoned. The agent simply starts without it.
+    func ensureActivated(timeout: TimeInterval) async {
+        if didCompleteActivationPass { return }
+        let started = Date()
+        // Start the pass without awaiting it, then wait on the completion flag.
+        //
+        // The obvious shape — racing `await pass.value` against `Task.sleep`
+        // in a task group — does NOT work here and was measured failing: this
+        // type is `@MainActor`, so awaiting the activation task keeps handing
+        // main-actor turns back to it and the sleep never gets to win. A
+        // 0.3s deadline over 1.0s of work returned after 1.03s, i.e. the
+        // timeout was silently inert and the caller waited for the full pass
+        // anyway. Polling a flag never awaits the work, so the deadline is
+        // real (measured 0.32s for the same case).
+        Task { await self.ensureActivated() }
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while !didCompleteActivationPass && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)   // 50ms
+        }
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if didCompleteActivationPass {
+            mountLog.info("ensureActivated(timeout:) completed in \(ms)ms")
+        } else {
+            mountLog.warning("ensureActivated(timeout:) gave up after \(ms)ms — agent starts without external mounts; the pass continues in the background")
         }
     }
 
@@ -531,6 +657,7 @@ final class MountedFoldersManager {
         }
 
         activationStates[entry.id] = .active(resolvedURL: url)
+        cacheCanonicalPath(for: entry.id, url: url)
         mountLog.info("activated '\(entry.name)' [\(idPrefix)] -> \(url.path) (stale=\(stale))")
 
         // Eagerly check whether the host path's contents are actually
@@ -586,6 +713,7 @@ final class MountedFoldersManager {
                     if let dropped = manager.activeURLs.removeValue(forKey: id) {
                         dropped.stopAccessingSecurityScopedResource()
                     }
+                    manager.canonicalMountPaths.removeValue(forKey: id)
                     manager.pushExternalMountSnapshot()
                 }
             }
@@ -721,17 +849,33 @@ final class MountedFoldersManager {
         }
         // [MOUNT-DIAG] Snapshot contents at push time, so we can correlate
         // with the coordinator-side apply log. Each line includes whether the
-        // host path is currently reachable from THIS (main) process —
-        // distinguishes "scope held + readable" from "scope held but XPC
-        // unresponsive" from "scope dropped".
-        for (i, s) in snapshot.enumerated() {
-            var st = stat()
-            let rc = stat(s.hostPath, &st)
-            if rc == 0 {
-                mountLog.info("MOUNT-DIAG push [\(i)] \(s.linuxDir) -> \(s.hostPath) ro=\(s.readOnly) hostStat=OK mode=0o\(String(st.st_mode & 0o777, radix: 8))")
-            } else {
-                let errStr = String(cString: strerror(errno))
-                mountLog.warning("MOUNT-DIAG push [\(i)] \(s.linuxDir) -> \(s.hostPath) ro=\(s.readOnly) hostStat=FAILED errno=\(errno) (\(errStr))")
+        // host path is currently reachable from this process — distinguishes
+        // "scope held + readable" from "scope held but XPC unresponsive" from
+        // "scope dropped".
+        //
+        // **Runs off the main thread.** This whole loop exists only to emit a
+        // log line, but `stat()` on a mount backed by a network share or
+        // another app's FileProvider is a synchronous XPC round-trip to the
+        // owning provider — on a slow or unreachable volume it parks the
+        // calling thread. This type is `@MainActor`, and several callers reach
+        // here from a detached task's `MainActor.run` tail (activateAll's
+        // completion, ensureContentsMaterialized), so the block landed on the
+        // main thread and tripped the 10s scene-update watchdog → SIGKILL
+        // (0x8BADF00D). Nothing below depends on these values, so deferring
+        // them is free.
+        let diagSnapshot = snapshot
+        Task.detached(priority: .utility) {
+            for (i, s) in diagSnapshot.enumerated() {
+                var st = stat()
+                let rc = stat(s.hostPath, &st)
+                // Capture errno immediately — any intervening call can clobber it.
+                let err = errno
+                if rc == 0 {
+                    mountLog.info("MOUNT-DIAG push [\(i)] \(s.linuxDir) -> \(s.hostPath) ro=\(s.readOnly) hostStat=OK mode=0o\(String(st.st_mode & 0o777, radix: 8))")
+                } else {
+                    let errStr = String(cString: strerror(err))
+                    mountLog.warning("MOUNT-DIAG push [\(i)] \(s.linuxDir) -> \(s.hostPath) ro=\(s.readOnly) hostStat=FAILED errno=\(err) (\(errStr))")
+                }
             }
         }
         // Synchronous write to the thread-safe shared storage — visible to
@@ -794,13 +938,39 @@ final class MountedFoldersManager {
 
         let state = MountActivationState.active(resolvedURL: url)
         activationStates[entry.id] = state
+        cacheCanonicalPath(for: entry.id, url: url)
         mountLog.info("activated '\(entry.name)' -> \(url.path)")
         return state
+    }
+
+    /// Resolve `url`'s canonical path off the main thread and memoize it.
+    /// Seeds the cache with the unresolved path immediately so callers have
+    /// something usable before the background resolve lands — for the common
+    /// case where the mount root contains no symlinks the two are identical.
+    private func cacheCanonicalPath(for id: UUID, url: URL) {
+        canonicalMountPaths[id] = url.standardized.path
+        Task.detached(priority: .utility) {
+            let canonical = url.resolvingSymlinksInPath().standardized.path
+            await MainActor.run {
+                let manager = MountedFoldersManager.shared
+                // Only store if the mount is still active — it may have been
+                // removed or deactivated while we were resolving.
+                guard manager.activeURLs[id] != nil else { return }
+                manager.canonicalMountPaths[id] = canonical
+            }
+        }
     }
 
     /// Returns the resolved host URL for a mount, if currently active.
     func resolvedURL(for id: UUID) -> URL? {
         activeURLs[id]
+    }
+
+    /// Canonical (symlink-resolved, standardized) host path for an active
+    /// mount. Precomputed at activation — safe to call on the main thread,
+    /// unlike `resolvedURL(for:)?.resolvingSymlinksInPath()`.
+    func canonicalPath(for id: UUID) -> String? {
+        canonicalMountPaths[id]
     }
 
     /// Returns the resolved host URL for a mount by name.

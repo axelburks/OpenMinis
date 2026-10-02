@@ -264,10 +264,11 @@ metadata.value = null
 
 ```text
 obsolete = delete()
-headers.Authorization = delete()
+headers.X-Legacy = delete()
 ```
 
 `delete()` 明确删除字段。不得作为数组元素。
+`Authorization` 和 `Content-Type` 由传输层管理，约定不覆盖或删除。
 
 ### 12.4 回退和存在判断
 

@@ -69,6 +69,9 @@ struct QuickTaskIntent: AppIntent {
     @Parameter(title: "Wait for Result", description: "When enabled, waits for the AI to finish and returns the full response for use in subsequent actions.", default: false)
     var waitForResult: Bool
 
+    @Parameter(title: "Send Notifications", description: "When enabled, posts a system notification when the task starts and again when it finishes. Turn this off for automations that run silently. The app's global task-notification setting still applies.", default: true)
+    var sendCompletionNotification: Bool
+
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<SendPromptResult> & ProvidesDialog {
         BackgroundKeepAliveManager.shared.setup()
@@ -108,12 +111,32 @@ struct QuickTaskIntent: AppIntent {
         let pendingId = ShortcutRunTracker.markPending(
             intent: "QuickTaskIntent",
             sessionId: placeholderSid,
+            waitForResult: waitForResult,
             eagerKeepAliveArmed: eagerResult.armed,
             eagerKeepAliveSkippedReason: eagerResult.skipReason
         )
 
         let vm = ViewModelCache.shared.createDraft()
         vm.sessionSource = "shortcut"
+        // [T-shortcut-duplicate-completion-notification] See SendPromptIntent.
+        vm.suppressGeneralCompletionNotification = true
+        // [T-headless-mount-activation] Resolve external folder mounts and
+        // WAIT for them before any agent work (issue #335).
+        //
+        // `activateAll()` runs from the root view's `.onAppear`, which a headless
+        // intent (`openAppWhenRun = false`) never builds — so on a cold or
+        // force-quit launch nothing acquired the security scopes, `activeURLs`
+        // stayed empty, and the external-mount snapshot the agent reads was
+        // empty too. `/var/minis/mounts/<name>` was simply absent until the user
+        // opened the app once.
+        //
+        // Bounded so a slow FileProvider cannot stall the Shortcut: on expiry the
+        // pass keeps running and publishes late (the mount becomes usable
+        // mid-run) instead of being abandoned. 12s because a cold iCloud
+        // FileProvider takes ~5s per bookmark on device and the resolves run
+        // concurrently, so this clears a realistic mount set with headroom
+        // without ever being the thing that hangs a Shortcut.
+        await MountedFoldersManager.shared.ensureActivated(timeout: 12)
         await vm.ensureSessionReturningId()
         // [T-shortcuts-eager-keepalive] Real id now known — re-arm with it and
         // drop the placeholder.
@@ -140,8 +163,10 @@ struct QuickTaskIntent: AppIntent {
             }
         }
 
-        vm.inputText = task.prompt
-        vm.send()
+        // [T-programmatic-prompt-no-composer] Always a fresh draft session
+        // here, so there is no draft to lose — but keep the composer out of
+        // the send path anyway, so it stays true for every caller.
+        vm.send(overrideText: task.prompt)
 
         let sid = vm.sessionId ?? "unknown"
 
@@ -161,7 +186,8 @@ struct QuickTaskIntent: AppIntent {
             }
         }
 
-        // Notification: started
+        // Display name for the task, used by the start/completion notifications
+        // and the intent dialog below.
         let taskDisplay = QuickTask.caseDisplayRepresentations[task]
         let taskName: String
         if let res = taskDisplay?.title {
@@ -169,12 +195,17 @@ struct QuickTaskIntent: AppIntent {
         } else {
             taskName = "Task"
         }
-        ShortcutNotification.post(
-            id: "shortcut-start-\(sid)",
-            title: "Minix: \(taskName)",
-            body: "\(modelName) is working on it…",
-            sessionId: sid
-        )
+
+        // Notification: started. See the note in SendPromptIntent — same toggle,
+        // same fire-and-forget placement after the prompt is sent.
+        if sendCompletionNotification {
+            ShortcutNotification.post(
+                id: "shortcut-start-\(sid)",
+                title: AppLocalized("Minix: \(taskName)"),
+                body: AppLocalized("\(modelName) is working on it…"),
+                sessionId: sid
+            )
+        }
 
         if waitForResult {
             // Synchronous mode: wait for the agent to finish
@@ -187,12 +218,16 @@ struct QuickTaskIntent: AppIntent {
 
             let responseText = SendPromptIntent.extractResponseText(from: vm)
 
-            ShortcutNotification.post(
-                id: "shortcut-done-\(sid)",
-                title: "Minix: \(taskName) Done",
-                body: "\(modelName): \(String(responseText.prefix(200)))",
-                sessionId: sid
-            )
+            // Per-run opt-out. ANDs with the app-wide toggle, which
+            // ShortcutNotification.post checks internally — do not duplicate it here.
+            if sendCompletionNotification {
+                ShortcutNotification.post(
+                    id: "shortcut-done-\(sid)",
+                    title: AppLocalized("Minix: \(taskName) Done"),
+                    body: "\(modelName): \(String(responseText.prefix(200)))",
+                    sessionId: sid
+                )
+            }
 
             let result = SendPromptResult(
                 sessionId: sid,
@@ -210,6 +245,7 @@ struct QuickTaskIntent: AppIntent {
         let capturedSid = sid
         let capturedTaskName = taskName
         let capturedPendingId = pendingId
+        let capturedSendCompletionNotification = sendCompletionNotification
         Task { @MainActor in
             for await processing in vm.$isProcessing.values {
                 if !processing { break }
@@ -220,12 +256,14 @@ struct QuickTaskIntent: AppIntent {
 
             let summary = String(SendPromptIntent.extractResponseText(from: vm).prefix(200))
 
-            ShortcutNotification.post(
-                id: "shortcut-done-\(capturedSid)",
-                title: "Minix: \(capturedTaskName) Done",
-                body: "\(capturedModelName): \(summary)",
-                sessionId: capturedSid
-            )
+            if capturedSendCompletionNotification {
+                ShortcutNotification.post(
+                    id: "shortcut-done-\(capturedSid)",
+                    title: AppLocalized("Minix: \(capturedTaskName) Done"),
+                    body: "\(capturedModelName): \(summary)",
+                    sessionId: capturedSid
+                )
+            }
         }
 
         let result = SendPromptResult(
@@ -236,6 +274,21 @@ struct QuickTaskIntent: AppIntent {
             prompt: task.prompt
         )
 
-        return .result(value: result, dialog: "\(taskName) started with \(modelName).")
+        return .result(value: result, dialog: IntentDialog(stringLiteral: AppLocalized("\(taskName) started with \(modelName).")))
+    }
+
+    // This intent previously declared no `parameterSummary`. AppIntents uses the
+    // summary as the action card's layout, so without one the card can render
+    // title-only with no inline editors (the #121 failure mode) — which would
+    // leave `sendCompletionNotification` with no way to be found or toggled.
+    // `task` goes on the Summary line since it is the one required choice; the
+    // rest are optional refinements under "Show More".
+    static var parameterSummary: some ParameterSummary {
+        Summary("Run \(\.$task) in Minix") {
+            \.$files
+            \.$model
+            \.$waitForResult
+            \.$sendCompletionNotification
+        }
     }
 }

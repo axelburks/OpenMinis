@@ -54,7 +54,11 @@ struct ConfusionDictionarySource: CorrectionSignalSource {
                 term: row.correctedTerm,
                 confidence: row.confidence,
                 sourceIdentifier: sourceIdentifier,
-                evidence: "\(row.variants.first ?? row.phoneticKey)→\(row.correctedTerm)（出现\(row.frequency)次）")
+                // [T-correction-low-freq-evidence] "出现N次" read as a frequency
+                // statistic, which let the model discount a freq=1 record when the
+                // transcript looked grammatically valid. Naming it as an explicit
+                // manual correction is what distinguishes this from a guess.
+                evidence: "\(row.variants.first ?? row.phoneticKey)→\(row.correctedTerm)（用户已手动纠正\(row.frequency)次）")
         }
     }
 }
@@ -92,7 +96,7 @@ struct TypedVocabularySource: CorrectionSignalSource {
 enum VoiceCorrectionConfig {
     /// Rows this unconfident are excluded from retrieval (design §3.2).
     static let minConfusionConfidence: Double = 0.3
-    /// Top-N candidates handed to the model (design §6 "建议 N=20").
+    /// Top-N candidates handed to the model (design §6 "suggested N=20").
     static let maxCandidates: Int = 20
     /// Retrieval budget; blowing it means "no candidates", never "wait longer" (§12.4-5).
     static let retrievalBudgetMs: Int = 80
@@ -113,10 +117,10 @@ enum VoiceCorrectionConfig {
     ///
     /// 5s is a ceiling against a hung request, not a latency target: the user is reading
     /// during this window, and if they send first the suggestion is simply discarded
-    /// (design §15.4 "直接发送（未操作）→ 隐式忽略").
+    /// (design §15.4 "sent as-is (no action) → implicitly ignored").
     static let correctionBudgetMs: Int = 5000
     /// Reject the model's output if it rewrote more than this share of the text — that's
-    /// a rewrite, not a correction (design §6 "结果校验与降级").
+    /// a rewrite, not a correction (design §6 "result validation and fallback").
     static let maxCharChangeRatio: Double = 0.5
     /// Conversation-context soft cap and its hard ceiling (design §6).
     static let contextSoftLimit: Int = 500

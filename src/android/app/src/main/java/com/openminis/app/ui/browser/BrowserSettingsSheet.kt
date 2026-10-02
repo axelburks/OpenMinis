@@ -1,6 +1,5 @@
 package com.openminis.app.ui.browser
 
-import androidx.compose.ui.res.stringResource
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import androidx.compose.foundation.background

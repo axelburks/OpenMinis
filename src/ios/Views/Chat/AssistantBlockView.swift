@@ -66,13 +66,40 @@ struct AssistantBlockView: View {
             ToolCapsuleView(block: block, icon: "brain.head.profile", accentColor: .pink,
                             commandStartTime: commandStartTime, onStop: onStop,
                             toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
+        case .delegateTool:
+            if HelperBlockInfo.controlSummary(block) != nil {
+                // [T-subagent-control-capsule] A status / steer / cancel /
+                // resume call is the model operating on its own sub agents —
+                // a tool call like any other, so it gets the ordinary tool
+                // capsule rather than a bespoke row.
+                //
+                // The first cut was a centred grey line. It read as a section
+                // divider rather than an action, said nothing about WHAT was
+                // sent, could not be opened, and its own vertical padding made
+                // it taller than the capsules around it. The shared capsule
+                // fixes all four at once: same metrics as every other tool, a
+                // tappable detail sheet carrying the full arguments and result,
+                // and the sub agent accent so it still reads as agent work.
+                ToolCapsuleView(block: block, icon: "slider.horizontal.3",
+                                accentColor: HelperAccent.color,
+                                commandStartTime: commandStartTime, onStop: onStop,
+                                toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
+            } else {
+                // [T-p2-helper-block-render] Own view: status / tier / elapsed /
+                // summary instead of the generic capsule's raw content.
+                HelperBlockView(block: block, detailBlock: $detailBlock)
+            }
         case .nativeTool:
-            // [Minix] Render every provider-native item with the unified capsule style.
-            ToolCapsuleView(block: block,
-                            icon: AssistantBlockView.nativeToolIcon,
-                            accentColor: AssistantBlockView.nativeToolColor,
-                            commandStartTime: commandStartTime, onStop: onStop,
-                            toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
+            // [Minix] Render every provider-native item with one neutral style.
+            ToolCapsuleView(
+                block: block,
+                icon: AssistantBlockView.nativeToolIcon,
+                accentColor: AssistantBlockView.nativeToolColor,
+                commandStartTime: commandStartTime,
+                onStop: onStop,
+                toolSnapshots: toolSnapshots,
+                detailBlock: $detailBlock
+            )
         case .info:
             let allLines = block.content.components(separatedBy: "\n").filter { !$0.isEmpty }
             // Separate reason lines (⚠️) from the final switched line (✅)
@@ -81,7 +108,7 @@ struct AssistantBlockView: View {
             // Truncate middle if more than 9 reason lines
             let displayReasons: [String] = {
                 if reasonLines.count <= 9 { return reasonLines }
-                return Array(reasonLines.prefix(4)) + [String(localized: "⋯ \(reasonLines.count - 8) more")] + Array(reasonLines.suffix(4))
+                return Array(reasonLines.prefix(4)) + [AppLocalized("⋯ \(reasonLines.count - 8) more")] + Array(reasonLines.suffix(4))
             }()
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(displayReasons.enumerated()), id: \.offset) { _, line in
@@ -112,7 +139,7 @@ struct AssistantBlockView: View {
                 Button {
                     UIPasteboard.general.string = block.content
                 } label: {
-                    Label(String(localized: "Copy Error"), systemImage: "doc.on.doc")
+                    Label(AppLocalized("Copy Error"), systemImage: "doc.on.doc")
                 }
             }
         }
@@ -217,6 +244,11 @@ struct ToolCapsuleView: View {
     @State private var dotsActive = false
     /// [T-tool-bg-suspended-hint] Drives the background-suspension info alert.
     @State private var showBgHintAlert = false
+    /// [T-ios-memory-write-revoke] Confirmation + result alerts for undoing a
+    /// memory_write straight from the tool capsule's long-press menu.
+    @State private var showRevokeMemoryAlert = false
+    @State private var revokeMemoryResult: String?
+    @State private var showRevokeMemoryResultAlert = false
     @ObservedObject private var keepAlive = BackgroundKeepAliveManager.shared
 
     /// Show the yellow ⓘ hint only when this tool was flagged as background-
@@ -230,8 +262,35 @@ struct ToolCapsuleView: View {
     /// mid-run would corrupt the in-flight processing state.
     @EnvironmentObject private var vm: AIChatViewModel
 
+    /// [T-ios-memory-write-revoke] Whether this block is a `memory_write` that
+    /// carries input args at all — the cheap check that decides whether the Undo
+    /// menu item is offered. Deliberately does NOT parse the JSON: this feeds
+    /// `ToolMenuKey`, which is rebuilt on every eager body pass, and re-running
+    /// `JSONSerialization` there is exactly the per-frame work the menu gate
+    /// exists to avoid. Other tools and `memory_get` never match.
+    private var isRevocableMemoryWrite: Bool {
+        guard case .memoryTool(let action) = block.kind, action == "memory_write" else { return false }
+        guard let args = block.toolInputArgs else { return false }
+        return !args.isEmpty
+    }
+
+    /// The text this block wrote to memory. Parsed lazily — only when the menu
+    /// item is actually tapped — same treatment as `toolDetailsClipboard`.
+    /// Nil when the args carry no non-empty `content` (e.g. a malformed or
+    /// still-streaming tool call), which the confirm action treats as a no-op.
+    private var memoryWriteContent: String? {
+        guard case .memoryTool(let action) = block.kind, action == "memory_write" else { return nil }
+        return MemoryWriteRevoker.writtenContent(fromToolInputArgs: block.toolInputArgs)
+    }
+
     /// Display text: prefer LLM-generated toolSummary, fall back to toolDescription.
     private var displayText: String {
+        // [T-subagent-control-capsule] A control call describes itself from the
+        // action it performed ("Resumed 2 sub agent(s)"), which is the whole
+        // point of the row. Its `tool_title` names the RUN it acted on, so
+        // preferring the summary here would label three different operations
+        // on the same sub agent identically.
+        if let control = HelperBlockInfo.controlSummary(block) { return control }
         if let summary = block.toolSummary, !summary.isEmpty {
             return summary
         }
@@ -255,6 +314,7 @@ struct ToolCapsuleView: View {
         case .browserTool:   toolName = "browser_use"
         case .readImageTool: toolName = "read_image"
         case .memoryTool:    toolName = "memory"
+        case .delegateTool:  toolName = SubAgentDefinition.toolName
         case .nativeTool(let type): toolName = type // [Minix]
         case .text, .thinking, .info: toolName = "unknown"
         }
@@ -334,7 +394,19 @@ struct ToolCapsuleView: View {
                 HStack(spacing: 0) {
                     Text(displayText)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(ChatColors.primaryText)
+                        // [T-subagent-control-capsule] Sub agent control calls
+                        // title in the accent, every other tool in the normal
+                        // text colour.
+                        //
+                        // Elsewhere the accent lives only on the icon, which is
+                        // enough when the title names a file or a command — the
+                        // text itself is the content. A control call's title IS
+                        // the operation ("Sent a course correction"), and it
+                        // belongs to the sub agent world the purple identifies;
+                        // leaving it in the default colour made these read as
+                        // ordinary tool calls that happened to have a purple
+                        // glyph, which is what the report is about.
+                        .foregroundStyle(isSubAgentControl ? accentColor : ChatColors.primaryText)
                         .lineLimit(1)
                     if isStreaming {
                         ForEach(0..<3, id: \.self) { i in
@@ -410,16 +482,20 @@ struct ToolCapsuleView: View {
                 // subtree every frame (part of the deep ContextMenuModifier
                 // recursion in incident 98E8805F). `toolDetailsClipboard` is read
                 // lazily at TAP time, so the key only tracks structure: the tool
-                // (blockId) and whether the Re-run branch is shown (isProcessing).
+                // (blockId), whether the Re-run branch is shown (isProcessing),
+                // and whether the memory-Undo branch is shown. All three are
+                // cheap reads — the expensive payloads (clipboard dump, written
+                // memory text) are built at tap time, never in the key.
                 EquatableMenuGate(key: ToolMenuKey(
                     blockId: block.id,
-                    isProcessing: vm.isProcessing
+                    isProcessing: vm.isProcessing,
+                    canRevokeMemoryWrite: isRevocableMemoryWrite
                 )) {
                     // [T-ios-tool-bubble-longpress-menu]
                     Button {
                         UIPasteboard.general.string = toolDetailsClipboard
                     } label: {
-                        Label(String(localized: "Copy Tool Details"), systemImage: "doc.on.doc")
+                        Label(AppLocalized("Copy Tool Details"), systemImage: "doc.on.doc")
                     }
                     // [T-ios-retry-hide-when-processing] Only expose the
                     // destructive Re-run action when the agent loop is idle.
@@ -442,7 +518,19 @@ struct ToolCapsuleView: View {
                                 userInfo: ["blockId": block.id]
                             )
                         } label: {
-                            Label(String(localized: "Re-run From Here"), systemImage: "arrow.clockwise")
+                            Label(AppLocalized("Re-run From Here"), systemImage: "arrow.clockwise")
+                        }
+                    }
+                    // [T-ios-memory-write-revoke] Undo the daily-log entry this
+                    // memory_write produced, without a detour through
+                    // Memories in Session → detail sheet. Only appears for a
+                    // memory_write that carries input args.
+                    if isRevocableMemoryWrite {
+                        Divider()
+                        Button(role: .destructive) {
+                            showRevokeMemoryAlert = true
+                        } label: {
+                            Label(AppLocalized("Undo This Memory Write"), systemImage: "trash.slash")
                         }
                     }
                 }
@@ -462,15 +550,15 @@ struct ToolCapsuleView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, 6)
-                .accessibilityLabel(Text(String(localized: "Background suspension info")))
+                .accessibilityLabel(Text(AppLocalized("Background suspension info")))
             }
             Spacer(minLength: 0)
         }
         .alert(
-            String(localized: "Task may have been paused"),
+            AppLocalized("Task may have been paused"),
             isPresented: $showBgHintAlert
         ) {
-            Button(String(localized: "Go Enable")) {
+            Button(AppLocalized("Go Enable")) {
                 // Deep-link to Settings → Permissions → Background, nudging the
                 // recommended rows ON — they highlight only while still OFF
                 // (= minis://settings/background?focus=…:true,…:true). Location
@@ -480,9 +568,35 @@ struct ToolCapsuleView: View {
                     rawQueryValue: "enhancedBackgroundExecution:true,backgroundSpeakEnabled:true,locationTrackingEnabled:true")
                 DeepLinkCoordinator.shared.pendingSettingsTarget = .background
             }
-            Button(String(localized: "Maybe Later"), role: .cancel) {}
+            Button(AppLocalized("Maybe Later"), role: .cancel) {}
         } message: {
-            Text(String(localized: "This tool may have been paused by the system while running in the background. Enable enhanced background execution to improve background task reliability."))
+            Text(AppLocalized("This tool may have been paused by the system while running in the background. Enable enhanced background execution to improve background task reliability."))
+        }
+        // [T-ios-memory-write-revoke] Mirrors the Revoke Memory confirmation in
+        // SessionMemoryView: confirm, then report the outcome in place — the
+        // user stays in the transcript, no navigation. The bubble itself is
+        // left alone; only the underlying daily-log file changed.
+        .alert(
+            AppLocalized("Revoke Memory"),
+            isPresented: $showRevokeMemoryAlert
+        ) {
+            Button(AppLocalized("Cancel"), role: .cancel) {}
+            Button(AppLocalized("Revoke"), role: .destructive) {
+                // The menu item is gated on the cheap enum+args check, so the
+                // `content` parse can still come back empty here (malformed or
+                // still-streaming args). Report that rather than failing silently.
+                if let written = memoryWriteContent {
+                    revokeMemoryResult = MemoryWriteRevoker.revoke(writtenContent: written)
+                } else {
+                    revokeMemoryResult = AppLocalized("No written content to revoke.")
+                }
+                showRevokeMemoryResultAlert = true
+            }
+        } message: {
+            Text(AppLocalized("Remove this memory entry from the daily log? This cannot be undone."))
+        }
+        .alert(revokeMemoryResult ?? "", isPresented: $showRevokeMemoryResultAlert) {
+            Button(AppLocalized("OK")) {}
         }
         .onChange(of: isStreaming) { streaming in
             dotsActive = streaming
@@ -505,12 +619,30 @@ struct ToolCapsuleView: View {
 
     private var iconColor: Color {
         switch block.toolStatus {
+        // [T-subagent-control-capsule] A sub agent control call keeps its
+        // accent when it succeeds, instead of turning the universal green.
+        //
+        // Green answers "did this tool work", which every other capsule needs
+        // because they are all the same colour once finished. These are the
+        // exception: their accent is what says "this was the model operating
+        // on its sub agents", and that identity is exactly what the reader is
+        // scanning for in a transcript full of tool calls — a succeeded
+        // control call rendered green was indistinguishable from a shell
+        // command. Failure and cancellation still override, since those must
+        // read as problems before they read as anything else.
+        case .success where isSubAgentControl: return accentColor
         case .success: return .green
         case .failed: return .red
         case .cancelled: return .yellow
         default: return accentColor
         }
     }
+
+    /// True for a status / steer / resume / cancel call on a sub agent.
+    /// `isControlOnly`, not `controlSummary`: same answer, and this is read on
+    /// every body pass of every tool capsule — no point building a localized
+    /// label only to compare it against nil.
+    private var isSubAgentControl: Bool { HelperBlockInfo.isControlOnly(block) }
 
     /// Formatted execution duration (e.g. "1.2s", "45s", "2m 10s").
     private var durationText: String? {
@@ -619,101 +751,54 @@ struct ChatInputAppendListener: ViewModifier {
 
 // MARK: - Thinking Block View
 
-/// [T-thinking-stream-jank] Main-thread hitch monitor, active only while an
-/// expanded thinking block is streaming. Logs frame gaps > 100ms together with
-/// the current thinking length so hitches can be correlated with content size.
-/// One shared instance — at most one thinking block streams at a time.
+/// [T-thinkperf-release-displaylink] Retired hitch monitor.
+///
+/// This was a CADisplayLink that ticked at 60fps for the entire life of an
+/// expanded, streaming thinking block, logging frame gaps > 100ms plus a
+/// per-second frame summary. It was pure instrumentation for
+/// T-thinking-stream-jank: nothing ever read it but its own log lines.
+///
+/// It has been removed rather than `#if DEBUG`-gated, for two reasons:
+///
+///  1. It shipped. The originating commit (7573e28b8) called it "cheap enough
+///     to stay on in Debug" but never gated it, so every Release build ran the
+///     display link in the field. A 60fps timer's cost is not its tick body
+///     (85ms of main-thread CPU across a 209s Time Profiler trace, 2026-08-11)
+///     but the main-thread wake-up it forces every frame, which keeps the CPU
+///     out of idle. `stop()` only began a 25s grace window, so it kept ticking
+///     for 18s after the stream ended — observed at 172-190s while the app was
+///     otherwise idle at ~15ms/s. That is the shape of a battery complaint,
+///     and a CPU-percentage view hides it.
+///  2. A display link perturbs exactly what it claims to measure: holding the
+///     frame pipeline active changes the frame timing being sampled.
+///
+/// The jank it was built to investigate was diagnosed and fixed (the follow
+/// trigger moved from per-delta to flush pace). Should that work resume, prefer
+/// Instruments over a permanent in-app probe on a per-frame path.
+///
+/// The type is kept as an inert stub so call sites stay put and no behaviour
+/// depends on whether a probe happens to be compiled in.
 @MainActor
 final class ThinkingHitchMonitor {
     static let shared = ThinkingHitchMonitor()
-    private let logger = AppLogger(category: "ThinkPerf")
-    private var displayLink: CADisplayLink?
-    private var lastTimestamp: CFTimeInterval = 0
-    /// Body-eval counter since start (bumped by the view; sampled into hitch logs).
+
+    /// Retained so `ThinkingBlockView` keeps compiling; nothing reads it.
     var bodyEvalCount = 0
     var contentLenProvider: (() -> Int)?
-    /// The block that started the monitor. Stops from OTHER blocks are ignored —
-    /// with several thinking blocks in one chat, an older (collapsed / finished)
-    /// block's task(id:) firing false must not kill the live block's monitor.
-    private var ownerId: UUID?
 
-    func start(owner: UUID) {
-        if displayLink != nil {
-            ownerId = owner  // live monitor adopted by the newest streaming block
-            if collapsedAt != nil {
-                collapsedAt = nil  // re-expanded within the grace window
-                logger.info("[ThinkPerf] phase → EXPANDED (re-expand)")
-            }
-            return
-        }
-        ownerId = owner
-        lastTimestamp = 0
-        bodyEvalCount = 0
-        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-        logger.info("[ThinkPerf] hitch-monitor START owner=\(owner.uuidString.prefix(8))")
-    }
-
-    /// When the owner collapses, keep sampling for a grace window so the
-    /// COLLAPSED state's frame stats can be compared A/B against EXPANDED
-    /// under the same interactions. Frame lines are tagged with the phase.
-    private var collapsedAt: CFTimeInterval?
-    private static let collapsedGraceSeconds: CFTimeInterval = 25
-
-    func stop(owner: UUID) {
-        guard displayLink != nil, owner == ownerId else { return }
-        collapsedAt = CACurrentMediaTime()
-        logger.info("[ThinkPerf] phase → COLLAPSED (monitor continues \(Int(Self.collapsedGraceSeconds))s for A/B) bodyEvals=\(self.bodyEvalCount)")
-    }
-
-    private func hardStop() {
-        displayLink?.invalidate()
-        displayLink = nil
-        ownerId = nil
-        collapsedAt = nil
-        logger.info("[ThinkPerf] hitch-monitor STOP bodyEvals=\(self.bodyEvalCount)")
-    }
-
-    // Per-second frame statistics: dropped-frame count (>33ms), worst gap, and
-    // frame count — a per-second FPS/drop summary shows sub-100ms jank the
-    // single HITCH threshold misses.
-    private var statWindowStart: CFTimeInterval = 0
-    private var statFrames = 0
-    private var statDropped = 0
-    private var statWorstMs: Double = 0
-
-    @objc private func tick(_ link: CADisplayLink) {
-        defer { lastTimestamp = link.timestamp }
-        guard lastTimestamp > 0 else { statWindowStart = link.timestamp; return }
-        let gapMs = (link.timestamp - lastTimestamp) * 1000
-        statFrames += 1
-        if gapMs > 33 { statDropped += 1 }
-        if gapMs > statWorstMs { statWorstMs = gapMs }
-        if gapMs > 100 {
-            logger.info("[ThinkPerf] HITCH gap=\(Int(gapMs))ms contentLen=\(self.contentLenProvider?() ?? -1) bodyEvals=\(self.bodyEvalCount)")
-        }
-        let windowDt = link.timestamp - statWindowStart
-        if windowDt >= 1.0 {
-            let fps = Double(statFrames) / windowDt
-            let phase = collapsedAt == nil ? "EXP" : "COL"
-            // [T-log-noise-privacy 2026-07-18] info → debug: per-second frame
-            // stats; the HITCH lines (rare, actionable) stay at info.
-            logger.debug("[ThinkPerf] [\(phase)] frames/s=\(Int(fps)) dropped=\(self.statDropped) worst=\(Int(self.statWorstMs))ms contentLen=\(self.contentLenProvider?() ?? -1) bodyEvals=\(self.bodyEvalCount)")
-            statWindowStart = link.timestamp
-            statFrames = 0
-            statDropped = 0
-            statWorstMs = 0
-        }
-        if let c = collapsedAt, link.timestamp - c > Self.collapsedGraceSeconds {
-            hardStop()
-        }
-    }
+    func start(owner: UUID) {}
+    func stop(owner: UUID) {}
 }
 
 struct ThinkingBlockView: View {
     @ObservedObject var block: AssistantBlock
     let isStreaming: Bool
+
+    // [T-thinking-scroll-followback GH#125] Per-view follow state. Reset on
+    // cell reuse / re-entry is fine — a fresh view simply follows again.
+    @State private var thinkingUserScrolledAway = false
+    @State private var lastThinkingDragAt: Date = .distantPast
+    @State private var frozenThinkingContent: String? = nil
 
     /// Bind to block.isThinkingExpanded so state survives cell reuse and triggers cell re-sizing.
     private var isExpanded: Binding<Bool> {
@@ -742,7 +827,7 @@ struct ThinkingBlockView: View {
                     .resizable()
                     .frame(width: 14, height: 14)
                     .foregroundStyle(.blue)
-                Text(String(localized: "Deep Thinking"))
+                Text(AppLocalized("Deep Thinking"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.blue)
                 if isStreaming {
@@ -750,16 +835,27 @@ struct ThinkingBlockView: View {
                         .controlSize(.mini)
                         .tint(.blue)
                 }
-                if block.content.count > 0 || block.thinkingContentBuffer.count > 0 {
-                    let charCount = max(block.content.count, block.thinkingContentBuffer.count)
-                    Text(charCount > 1000 ? "\(charCount / 1000)K" : "\(charCount)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.blue.opacity(0.6))
-                }
                 Spacer()
-                Image(systemName: isExpanded.wrappedValue ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.blue.opacity(0.5))
+                // [T-thinking-count-beside-chevron] The character count sits at
+                // the RIGHT end, tight against the chevron, matching Android
+                // (ChatAssistantMessageUI.kt: weight(1f) → count → 4dp → icon).
+                //
+                // It used to sit immediately after the title, on the left of the
+                // spacer, so the two platforms disagreed. The 4pt gap is the
+                // HStack's own `spacing: 6` overridden locally — the enclosing
+                // spacing would otherwise put 6pt here and the number would not
+                // read as belonging to the chevron.
+                HStack(spacing: 4) {
+                    if block.content.count > 0 || block.thinkingContentBuffer.count > 0 {
+                        let charCount = max(block.content.count, block.thinkingContentBuffer.count)
+                        Text(charCount > 1000 ? "\(charCount / 1000)K" : "\(charCount)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.blue.opacity(0.6))
+                    }
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.blue.opacity(0.5))
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -782,23 +878,25 @@ struct ThinkingBlockView: View {
             // Content — only visible when expanded, windowed to the tail
             // to prevent UI freeze on very long thinking (T-thinking-render-perf-ios).
             if isExpanded.wrappedValue, !block.content.isEmpty {
-                let windowSize = 8000
+                // [T-thinking-stream-window] While STREAMING, shrink the tail
+                // window 8000 → 2000: every flush re-lays-out the whole Text
+                // on the main thread, and an 8K plain-text relayout per flush
+                // is the reported "5K starts to lag, 10K unusable" jank (the
+                // hitch cost scales with the WINDOW, not the total). Reading
+                // the live tail only needs the recent context; the full 8K
+                // window comes back the moment streaming ends.
+                let windowSize = isStreaming ? 2000 : 8000
                 let total = block.content.count
                 let isTruncated = total > windowSize
-                let displayContent: String = {
-                    // [T-thinking-stream-jank] Time the tail-window slice and count
-                    // body re-evals. This closure runs on EVERY body evaluation of
-                    // an expanded thinking block — if body re-evals track the
-                    // per-token contentUpdateSeq rather than the 0.3s flush, the
-                    // eval counter in the 1s summary exposes it directly.
-                    let t0 = CFAbsoluteTimeGetCurrent()
-                    defer {
-                        let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-                        ThinkingHitchMonitor.shared.bodyEvalCount += 1
-                        if ms > 4 {
-                            AppLogger(category: "ThinkPerf").info("[ThinkPerf] slice SLOW total=\(total) took=\(String(format: "%.1f", ms))ms eval#\(ThinkingHitchMonitor.shared.bodyEvalCount)")
-                        }
-                    }
+                let displayContent: String = frozenThinkingContent ?? {
+                    // [T-thinkperf-release-displaylink] The slice timing and
+                    // body-eval counter that used to wrap this closure are gone.
+                    // It runs on EVERY body evaluation of an expanded thinking
+                    // block, so it paid two CFAbsoluteTimeGetCurrent calls per
+                    // eval to feed a counter only ThinkPerf's own log lines read.
+                    // The question it existed to answer — do body re-evals track
+                    // per-token contentUpdateSeq rather than the flush? — was
+                    // answered (they did) and fixed.
                     guard isTruncated else { return block.content }
                     let startIdx = block.content.index(block.content.endIndex, offsetBy: -windowSize)
                     let cleanStart = block.content[startIdx...].firstIndex(of: "\n")
@@ -816,11 +914,22 @@ struct ThinkingBlockView: View {
                                     .padding(.horizontal, 12)
                                     .padding(.bottom, 4)
                             }
-                            Text(displayContent)
+                            // [T-thinking-stream-jank] textSelection(.enabled)
+                            // makes SwiftUI Text substantially more expensive
+                            // per layout; selecting text that is actively
+                            // moving is useless anyway — enable it only once
+                            // streaming finished.
+                            let thinkingText = Text(displayContent)
                                 .font(.system(size: 13))
                                 .foregroundStyle(ChatColors.tertiaryText)
                                 .lineSpacing(3)
-                                .textSelection(.enabled)
+                            Group {
+                                if isStreaming {
+                                    thinkingText
+                                } else {
+                                    thinkingText.textSelection(.enabled)
+                                }
+                            }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 12)
                                 .padding(.bottom, 10)
@@ -828,6 +937,36 @@ struct ThinkingBlockView: View {
                         }
                     }
                     .frame(maxHeight: 300)
+                    // [T-thinking-scroll-followback GH#125] User-intent gate,
+                    // Android parity (ChatAssistantMessageUI.kt): mark
+                    // scrolled-away ONLY when a real finger drag moved the view
+                    // off the bottom — programmatic scrollTo offsets must not
+                    // set it, or follow would permanently disarm. Deployment
+                    // target is iOS 16 (no onScrollPhaseChange), so "real drag"
+                    // = a simultaneous DragGesture seen within the last 350ms.
+                    // A downward drag inside the box means "show me earlier
+                    // text" — that IS the scrolled-away intent, and unlike a
+                    // geometry probe it cannot be spoofed by our own
+                    // programmatic scrollTo (which fires no gesture). An
+                    // upward drag (heading back toward the tail) re-arms
+                    // following, as does the stream ending.
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 6)
+                            .onEnded { value in
+                                lastThinkingDragAt = Date()
+                                if value.translation.height > 12 {
+                                    if !thinkingUserScrolledAway {
+                                        thinkingUserScrolledAway = true
+                                        frozenThinkingContent = displayContent
+                                        AppLogger(category: "ThinkPerf").info("[ThinkPerf] user scrolled away (dy=\(Int(value.translation.height))) — follow paused, content frozen at \(displayContent.count) chars")
+                                    }
+                                } else if value.translation.height < -12, thinkingUserScrolledAway {
+                                    thinkingUserScrolledAway = false
+                                    frozenThinkingContent = nil
+                                    AppLogger(category: "ThinkPerf").info("[ThinkPerf] user scrolled back (dy=\(Int(value.translation.height))) — following resumed")
+                                }
+                            }
+                    )
                     // [T-thinking-stream-jank] Follow the tail at FLUSH pace
                     // (content updates every 0.3s), not per token. The old
                     // trigger was the per-delta contentUpdateSeq — with it
@@ -835,10 +974,27 @@ struct ThinkingBlockView: View {
                     // scrollTo for every delta (~60-105/s measured); the flush
                     // pace is ~3-4/s for the same visual result.
                     .onChange(of: block.content.count) { len in
-                        guard isStreaming else { return }
-                        AppLogger(category: "ThinkPerf").debug("[ThinkPerf] scrollTo(flush) contentLen=\(len) seq=\(block.contentUpdateSeq)")
-                        withAnimation(.linear(duration: 0.15)) {
+                        guard isStreaming, !thinkingUserScrolledAway else { return }
+                        // [T-thinkperf-release-displaylink] Removed: this fired on
+                        // every content flush of a streaming thinking block, and
+                        // building the interpolated string cost more than the log
+                        // call. The two scroll-gesture lines above stay — they
+                        // fire once per user drag, not per flush.
+                        // Animated follow only for short content — animating a
+                        // long text's scroll re-lays-out every frame of the
+                        // 0.15s animation; a jump is one layout.
+                        if len > 3000 {
                             proxy.scrollTo("thinkingBottom", anchor: .bottom)
+                        } else {
+                            withAnimation(.linear(duration: 0.15)) {
+                                proxy.scrollTo("thinkingBottom", anchor: .bottom)
+                            }
+                        }
+                    }
+                    .onChange(of: isStreaming) { streaming in
+                        if !streaming {
+                            thinkingUserScrolledAway = false
+                            frozenThinkingContent = nil
                         }
                     }
                 }
@@ -890,6 +1046,29 @@ struct ThinkingBlockView: View {
             if !streaming, !block.thinkingUserToggled {
                 AppLogger(category: "ThinkingCollapse").info("[ThinkingCollapse] auto-collapse block=\(block.id.uuidString.prefix(8)) streaming→false userToggled=false contentLen=\(block.content.count)")
                 block.isThinkingExpanded = false
+                // [T-ios-thinking-autocollapse-no-post] Post the invalidation
+                // HERE rather than relying on the `.onChange(of:)` below.
+                //
+                // Field evidence (2026-08-13 device log): `auto-collapse` fired
+                // 6 times while `[ThinkingCollapse] post` fired 0 times. The
+                // observer never ran, because this write happens inside another
+                // `onChange` handler in the same view update — SwiftUI compares
+                // `isThinkingExpanded` before and after that update as a whole,
+                // and the write is not observed as a transition. A manual tap is
+                // its own update, which is why tapping to collapse always worked
+                // and only the stream-end auto-collapse left a gap.
+                //
+                // Without the post, `SelfSizingCell`'s width-keyed dedup keeps
+                // answering with the EXPANDED height (the cache the
+                // `.thinkingBlockToggled` receiver exists to clear), so the pill
+                // draws collapsed inside a frame still sized for the expanded
+                // body — the blank strip under the first thinking block.
+                //
+                // Posting from both places is safe: the receiver only clears
+                // caches and reconfigures, and a duplicate notification
+                // re-measures to the same height.
+                NotificationCenter.default.post(name: .thinkingBlockToggled,
+                                                object: block.id)
             } else if !streaming {
                 AppLogger(category: "ThinkingCollapse").info("[ThinkingCollapse] stream-end-skip block=\(block.id.uuidString.prefix(8)) userToggled=\(block.thinkingUserToggled) currentlyExpanded=\(block.isThinkingExpanded)")
             }

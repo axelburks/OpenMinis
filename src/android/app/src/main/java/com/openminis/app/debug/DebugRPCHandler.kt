@@ -35,6 +35,9 @@ class DebugRPCHandler(private val context: Context) {
     companion object {
         /** Set this from MainActivity to enable screenshot capture. */
         var currentActivity: WeakReference<Activity>? = null
+
+        /** Both crash writers' filenames: ACRA's and NativeCrashHandler's. */
+        private val CRASH_NAME = Regex("""^(native-)?crash-.*\.log$""")
     }
 
     suspend fun handle(json: String): String {
@@ -76,11 +79,29 @@ class DebugRPCHandler(private val context: Context) {
             "debug.rawLs" -> handleRawLS(params)
             "debug.readFile" -> handleReadFile(params)
             "debug.logs.list" -> handleLogsList()
+            // [T-android-backup-subagents] Backup round-trip + sub agent roster drivers.
+            "debug.backup.export" -> BackupDebugMethods.backupExport(context, params)
+            "debug.backup.restore" -> BackupDebugMethods.backupRestore(context, params)
+            "debug.backup.upload" -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BackupDebugMethods.backupUpload(context, params) }
+            "debug.backup.remotes.addWebdav" -> BackupDebugMethods.remotesAddWebdav(context, params)
+            "debug.backup.remotes.remove" -> BackupDebugMethods.remotesRemove(context, params)
+            "debug.subAgents.list" -> BackupDebugMethods.subAgentsList(context)
+            "debug.subAgents.upsert" -> BackupDebugMethods.subAgentsUpsert(context, params)
+            "debug.subAgents.delete" -> BackupDebugMethods.subAgentsDelete(context, params)
             "debug.logs.read" -> handleLogsRead(params)
             "debug.logs.setEnabled" -> handleLogsSetEnabled(params)
+            "debug.crash.list" -> handleCrashList(params)
+            "debug.crash.read" -> handleCrashRead(params)
             "debug.tap" -> handleTap(params)
             "debug.scroll" -> handleScroll(params)
             "debug.inputText" -> handleInputText(params)
+            "debug.setClipboard" -> handleSetClipboard(params)
+            "debug.voice.injectFailedAudio" -> {
+                if (!BuildConfig.DEV_TOOLS) {
+                    throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
+                }
+                handleVoiceInjectFailedAudio(params)
+            }
             "debug.llmRequests" -> handleLLMRequests(params)
             "debug.llmRequests.clear" -> { LLMRequestLog.clear(); JSONObject().put("cleared", true) }
             "debug.agentTrace" -> handleAgentTrace(params)
@@ -116,6 +137,7 @@ class DebugRPCHandler(private val context: Context) {
             "provider.instances.list" -> ProviderDebugMethods.instancesList(context, params)
             "provider.models.list" -> ProviderDebugMethods.modelsList(context, params)
             "provider.groups.list" -> ProviderDebugMethods.groupsList(context, params)
+            "provider.quickTest" -> ProviderDebugMethods.quickTest(context, params)
             "provider.export" -> ProviderDebugMethods.export(context, params)
             "provider.import" -> ProviderDebugMethods.import(context, params)
 
@@ -151,6 +173,7 @@ class DebugRPCHandler(private val context: Context) {
             "chat.session.cancel" -> ChatMutationMethods.cancel(context, params)
             "chat.session.selectModel" -> ChatMutationMethods.selectModel(context, params)
             "chat.session.delete" -> ChatMutationMethods.delete(context, params)
+            "scheduled.runAgentChild" -> ChatMutationMethods.runScheduledAgentChild(context, params)
 
             // Chat compact (mirrors iOS chat.compact.* namespace).
             "chat.compact.before" -> ChatMutationMethods.compactBefore(context, params)
@@ -160,13 +183,13 @@ class DebugRPCHandler(private val context: Context) {
             // Debug-only: direct CLI / offload-handler invocation (T344).
             // Registered solely on DEBUG builds so release APKs cannot expose it.
             "debug.shizuku.exec" -> {
-                if (!BuildConfig.DEBUG) {
+                if (!BuildConfig.DEV_TOOLS) {
                     throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
                 }
                 handleShizukuExec(params)
             }
             "debug.modelUse.exec" -> {
-                if (!BuildConfig.DEBUG) {
+                if (!BuildConfig.DEV_TOOLS) {
                     throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
                 }
                 handleModelUseExec(params)
@@ -176,10 +199,19 @@ class DebugRPCHandler(private val context: Context) {
             // harnesses can verify minis-sessions-cli (list / search /
             // messages, incl. --full) end-to-end without an in-shell prompt.
             "debug.sessions.exec" -> {
-                if (!BuildConfig.DEBUG) {
+                if (!BuildConfig.DEV_TOOLS) {
                     throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
                 }
                 handleSessionsExec(params)
+            }
+            // [T-android-calendar-update-all-day] DEBUG-only direct
+            // invocation of android-calendar, so all-day create/update can be
+            // verified against the device's real calendar provider.
+            "debug.calendar.exec" -> {
+                if (!BuildConfig.DEV_TOOLS) {
+                    throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
+                }
+                handleCalendarExec(params)
             }
             // [T-minis-config-provider-add] DEBUG-only invocation of the
             // ConfigOffloadHandler — parallels debug.modelUse.exec so test
@@ -189,7 +221,7 @@ class DebugRPCHandler(private val context: Context) {
             // skipConfirmation under the hood via a dedicated arg the
             // production CLI never exposes.
             "debug.minisConfig.exec" -> {
-                if (!BuildConfig.DEBUG) {
+                if (!BuildConfig.DEV_TOOLS) {
                     throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
                 }
                 handleMinisConfigExec(params)
@@ -220,10 +252,15 @@ class DebugRPCHandler(private val context: Context) {
         }
     }
 
-    private fun dirSize(dir: File): Long {
-        if (!dir.exists()) return 0
-        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-    }
+    // [T-android-storage-symlink-inflation] Second copy of the sizing walk —
+    // route it through the shared one rather than keeping a following variant
+    // alive here. `walkTopDown().filter { isFile }.sumOf { length() }` resolves
+    // symlinks at every step, so it descends into directory links and counts
+    // their subtrees again; that is what reported a 9.6 GB install as tens of
+    // GB. Diagnostics that disagree with the storage screen are worse than no
+    // diagnostics.
+    private fun dirSize(dir: File): Long =
+        com.openminis.app.data.session.SessionStorage.directorySize(dir)
 
     // ── Screenshot ──────────────────────────────────────────────────────────
 
@@ -449,6 +486,100 @@ class DebugRPCHandler(private val context: Context) {
         }
     }
 
+    // ── Crash reports ───────────────────────────────────────────────────────
+    //
+    // [T-android-debug-crashes] Crash triage over the debug server. Both crash
+    // writers already drop files into filesDir/logs — ACRA's CrashFileSender
+    // writes "crash-<stamp>.log" (Java/Kotlin) and NativeCrashHandler writes
+    // "native-crash-<stamp>.log" — but reaching them previously meant knowing
+    // that convention and shelling out through `adb run-as`, which is
+    // unavailable to any client that isn't on a USB cable. A crashed app also
+    // stops answering RPC, so the crash is exactly when the debug server is
+    // least able to explain itself; these methods make the post-restart
+    // "what just died?" question answerable in one call.
+
+    private fun crashFiles(): List<File> {
+        val dir = File(context.filesDir, "logs")
+        if (!dir.isDirectory) return emptyList()
+        return (dir.listFiles() ?: emptyArray())
+            .filter { it.isFile && CRASH_NAME.matches(it.name) }
+            .sortedByDescending { it.lastModified() }
+    }
+
+    private fun handleCrashList(params: JSONObject): JSONObject {
+        val limit = params.optInt("limit", 20).coerceIn(1, 200)
+        val files = crashFiles()
+        val array = JSONArray()
+        for (f in files.take(limit)) {
+            array.put(JSONObject().apply {
+                put("name", f.name)
+                put("size", f.length())
+                put("modified", f.lastModified())
+                put("native", f.name.startsWith("native-crash-"))
+                // First stack line is what triage keys on, so surface it here
+                // and save a read call when scanning a list of crashes.
+                put("summary", crashSummary(f))
+            })
+        }
+        return JSONObject().apply {
+            put("count", files.size)
+            put("returned", array.length())
+            put("crashes", array)
+        }
+    }
+
+    /** Exception type + first app frame — enough to tell crashes apart. */
+    private fun crashSummary(f: File): String = try {
+        val lines = f.bufferedReader().useLines { seq -> seq.take(400).toList() }
+        val i = lines.indexOfFirst { it.startsWith("--- Stack Trace ---") }
+        val body = if (i >= 0) lines.drop(i + 1) else lines
+        val head = body.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+        val frame = body.firstOrNull { it.trimStart().startsWith("at com.openminis") }
+            ?.trim()?.removePrefix("at ").orEmpty()
+        listOf(head, frame).filter { it.isNotEmpty() }.joinToString("  |  ")
+    } catch (e: Exception) {
+        "(unreadable: ${e.message})"
+    }
+
+    private fun handleCrashRead(params: JSONObject): JSONObject {
+        val files = crashFiles()
+        if (files.isEmpty()) throw RPCException(-32000, "No crash reports on device")
+        // No name → newest, which is what "why did it just die?" wants.
+        val name = params.optString("name").takeIf { it.isNotEmpty() }
+        if (name != null && (name.contains("/") || name.contains(".."))) {
+            throw RPCException(-32602, "Invalid params: 'name' must be a filename")
+        }
+        val file = if (name == null) files.first()
+        else files.firstOrNull { it.name == name }
+            ?: throw RPCException(-32602, "Crash report not found: $name")
+
+        val full = file.readText()
+        // Default to the stack only: the ACRA reports embed 200 logcat lines
+        // plus a Build dump, so a whole file is ~27KB of which the useful part
+        // is the first ~40 lines.
+        val stackOnly = params.optBoolean("stackOnly", true)
+        val content = if (!stackOnly) full else {
+            val start = full.indexOf("--- Stack Trace ---")
+            val end = full.indexOf("--- Logcat")
+            when {
+                start < 0 -> full
+                end > start -> full.substring(0, end).trimEnd()
+                else -> full.substring(0, minOf(full.length, start + 4000))
+            }
+        }
+        val limit = params.optInt("limit", 262_144)
+        val sliced = content.take(limit)
+        return JSONObject().apply {
+            put("name", file.name)
+            put("modified", file.lastModified())
+            put("native", file.name.startsWith("native-crash-"))
+            put("fileSize", file.length())
+            put("stackOnly", stackOnly)
+            put("content", sliced)
+            if (sliced.length < content.length) put("truncated", true)
+        }
+    }
+
     // ── Touch & Input Simulation ────────────────────────────────────────────
 
     private suspend fun handleTap(params: JSONObject): JSONObject {
@@ -547,6 +678,79 @@ class DebugRPCHandler(private val context: Context) {
         }
     }
 
+    /**
+     * [T-android-debug-setclipboard] Put [text] on the system clipboard, from
+     * inside the app's own process.
+     *
+     * Exists because there is no way to stage a clipboard from outside on a
+     * modern device: API 33 has no `cmd clipboard`, `service call clipboard`
+     * needs an undocumented parcel layout, and since Android 10 only the
+     * foreground app may write the clipboard at all — which is precisely what
+     * this handler is.
+     *
+     * It is the missing half of a real paste test. [handleInputText] types
+     * character by character, so it can never exercise a paste: the composer's
+     * fold logic keys on ONE large insertion, and per-character input looks
+     * exactly like ordinary typing. With the clipboard staged here, a plain
+     * `input keyevent PASTE` produces a genuine single-shot insertion — the
+     * same event a user's long-press → Paste generates.
+     *
+     * Debug-only by construction: DebugServer is started under
+     * `if (BuildConfig.DEBUG)` in MinisApp, so no release build carries this.
+     */
+    /**
+     * [T-android-voice-asr-stall-skip] DEBUG-only: queue a WAV as a failed
+     * voice utterance, exactly as the provider engine does when a take's
+     * transcription fails. The voice panel then shows its Retry prompt, and
+     * Retry runs the real provider fail-over (stall offer, Switch Model, System
+     * fallback) on that audio — the only way to exercise it on a device with no
+     * one to speak into the microphone.
+     */
+    private fun handleVoiceInjectFailedAudio(params: JSONObject): JSONObject {
+        val b64 = params.optString("wavBase64", "").ifEmpty { throw RPCException(-32602, "Missing 'wavBase64' param") }
+        val wav = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        val seconds = ((wav.size - 44).coerceAtLeast(0) / 32000.0)
+        com.openminis.app.ui.chat.voice.VoiceSendGate.recordFailure(
+            com.openminis.app.speech.SpeechRecognitionManager.FailedAudio(
+                wav = wav,
+                seconds = seconds,
+                error = com.openminis.app.speech.RecognitionError.NETWORK,
+                message = "injected by debug.voice.injectFailedAudio",
+                engineId = params.optString("engineId", "provider"),
+            ),
+            com.openminis.app.ui.chat.voice.VoiceSendGate.generation,
+        )
+        return JSONObject().put("ok", true).put("bytes", wav.size).put("seconds", seconds)
+    }
+
+    private suspend fun handleSetClipboard(params: JSONObject): JSONObject {
+        val text = params.optString("text")
+        if (text.isEmpty()) throw RPCException(-32602, "Invalid params: 'text' is required")
+        val label = params.optString("label", "minis-debug")
+
+        // ClipboardManager.setPrimaryClip must run on a Looper thread, and the
+        // write is only honoured while this app holds focus.
+        withContext(Dispatchers.Main) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+        }
+
+        // Read it straight back: a silent no-op here (focus lost, OEM policy)
+        // would otherwise show up much later as a paste that pasted nothing.
+        val readBack = withContext(Dispatchers.Main) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            cm.primaryClip?.getItemAt(0)?.text?.length ?: -1
+        }
+
+        return JSONObject().apply {
+            put("ok", readBack == text.length)
+            put("length", text.length)
+            put("clipboardLength", readBack)
+        }
+    }
+
     // ── LLM Request Tracking ──────────────────────────────────────────────
 
     private fun handleLLMRequests(params: JSONObject): JSONObject {
@@ -634,6 +838,9 @@ class DebugRPCHandler(private val context: Context) {
             put("app", "MinisApp")
             put("version", BuildConfig.VERSION_NAME)
             put("build", BuildConfig.VERSION_CODE)
+            // [T-android-about-build-date] versionCode is static across
+            // rebuilds; this is what tells builds apart (iOS `buildDate`).
+            put("buildDate", com.openminis.app.AppBuildInfo.buildDate(context))
             put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             put("platform", "android")
         }
@@ -737,6 +944,13 @@ class DebugRPCHandler(private val context: Context) {
      *                                 callers don't accidentally mutate a
      *                                 real chat's shell state.
      *   timeout  (int)              — timeout in seconds. Default 60.
+     *   strategy (string)           — [T-android-shell-fresh-process] step 3:
+     *                                 "warm" | "fresh". Runs this ONE command
+     *                                 under the named execution path, leaving
+     *                                 the global default untouched, so a
+     *                                 harness can drive the same command down
+     *                                 both and diff the results. Omitted =
+     *                                 whatever the app is configured to use.
      */
     private suspend fun handleShellExecute(params: JSONObject): JSONObject {
         val command = params.optString("command").ifEmpty {
@@ -744,6 +958,19 @@ class DebugRPCHandler(private val context: Context) {
         }
         val session = params.optString("session", "debug-rpc").ifEmpty { "debug-rpc" }
         val timeoutSec = params.optInt("timeout", 60).coerceIn(1, 900)
+        // [T-android-shell-fresh-process] Per-call strategy override. Restored
+        // in `finally` below so a comparison run cannot leave the app on the
+        // wrong path if the command throws.
+        val requested = params.optString("strategy", "").lowercase()
+        val previousStrategy = ExecutionCoordinator.executionStrategy
+        when (requested) {
+            "fresh" -> ExecutionCoordinator.executionStrategy =
+                com.openminis.app.sandbox.ShellExecutionStrategy.FRESH_PROCESS
+            "warm" -> ExecutionCoordinator.executionStrategy =
+                com.openminis.app.sandbox.ShellExecutionStrategy.WARM_SHELL
+            "" -> Unit
+            else -> throw RPCException(-32602, "strategy must be 'warm' or 'fresh'")
+        }
 
         // Mirror ChatViewModel's terminal lineCallback: scan raw lines for
         // OSC MinisOpenURL markers before TerminalSanitizer strips them and
@@ -763,6 +990,9 @@ class DebugRPCHandler(private val context: Context) {
             )
         } catch (e: Exception) {
             throw RPCException(-32000, "Shell execute failed: ${e.message}")
+        } finally {
+            // Always put the global strategy back, success or failure.
+            ExecutionCoordinator.executionStrategy = previousStrategy
         }
         for (raw in capturedUrls) {
             com.openminis.app.terminal.MinisOpenUrlBroker.offer(raw)
@@ -771,6 +1001,9 @@ class DebugRPCHandler(private val context: Context) {
             .put("output", result.output)
             .put("exit_code", result.exitCode)
             .put("session", session)
+            .put("strategy", requested.ifEmpty { previousStrategy.name.lowercase() })
+            .put("duration_ms", result.durationMs)
+            .put("queue_note", result.queueNote ?: JSONObject.NULL)
     }
 
     // ── Update checker (T33) — exposed only via DebugRPC so the e2e flow can
@@ -1089,6 +1322,137 @@ class DebugRPCHandler(private val context: Context) {
     }
 
     /**
+     * [T-android-calendar-update-all-day] Direct invocation of
+     * [com.openminis.app.sandbox.offload.CalendarOffloadHandler] for e2e
+     * harnesses, like [handleSessionsExec]. DEBUG-only. Writes go to the
+     * device's real calendars — callers delete what they create.
+     */
+    private fun handleCalendarExec(params: JSONObject): JSONObject {
+        val argvTail: List<String> = when {
+            params.has("args") -> {
+                val arr = params.optJSONArray("args")
+                    ?: throw RPCException(-32602, "args must be an array of strings")
+                List(arr.length()) { arr.optString(it) }
+            }
+            params.has("command") -> {
+                params.optString("command").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            }
+            else -> throw RPCException(-32602, "Missing 'args' (array) or 'command' (string)")
+        }
+        AppLogger.info("DebugRPC", "debug.calendar.exec argv=${argvTail.joinToString(" ")}")
+        if (argvTail.firstOrNull() == "debug-local") return calendarDebugLocal(argvTail.drop(1))
+        val handler = com.openminis.app.sandbox.offload.CalendarOffloadHandler(context.applicationContext)
+        val request = com.openminis.app.sandbox.NativeOffloadRequest(
+            pid = -1,
+            argv = listOf("android-calendar") + argvTail,
+            env = emptyMap(),
+            cwd = "/",
+            sessionId = null,
+        )
+        val result = handler.handle(request)
+        return JSONObject().apply {
+            put("exitCode", result.exitCode)
+            put("output", result.output)
+            put("argv", JSONArray(argvTail))
+        }
+    }
+
+    /**
+     * Test fixtures for [handleCalendarExec], never reachable from the CLI:
+     *  - `create`  — add a device-only calendar (ACCOUNT_TYPE_LOCAL, never
+     *    syncs) named "Minis Debug (local)"; returns its id.
+     *  - `delete`  — remove it; the provider deletes its events with it.
+     *  - `raw <event_id>` — the stored Events row (DTSTART / DTEND / ALL_DAY /
+     *    EVENT_TIMEZONE / RRULE), to check what the provider actually kept.
+     *  - `legacy-allday <calendar_id> <YYYY-MM-DD>` — insert an all-day event
+     *    the way create did before T-android-calendar-update-all-day (LOCAL
+     *    midnight .. 23:59:59 with EVENT_TIMEZONE=UTC), to show where the
+     *    provider puts it.
+     */
+    private fun calendarDebugLocal(argv: List<String>): JSONObject {
+        val cr = context.contentResolver
+        val account = "minis-debug"
+        val syncUri = android.provider.CalendarContract.Calendars.CONTENT_URI.buildUpon()
+            .appendQueryParameter(android.provider.CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(android.provider.CalendarContract.Calendars.ACCOUNT_NAME, account)
+            .appendQueryParameter(android.provider.CalendarContract.Calendars.ACCOUNT_TYPE, android.provider.CalendarContract.ACCOUNT_TYPE_LOCAL)
+            .build()
+        val out = JSONObject().put("argv", JSONArray(argv))
+        when (argv.firstOrNull()) {
+            "create" -> {
+                val v = android.content.ContentValues().apply {
+                    put(android.provider.CalendarContract.Calendars.ACCOUNT_NAME, account)
+                    put(android.provider.CalendarContract.Calendars.ACCOUNT_TYPE, android.provider.CalendarContract.ACCOUNT_TYPE_LOCAL)
+                    put(android.provider.CalendarContract.Calendars.NAME, "minis_debug_local")
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, "Minis Debug (local)")
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_COLOR, 0xFF888888.toInt())
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, android.provider.CalendarContract.Calendars.CAL_ACCESS_OWNER)
+                    put(android.provider.CalendarContract.Calendars.OWNER_ACCOUNT, account)
+                    put(android.provider.CalendarContract.Calendars.VISIBLE, 1)
+                    put(android.provider.CalendarContract.Calendars.SYNC_EVENTS, 1)
+                    put(android.provider.CalendarContract.Calendars.CALENDAR_TIME_ZONE, java.util.TimeZone.getDefault().id)
+                }
+                val uri = cr.insert(syncUri, v)
+                out.put("exitCode", if (uri != null) 0 else 1).put("calendar_id", uri?.lastPathSegment ?: JSONObject.NULL)
+            }
+            "delete" -> {
+                val n = cr.delete(
+                    syncUri,
+                    "${android.provider.CalendarContract.Calendars.ACCOUNT_NAME}=? AND ${android.provider.CalendarContract.Calendars.ACCOUNT_TYPE}=?",
+                    arrayOf(account, android.provider.CalendarContract.ACCOUNT_TYPE_LOCAL),
+                )
+                out.put("exitCode", 0).put("deleted_calendars", n)
+            }
+            "raw" -> {
+                val id = argv.getOrNull(1)?.toLongOrNull() ?: throw RPCException(-32602, "raw <event_id>")
+                cr.query(
+                    android.provider.CalendarContract.Events.CONTENT_URI.buildUpon().appendPath(id.toString()).build(),
+                    arrayOf(
+                        android.provider.CalendarContract.Events.DTSTART,
+                        android.provider.CalendarContract.Events.DTEND,
+                        android.provider.CalendarContract.Events.ALL_DAY,
+                        android.provider.CalendarContract.Events.EVENT_TIMEZONE,
+                        android.provider.CalendarContract.Events.RRULE,
+                        android.provider.CalendarContract.Events.TITLE,
+                        android.provider.CalendarContract.Events.CALENDAR_ID,
+                    ),
+                    null, null, null,
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val utc = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                        out.put("exitCode", 0)
+                            .put("dtstart", c.getLong(0)).put("dtstart_utc", utc.format(java.util.Date(c.getLong(0))))
+                            .put("dtend", if (c.isNull(1)) JSONObject.NULL else c.getLong(1))
+                            .put("dtend_utc", if (c.isNull(1)) JSONObject.NULL else utc.format(java.util.Date(c.getLong(1))))
+                            .put("all_day", c.getInt(2)).put("event_timezone", c.getString(3) ?: JSONObject.NULL)
+                            .put("rrule", c.getString(4) ?: JSONObject.NULL).put("title", c.getString(5) ?: "")
+                            .put("calendar_id", c.getLong(6))
+                    } else out.put("exitCode", 1).put("error", "not found")
+                }
+            }
+            "legacy-allday" -> {
+                val calId = argv.getOrNull(1)?.toLongOrNull() ?: throw RPCException(-32602, "legacy-allday <calendar_id> <YYYY-MM-DD>")
+                val day = com.openminis.app.sandbox.offload.CalendarOffloadHandler.parseDate(argv.getOrNull(2) ?: "")
+                    ?: throw RPCException(-32602, "legacy-allday <calendar_id> <YYYY-MM-DD>")
+                val (s0, e0) = com.openminis.app.sandbox.offload.CalendarOffloadHandler.allDayBounds(day, day)
+                val v = android.content.ContentValues().apply {
+                    put(android.provider.CalendarContract.Events.CALENDAR_ID, calId)
+                    put(android.provider.CalendarContract.Events.TITLE, "Minis legacy all-day probe")
+                    put(android.provider.CalendarContract.Events.DTSTART, s0)
+                    put(android.provider.CalendarContract.Events.DTEND, e0)
+                    put(android.provider.CalendarContract.Events.ALL_DAY, 1)
+                    put(android.provider.CalendarContract.Events.EVENT_TIMEZONE, "UTC")
+                }
+                val uri = cr.insert(android.provider.CalendarContract.Events.CONTENT_URI, v)
+                out.put("exitCode", if (uri != null) 0 else 1).put("event_id", uri?.lastPathSegment ?: JSONObject.NULL)
+            }
+            else -> throw RPCException(-32602, "debug-local create | delete | raw <id> | legacy-allday <cal> <date>")
+        }
+        return out
+    }
+
+    /**
      * [T-android-sessions-cli-full] Direct invocation of
      * [com.openminis.app.sandbox.offload.SessionsOffloadHandler] for e2e
      * harnesses. Mirrors [handleModelUseExec]; lets callers exercise the
@@ -1141,19 +1505,58 @@ class DebugRPCHandler(private val context: Context) {
      */
     private fun handleMinisConfigExec(params: JSONObject): JSONObject {
         val sub = params.optString("subcommand", "").takeIf { it.isNotEmpty() }
-            ?: throw RPCException(-32602, "Missing 'subcommand' — one of: set, get, audit-list")
+            ?: throw RPCException(
+                -32602,
+                "Missing 'subcommand' — one of: set, get, topics, topic-help, audit-list",
+            )
 
         return when (sub) {
             "set" -> {
-                val path = params.optString("path", "").takeIf { it.isNotEmpty() }
-                    ?: throw RPCException(-32602, "Missing 'path' for subcommand=set")
-                val valueJson = params.optString("value_json", "").takeIf { it.isNotEmpty() }
-                    ?: throw RPCException(-32602, "Missing 'value_json' for subcommand=set")
-                val items = JSONArray().put(JSONObject().apply {
-                    put("path", path)
-                    put("value_json", valueJson)
-                })
-                AppLogger.info("DebugRPC", "debug.minisConfig.exec set path=$path")
+                // Accepts EITHER a single `path` + `value_json`, or `items:
+                // [{path, value_json}, …]` for a multi-path batch. The batch form
+                // matters because performWriteBatch applies its items as ONE unit
+                // — writing two paths as two calls cannot exercise that.
+                val items = params.optJSONArray("items")?.also { arr ->
+                    if (arr.length() == 0) {
+                        throw RPCException(-32602, "'items' must not be empty for subcommand=set")
+                    }
+                    for (i in 0 until arr.length()) {
+                        val it = arr.optJSONObject(i)
+                            ?: throw RPCException(-32602, "items[$i] must be an object")
+                        if (it.optString("path", "").isEmpty()) {
+                            throw RPCException(-32602, "Missing 'path' in items[$i]")
+                        }
+                        if (it.optString("value_json", "").isEmpty()) {
+                            throw RPCException(-32602, "Missing 'value_json' in items[$i]")
+                        }
+                    }
+                } ?: run {
+                    val path = params.optString("path", "").takeIf { it.isNotEmpty() }
+                        ?: throw RPCException(
+                            -32602,
+                            "Missing 'path' (or 'items') for subcommand=set",
+                        )
+                    val valueJson = params.optString("value_json", "").takeIf { it.isNotEmpty() }
+                        ?: throw RPCException(-32602, "Missing 'value_json' for subcommand=set")
+                    JSONArray().put(
+                        JSONObject().apply {
+                            put("path", path)
+                            put("value_json", valueJson)
+                        },
+                    )
+                }
+                // Default stays TRUE for backward compatibility: existing
+                // harnesses call this unattended and would hang on a sheet that
+                // nobody can tap. Passing `skipConfirmation:false` is what lets a
+                // test drive the REAL confirmation gate — without it that path is
+                // permanently unreachable from automation, which is precisely
+                // what iOS DebugRPCConfig calls out (it defaults the other way,
+                // preferring fidelity over convenience).
+                val skip = params.optBoolean("skipConfirmation", true)
+                AppLogger.info(
+                    "DebugRPC",
+                    "debug.minisConfig.exec set items=${items.length()} skipConfirmation=$skip",
+                )
                 // Hop to the main thread because performWriteBatch is a
                 // suspend fun that uses Dispatchers.Main internally.
                 kotlinx.coroutines.runBlocking {
@@ -1162,26 +1565,73 @@ class DebugRPCHandler(private val context: Context) {
                         caption = "debug.minisConfig.exec",
                         actorRaw = "debug-rpc",
                         sessionId = null,
-                        skipConfirmation = true,
+                        skipConfirmation = skip,
                     )
                 }
             }
             "get" -> {
                 val path = params.optString("path", "").takeIf { it.isNotEmpty() }
                     ?: throw RPCException(-32602, "Missing 'path' for subcommand=get")
+                // filter/page/pageSize were hardcoded to null/0/0, which made
+                // large collections (models, sessions) unreadable from
+                // automation — readField supports all three, so forward them.
+                // 0/0 preserves the previous "no pagination" behaviour.
+                // NOTE: readField's page is 1-BASED (it maps page<=0 to page 1),
+                // so page=0 and page=1 both return the first page.
+                val filter = params.optString("filter", "").takeIf { it.isNotEmpty() }
+                val page = params.optInt("page", 0)
+                val pageSize = params.optInt("pageSize", 0)
                 AppLogger.info("DebugRPC", "debug.minisConfig.exec get path=$path")
                 com.openminis.app.config.ConfigBridge.readField(
                     path = path,
-                    filter = null,
-                    page = 0,
-                    pageSize = 0,
+                    filter = filter,
+                    page = page,
+                    pageSize = pageSize,
                 )
+            }
+            // Discovery. Without these a caller has to know a collection's
+            // writable paths in advance; `topics` is `minis-config --help`'s
+            // index and `topic-help` is `minis-config <topic> --help`.
+            "topics" -> JSONObject().apply {
+                put("ok", true)
+                put("topics", com.openminis.app.config.ConfigBridge.allTopics())
+            }
+            "topic-help" -> {
+                val topic = params.optString("topic", "").takeIf { it.isNotEmpty() }
+                    ?: throw RPCException(-32602, "Missing 'topic' for subcommand=topic-help")
+                // "No fields" has TWO causes that must not be conflated: an
+                // unregistered topic (caller typo — an error), and a registered
+                // COLLECTION that currently has no children, e.g. `thinkingrules`
+                // before the user authors a rule. The latter is a legitimate
+                // empty result; reporting it as "unknown topic" sends the caller
+                // hunting for a name that is in fact correct.
+                //
+                // allTopics() is the authority because it includes every
+                // registered collection basePath regardless of child count.
+                val known = com.openminis.app.config.ConfigBridge.allTopics()
+                    .let { arr -> (0 until arr.length()).any { arr.optString(it) == topic } }
+                if (!known) {
+                    throw RPCException(-32602, "Unknown topic '$topic' — call subcommand=topics")
+                }
+                val fields = com.openminis.app.config.ConfigBridge.fieldsForTopic(topic)
+                JSONObject().apply {
+                    put("ok", true)
+                    put("topic", topic)
+                    // Explicit, so an empty list is unambiguously "registered but
+                    // has no children right now" rather than a silent oddity.
+                    put("empty", fields.length() == 0)
+                    put("fields", fields)
+                }
             }
             "audit-list" -> {
                 val limit = params.optInt("limit", 100).coerceIn(1, 1000)
-                com.openminis.app.config.ConfigBridge.auditList(limit, null)
+                val scope = params.optString("scope", "").takeIf { it.isNotEmpty() }
+                com.openminis.app.config.ConfigBridge.auditList(limit, scope)
             }
-            else -> throw RPCException(-32602, "Unknown subcommand '$sub'")
+            else -> throw RPCException(
+                -32602,
+                "Unknown subcommand '$sub' — one of: set, get, topics, topic-help, audit-list",
+            )
         }
     }
 }

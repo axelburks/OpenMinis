@@ -39,7 +39,7 @@ object DebugMethodRegistry {
     val methods: List<MethodSpec> by lazy {
         buildList {
             addAll(BASE_METHODS)
-            if (BuildConfig.DEBUG) addAll(DEBUG_ONLY_METHODS)
+            if (BuildConfig.DEV_TOOLS) addAll(DEBUG_ONLY_METHODS)
         }
     }
 
@@ -78,6 +78,40 @@ object DebugMethodRegistry {
             returns = "{exitCode, output, argv}",
             example = ex(
                 "args" to JSONArray().apply { put("messages"); put("--id"); put("<session_id>"); put("--full") },
+            ),
+        ),
+        MethodSpec(
+            name = "debug.calendar.exec",
+            description = "DEBUG-only: invoke CalendarOffloadHandler directly with the given argv (android-calendar list/create/update/delete). Writes hit the device's real calendars.",
+            params = listOf(
+                ParamSpec("args", "[string]", required = false, description = "argv past `android-calendar` (e.g. [\"update\", \"--id\", \"42\", \"--all-day\"])."),
+                ParamSpec("command", "string", required = false, description = "Whitespace-separated alternative to args."),
+            ),
+            returns = "{exitCode, output, argv}",
+            example = ex(
+                "args" to JSONArray().apply { put("update"); put("--id"); put("42"); put("--all-day") },
+            ),
+        ),
+        MethodSpec(
+            name = "debug.minisConfig.exec",
+            description = "DEBUG-only: drive minis-config through the REAL ConfigBridge (same code path as the in-shell CLI), so a harness can exercise every collection, the confirmation gate and the audit log without an in-shell prompt. Subcommands: set, get, topics, topic-help, audit-list.",
+            params = listOf(
+                ParamSpec("subcommand", "string", required = true, description = "One of: set, get, topics, topic-help, audit-list."),
+                ParamSpec("path", "string", required = false, description = "Config path, for get and single-path set (e.g. \"thinkingrules.<inst>:<rule>.label\")."),
+                ParamSpec("value_json", "string", required = false, description = "JSON-encoded new value, for single-path set."),
+                ParamSpec("items", "[{path,value_json}]", required = false, description = "Multi-path set applied as ONE write batch; alternative to path+value_json."),
+                ParamSpec("skipConfirmation", "bool", required = false, description = "set only. Default true (unattended). Pass false to drive the real on-device confirmation sheet."),
+                ParamSpec("filter", "string", required = false, description = "get only. Space-separated terms; filters JSON array values."),
+                ParamSpec("page", "int", required = false, description = "get only. 1-BASED page number (page=1 and page=0 both mean the first page). Omit together with pageSize for no pagination."),
+                ParamSpec("pageSize", "int", required = false, description = "get only. 0 = return everything."),
+                ParamSpec("topic", "string", required = false, description = "topic-help only. Topic name from subcommand=topics."),
+                ParamSpec("limit", "int", required = false, description = "audit-list only. 1..1000, default 100."),
+                ParamSpec("scope", "string", required = false, description = "audit-list only. Restrict the audit trail to one scope."),
+            ),
+            returns = "get/set -> the bridge's {ok,…} envelope; topics -> {ok, topics:[string]}; topic-help -> {ok, topic, empty, fields:[{path,display_name,description,schema,access,risk,revertable}]} (empty=true means a registered collection with no children yet, e.g. thinkingrules before any rule is authored); audit-list -> {ok, count, capacity, total_used, entries}",
+            example = ex(
+                "subcommand" to "get",
+                "path" to "thinkingrules",
             ),
         ),
     )
@@ -129,6 +163,82 @@ object DebugMethodRegistry {
             returns = "{size, content, encoding, bytesRead, truncated?}",
             example = ex("path" to "/etc/os-release", "limit" to 4096),
         ),
+        // [T-android-backup-subagents]
+        MethodSpec(
+            name = "debug.backup.export",
+            description = "Run the real BackupExporter into filesDir/debug-backup (no destination upload). Credentials excluded unless includeCredentials=true.",
+            params = listOf(
+                ParamSpec("categories", "array", required = false, description = "Category keys, default [\"providers\"]."),
+                ParamSpec("includeCredentials", "boolean", required = false, description = "Default false."),
+            ),
+            returns = "{path, bytes, backupId, members:[...]}",
+            example = JSONObject().put("categories", org.json.JSONArray().put("providers")),
+        ),
+        MethodSpec(
+            name = "debug.backup.restore",
+            description = "Extract a .minisbak on the device and run the real BackupImporter (merge; nothing deleted).",
+            params = listOf(
+                ParamSpec("path", "string", required = true, description = "Absolute path of the package on the device."),
+                ParamSpec("categories", "array", required = false, description = "Category keys; default = all in the package."),
+            ),
+            returns = "{backupId, sourcePlatform, integrityChecked, integrityFailed, warnings, categories:[{category, imported, updated, skipped, unreadable, failed}]}",
+            example = JSONObject().put("path", "/data/user/0/com.openminis.app/files/debug-backup/x.minisbak"),
+        ),
+        MethodSpec(
+            name = "debug.backup.upload",
+            description = "Upload a package to ONE named destination with the real RcloneChunkedUpload. cancelAfterMs simulates Stop.",
+            params = listOf(
+                ParamSpec("path", "string", required = true, description = "Package on the device."),
+                ParamSpec("remote", "string", required = true, description = "Destination name."),
+                ParamSpec("cancelAfterMs", "integer", required = false, description = "Flip the cancel flag after this long."),
+            ),
+            returns = "{ok, elapsedMs, cancelRequested, error}",
+            example = JSONObject().put("path", "...").put("remote", "SlowDavTest"),
+        ),
+        MethodSpec(
+            name = "debug.backup.remotes.addWebdav",
+            description = "Add a WebDAV destination, DISABLED so real backups never deliver to it.",
+            params = listOf(
+                ParamSpec("name", "string", required = true, description = "Destination name."),
+                ParamSpec("url", "string", required = true, description = "WebDAV URL."),
+            ),
+            returns = "{added, enabled:false}",
+            example = JSONObject().put("name", "SlowDavTest").put("url", "http://127.0.0.1:8099"),
+        ),
+        MethodSpec(
+            name = "debug.backup.remotes.remove",
+            description = "Remove a destination and its stored credential.",
+            params = listOf(ParamSpec("name", "string", required = true, description = "Destination name.")),
+            returns = "{removed}",
+            example = JSONObject().put("name", "SlowDavTest"),
+        ),
+        MethodSpec(
+            name = "debug.subAgents.list",
+            description = "List the sub agent roster (built-in + custom).",
+            params = emptyList(),
+            returns = "{subAgents:[{id, name, description, instructions, modelGroupId, thinkingLevelOverride, isBuiltIn, sortOrder, updatedAt}]}",
+            example = JSONObject(),
+        ),
+        MethodSpec(
+            name = "debug.subAgents.upsert",
+            description = "Create or update a custom sub agent.",
+            params = listOf(
+                ParamSpec("name", "string", required = true, description = "Wire name."),
+                ParamSpec("description", "string", required = false, description = "What the main model reads."),
+                ParamSpec("instructions", "string", required = false, description = "Appended to the child brief."),
+                ParamSpec("thinkingLevelOverride", "string", required = false, description = "off|low|medium|high|xhigh|max|ultra."),
+                ParamSpec("id", "string", required = false, description = "Update this definition instead of creating one."),
+            ),
+            returns = "{id, subAgents:[...]}",
+            example = JSONObject().put("name", "demo-agent").put("description", "demo"),
+        ),
+        MethodSpec(
+            name = "debug.subAgents.delete",
+            description = "Delete a custom sub agent (the built-in cannot be deleted).",
+            params = listOf(ParamSpec("id", "string", required = true, description = "Definition id.")),
+            returns = "{deleted, remaining}",
+            example = JSONObject().put("id", "..."),
+        ),
         MethodSpec(
             name = "debug.logs.list",
             description = "List AppLogger log files on disk.",
@@ -146,6 +256,42 @@ object DebugMethodRegistry {
             ),
             returns = "{name, size, content, bytesRead, truncated?}",
             example = ex("name" to "2026-04-17.log", "limit" to 16384),
+        ),
+        MethodSpec(
+            name = "provider.quickTest",
+            description = "Run Quick Test on a model entry (same code path as the UI Quick Test sheet). " +
+                "Tests applicable modalities (text, speechOut, transcription, imageGen) and returns " +
+                "per-kind status. Audio/image results report byte counts, not payloads. " +
+                "Android counterpart of iOS debug.providers.quickTest.",
+            params = listOf(
+                ParamSpec("entryId", "string", required = true, description = "Model entry id from provider.models.list."),
+                ParamSpec("kinds", "string[]", required = false, description = "Subset of text/speechOut/transcription/imageGen; omit to auto-detect."),
+            ),
+            returns = "{entryId, modelId, displayName, providerLabel, results:[{kind, status, elapsedMs, detail, bytes?}]}",
+            example = ex("entryId" to "pi_xyz/mimo-v2.5-tts"),
+        ),
+        MethodSpec(
+            name = "debug.crash.list",
+            description = "List on-device crash reports (ACRA Java/Kotlin + native), newest first, " +
+                "each with a one-line summary of the exception and first app frame.",
+            params = listOf(
+                ParamSpec("limit", "int", required = false, default = 20, description = "Max reports to return (1-200)."),
+            ),
+            returns = "{count, returned, crashes:[{name, size, modified, native, summary}]}",
+            example = ex("limit" to 5),
+        ),
+        MethodSpec(
+            name = "debug.crash.read",
+            description = "Read a crash report. Omit 'name' to get the NEWEST crash — the usual " +
+                "\"why did it just die?\" call. Returns the stack section only by default; " +
+                "pass stackOnly=false for the full file including the embedded logcat tail.",
+            params = listOf(
+                ParamSpec("name", "string", required = false, description = "Report filename from debug.crash.list; omit for newest."),
+                ParamSpec("stackOnly", "bool", required = false, default = true, description = "Trim the trailing logcat/Build dump."),
+                ParamSpec("limit", "int", required = false, default = 262144, description = "Max characters to return."),
+            ),
+            returns = "{name, modified, native, fileSize, stackOnly, content, truncated?}",
+            example = ex("stackOnly" to true),
         ),
         MethodSpec(
             name = "debug.tap",
@@ -177,6 +323,31 @@ object DebugMethodRegistry {
             ),
             returns = "{ok, length}",
             example = ex("text" to "hello world"),
+        ),
+        MethodSpec(
+            name = "debug.voice.injectFailedAudio",
+            description = "DEBUG-only: queue a 16 kHz mono PCM16 WAV as a failed voice utterance, as the provider " +
+                "engine does when a transcription fails. The voice panel shows its Retry prompt; Retry runs the " +
+                "real ASR fail-over (stall offer / Switch Model / System fallback) on that audio.",
+            params = listOf(
+                ParamSpec("wavBase64", "string", required = true, description = "Base64 of the WAV file."),
+                ParamSpec("engineId", "string", required = false, default = "provider", description = "Engine that retries it."),
+            ),
+            returns = "{ok, bytes, seconds}",
+            example = ex("wavBase64" to "<base64>"),
+        ),
+        MethodSpec(
+            name = "debug.setClipboard",
+            description = "Put text on the system clipboard from inside the app process, " +
+                "so `input keyevent PASTE` can trigger a REAL single-shot paste. " +
+                "debug.inputText types per character and therefore cannot exercise " +
+                "paste-detection logic.",
+            params = listOf(
+                ParamSpec("text", "string", required = true, description = "Text to place on the clipboard."),
+                ParamSpec("label", "string", required = false, default = "minis-debug", description = "ClipData label."),
+            ),
+            returns = "{ok, length, clipboardLength}",
+            example = ex("text" to "a long block of text"),
         ),
         MethodSpec(
             name = "debug.llmRequests",
@@ -584,9 +755,14 @@ object DebugMethodRegistry {
         ),
         MethodSpec(
             name = "provider.models.refresh",
-            description = "Re-query the provider's /v1/models for an instance and update the entry list.",
+            description = "Re-query the provider's model list for an instance and update the entry list.",
             params = listOf(
                 ParamSpec("instanceId", "string", required = true, description = "Target instance UUID."),
+                ParamSpec(
+                    "forceRefresh", "bool", required = false, default = false,
+                    description = "Bypass the discovery cache, as the in-app Refresh button does. " +
+                        "Currently affects the Codex OAuth path only.",
+                ),
             ),
             returns = "{instanceId, added, disappeared, total, durationMs}",
             example = ex("instanceId" to "pi_xyz"),
@@ -758,6 +934,17 @@ object DebugMethodRegistry {
             ),
             returns = "{sessionId, beforeMarkerCount, afterMarkerCount, removedMarkerId, newLatestMarkerId}",
             example = ex("sessionId" to "6D0F…"),
+        ),
+        MethodSpec(
+            name = "scheduled.runAgentChild",
+            description = "[T-agent-port-round3] Create a scheduled task with target mode CHILD_OF (agent task in a chat) and fire it now — the callback CARD path (no delegate block). Debug/e2e only.",
+            params = listOf(
+                ParamSpec("sessionId", "string", required = true, description = "Parent chat the agent child belongs to."),
+                ParamSpec("prompt", "string", required = true, description = "The agent's task."),
+                ParamSpec("label", "string", required = false, description = "Task label (becomes the agent title)."),
+            ),
+            returns = "{taskId, childSessionId}",
+            example = ex("sessionId" to "6D0F…", "prompt" to "echo hi"),
         ),
         MethodSpec(
             name = "chat.session.delete",

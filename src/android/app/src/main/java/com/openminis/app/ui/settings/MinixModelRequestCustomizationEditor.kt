@@ -131,6 +131,7 @@ internal fun ModelRequestCustomizationScreen(
     if (editingControl != null) {
         MinixRequestControlDetailScreen(
             control = editingControl,
+            instance = instance,
             onChange = { next ->
                 val index = controls.indexOfFirst {
                     it.id == editingControl.id
@@ -745,6 +746,7 @@ private fun requestControlDisplayTitle(
 @Composable
 private fun MinixRequestControlDetailScreen(
     control: RequestBodyControl,
+    instance: ProviderInstance?,
     onChange: (RequestBodyControl) -> Unit,
     onDelete: () -> Unit,
     onBack: () -> Unit,
@@ -885,6 +887,7 @@ private fun MinixRequestControlDetailScreen(
             RequestBodyControl.Kind.optionGroup -> {
                 OptionGroupControlEditor(
                     control = control,
+                    instance = instance,
                     onChange = onChange,
                     onEditOption = {
                         editingOptionId = it
@@ -972,6 +975,7 @@ private fun ToggleControlEditor(
 @Composable
 private fun OptionGroupControlEditor(
     control: RequestBodyControl,
+    instance: ProviderInstance?,
     onChange: (RequestBodyControl) -> Unit,
     onEditOption: (String) -> Unit,
     onEditSliderColors: () -> Unit,
@@ -1201,6 +1205,12 @@ private fun OptionGroupControlEditor(
                     thinkingDefinitionId =
                         definition.definitionId,
                     title = definition.title,
+                    payloadExpressions =
+                        RequestBodyControlDefaults
+                            .thinkingExpressions(
+                                instance,
+                                definition,
+                            ),
                 )
                 onChange(
                     control.copy(

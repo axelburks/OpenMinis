@@ -12,6 +12,8 @@ import com.openminis.app.data.model.ProviderType
 import com.openminis.app.data.model.RequestBodyControl
 import com.openminis.app.data.model.RequestBodyControlOption
 import com.openminis.app.data.model.RequestBodyControlState
+import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.model.ThinkingLevelDefinition
 import com.openminis.app.ui.settings.normalizedExpressionEditorText
 import com.openminis.app.ui.settings.finalizedExpressionEditorText
 import org.json.JSONArray
@@ -19,6 +21,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -58,6 +61,45 @@ class RequestCustomizationTest {
         assertEquals(true, body.getJSONObject("metadata").getBoolean("initial"))
         assertEquals(true, body.getJSONObject("metadata").getBoolean("keep"))
         assertEquals("model", body.getJSONObject("metadata").getString("source"))
+    }
+
+    @Test
+    fun testApply_withoutControlsKeepsProviderAndModelLayers_BitsUT() {
+        val provider = provider(
+            headers = listOf("""X-Provider = "provider""""),
+            body = listOf("metadata.provider = true"),
+        )
+        val control = RequestBodyControl(
+            id = "conversation-only",
+            title = "Conversation Only",
+            kind = RequestBodyControl.Kind.toggle,
+            defaultIsActive = true,
+            payloadExpressions = listOf(
+                "body.control_applied = true",
+                """headers.X-Control = "control"""",
+            ),
+        )
+        val entry = entry(
+            headers = listOf("""X-Model = "model""""),
+            body = listOf("metadata.model = true"),
+            controls = listOf(control),
+        )
+        val body = JSONObject()
+        val headers = linkedMapOf<String, String>()
+
+        RequestCustomization(provider, entry).apply(
+            body,
+            headers,
+            "secret",
+            includeControls = false,
+        )
+
+        assertEquals("provider", headers["X-Provider"])
+        assertEquals("model", headers["X-Model"])
+        assertFalse(headers.containsKey("X-Control"))
+        assertTrue(body.getJSONObject("metadata").getBoolean("provider"))
+        assertTrue(body.getJSONObject("metadata").getBoolean("model"))
+        assertFalse(body.has("control_applied"))
     }
 
     @Test
@@ -136,6 +178,102 @@ class RequestCustomizationTest {
             RequestCustomization(provider(), entry(controls = listOf(enabledThinking)))
                 .disablesBuiltInThinkingInjection,
         )
+    }
+
+    @Test
+    fun testThinkingTemplate_usesActualResponsesRouting_BitsUT() {
+        fun highExpression(instance: ProviderInstance): String =
+            RequestBodyControlDefaults.thinkingOptionGroup(instance)
+                .options.first {
+                    it.thinkingDefinitionId == "high"
+                }.payloadExpressions.single()
+
+        val explicitResponses = provider().copy(
+            providerType = ProviderType.openAIResponses,
+        )
+        val toggledResponses = provider().copy(
+            useResponsesAPI = true,
+        )
+        val codexOAuth = provider().copy(
+            credentialType = ProviderCredential.oauth,
+            customBaseURL = null,
+        )
+        val chatCompletions = provider().copy(
+            customBaseURL = "https://example.com/v1",
+        )
+
+        for (instance in listOf(explicitResponses, toggledResponses, codexOAuth)) {
+            assertEquals(
+                """body.reasoning = {effort: "high", summary: "auto"}""",
+                highExpression(instance),
+            )
+        }
+        assertEquals(
+            """body.reasoning_effort = "high"""",
+            highExpression(chatCompletions),
+        )
+        assertEquals(
+            """body.reasoning = {effort: "high", summary: "auto"}""",
+            RequestBodyControlDefaults
+                .thinkingExpressions(
+                    codexOAuth,
+                    ThinkingLevel.HIGH,
+                ).single(),
+        )
+        assertTrue(
+            RequestBodyControlDefaults.thinkingExpressions(
+                codexOAuth,
+                ThinkingLevelDefinition(
+                    definitionId = "custom-extreme",
+                    levelId = "extreme",
+                    title = "Extreme",
+                    rank = 100,
+                ),
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun testInternalTask_keepsNullThinkingSoControlDefaultWins_BitsUT() {
+        val off = RequestBodyControlOption(
+            id = "off-option",
+            thinkingDefinitionId = "off",
+            title = "Off",
+            payloadExpressions =
+                listOf("""body.effort = "off""""),
+        )
+        val high = RequestBodyControlOption(
+            id = "high-option",
+            thinkingDefinitionId = "high",
+            title = "High",
+            payloadExpressions =
+                listOf("""body.effort = "high""""),
+        )
+        val control = RequestBodyControl(
+            id = "thinking",
+            title = "Thinking",
+            kind = RequestBodyControl.Kind.optionGroup,
+            semanticKind =
+                RequestBodyControl.SemanticKind.thinkingBudget,
+            defaultOptionID = high.id,
+            options = listOf(off, high),
+        )
+        val customization = RequestCustomization(
+            provider = provider(),
+            modelEntry = entry(controls = listOf(control)),
+            usesConversationRequestControlState = false,
+        )
+        val body = JSONObject()
+
+        customization.thinkingDefinitionId =
+            customization.thinkingDefinitionIdForRequest(
+                explicitDefinitionId = null,
+                thinkingLevel = ThinkingLevel.OFF,
+            )
+        customization.apply(body, linkedMapOf(), null)
+
+        assertNull(customization.thinkingDefinitionId)
+        assertEquals("high", body.getString("effort"))
     }
 
     @Test

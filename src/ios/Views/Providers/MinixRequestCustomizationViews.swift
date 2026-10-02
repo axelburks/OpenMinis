@@ -609,7 +609,10 @@ struct ModelRequestCustomizationEditor: View {
                 } else {
                     ForEach($requestBodyControls) { $control in
                         NavigationLink {
-                            RequestBodyControlEditor(control: $control, providerType: provider?.providerType)
+                            RequestBodyControlEditor(
+                                control: $control,
+                                provider: provider
+                            )
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: RequestControlSymbols.resolvedName(for: control))
@@ -821,7 +824,7 @@ private struct ModelRequestCustomizationSnapshot: Equatable {
 
 private struct RequestBodyControlEditor: View {
     @Binding var control: RequestBodyControl
-    let providerType: ProviderType?
+    let provider: ProviderInstance?
     @State private var showExpressionHelp = false
 
     var body: some View {
@@ -1033,18 +1036,17 @@ private struct RequestBodyControlEditor: View {
     }
 
     private func addThinkingOption(_ def: ThinkingLevelDefinition) {
-        let level = ThinkingLevel.builtInLevel(
-            id: def.levelId
-        )
-        let providerExpressions = level.map {
-            RequestBodyControlDefaults.thinkingExpressions(providerType: providerType, level: $0)
-        } ?? []
         let option = RequestBodyControlOption(
             id: def.definitionId,
             thinkingDefinitionId:
                 def.definitionId,
             title: def.title,
-            payloadExpressions: providerExpressions
+            payloadExpressions:
+                RequestBodyControlDefaults
+                    .thinkingExpressions(
+                        for: def,
+                        provider: provider
+                    )
         )
         if control.defaultOptionID == nil { control.defaultOptionID = option.id }
         control.options.append(option)

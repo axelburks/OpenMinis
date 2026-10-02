@@ -83,23 +83,21 @@ internal object ProviderMutationMethods {
             customRequestHeaders = customRequestHeaders,
         )
 
-        // Inline copy of repo.addInstance with the seedBuiltInModels switch —
-        // we want to support both "create empty for custom-base endpoints"
-        // and the standard "seed with built-ins" path.
-        val cfg = repo.config.value
-        cfg.instances.add(instance)
-        if (seedBuiltInModels) {
-            for (m in instance.providerType.builtInModels) {
-                cfg.modelEntries.add(ModelEntry(providerInstanceId = instance.id, baseModel = m))
-            }
-        }
-        // Save via the public addInstance to trigger StateFlow re-emit. We
-        // already added above so use updateInstance to re-publish; equivalent
-        // because addInstance dedupes via list semantics.
-        // Simpler: call repo's setter pair manually — repo doesn't expose
-        // saveConfig, so use addInstance for a fresh insert path.
-        cfg.instances.removeAll { it.id == instance.id }
-        cfg.modelEntries.removeAll { it.providerInstanceId == instance.id }
+        // [T-android-provider-mutator-lock] Delegate straight to
+        // repo.addInstance. This used to add the instance and its seeds to
+        // `repo.config.value`'s lists FIRST, then remove them again, then call
+        // addInstance anyway — a no-op round trip whose only lasting effect was
+        // mutating the PUBLISHED lists, unlocked, from the debug server's HTTP
+        // thread. That is the one writer left outside the repository's
+        // copy-on-write discipline, and it crashed a reader on device:
+        //
+        //   ConcurrentModificationException
+        //     at ChatViewModel$showFastModeToggle$1.invokeSuspend  (combine over
+        //     providerRepository.config, iterating config.modelEntries)
+        //
+        // addInstance already applies the built-in seeding rule internally, so
+        // nothing is lost by dropping the inline copy; the seedBuiltInModels
+        // opt-out is still honoured by the sweep below.
         repo.addInstance(instance)
         if (!seedBuiltInModels) {
             // addInstance always seeds — if user opted out, sweep the seeds.
@@ -211,20 +209,28 @@ internal object ProviderMutationMethods {
         val baseURL = instance.effectiveBaseURL ?: when (instance.providerType) {
             ProviderType.anthropic -> "https://api.anthropic.com"
             ProviderType.gemini -> "https://generativelanguage.googleapis.com"
-            ProviderType.openAI -> "https://api.openai.com/v1"
+            // [T-android-provider-type-parity] Responses API shares the host.
+            ProviderType.openAI, ProviderType.openAIResponses -> "https://api.openai.com/v1"
             ProviderType.openRouter -> "https://openrouter.ai/api/v1"
             ProviderType.xAI -> "https://api.x.ai/v1"
             ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+            ProviderType.githubCopilot -> com.openminis.app.auth.CopilotDeviceFlow.API_BASE
+            ProviderType.antigravity, ProviderType.unsupported -> ""
         }
         val probeURL = when (instance.providerType) {
             ProviderType.anthropic -> "$baseURL/v1/models"
             ProviderType.gemini -> "$baseURL/v1beta/models?key=" + (repo.loadApiKey(id) ?: "")
-            ProviderType.openAI -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
+            ProviderType.openAI, ProviderType.openAIResponses ->
+                if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
             ProviderType.openRouter -> "$baseURL/models"
             // xAI exposes an OpenAI-compatible /models endpoint at the same base.
             ProviderType.xAI -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
             // Kimi Coding: OpenAI-compatible /models under /coding/v1.
             ProviderType.kimiCode -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
+            // [T-copilot-provider] /models sits at the API root, no /v1.
+            ProviderType.githubCopilot -> "$baseURL/models"
+            // No probe endpoint for a type this build cannot drive.
+            ProviderType.antigravity, ProviderType.unsupported -> baseURL
         }
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -235,7 +241,8 @@ internal object ProviderMutationMethods {
         val key = repo.loadApiKey(id)
         when (instance.providerType) {
             ProviderType.anthropic -> if (!key.isNullOrEmpty()) builder.header("x-api-key", key).header("anthropic-version", "2023-06-01")
-            ProviderType.openAI -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
+            ProviderType.openAI, ProviderType.openAIResponses ->
+                if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             ProviderType.openRouter -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             ProviderType.gemini -> { /* key in URL */ }
             // xAI: OpenAI-compat bearer header. Manual API key OR OAuth
@@ -243,6 +250,15 @@ internal object ProviderMutationMethods {
             ProviderType.xAI -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             // Kimi Coding: OpenAI-compat bearer (OAuth access token or key).
             ProviderType.kimiCode -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
+            // [T-copilot-provider] The mirrored `apikey_<id>` slot holds the
+            // GITHUB account token, which /models does not accept — it wants
+            // the short-lived session token. A meaningful probe would have to
+            // run the exchange, so this one is left unauthenticated and is
+            // expected to 401; Quick Test is the real check.
+            ProviderType.githubCopilot -> { /* session token not available here */ }
+            // [T-android-provider-type-parity] No auth scheme known for a type
+            // this build cannot drive; the probe will simply fail.
+            ProviderType.antigravity, ProviderType.unsupported -> { /* no auth */ }
         }
         val start = System.currentTimeMillis()
         try {
@@ -413,7 +429,10 @@ internal object ProviderMutationMethods {
         val before = repo.entriesFor(instanceId).map { it.baseModel.id }.toSet()
         val start = System.currentTimeMillis()
         try {
-            repo.refreshModels(instance)
+            // [T-codex-dynamic-discovery GH#319] Mirror the in-app Refresh
+            // button, which forces. Defaulted false so existing callers of this
+            // RPC keep exercising the cached path.
+            repo.refreshModels(instance, forceRefresh = params.optBoolean("forceRefresh", false))
         } catch (e: Exception) {
             throw RPCException(-32000, "refreshModels failed: ${e.message}")
         }
@@ -484,7 +503,11 @@ internal object ProviderMutationMethods {
             val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
             for (i in 0 until membersRaw.length()) {
                 val id = membersRaw.optString(i)
-                if (id.isNotEmpty() && id in knownEntryIds) members.add(id)
+                // Built-in System voice members are valid but never stored in
+                // modelEntries (see groupsUpdate).
+                if (id.isNotEmpty() &&
+                    (id in knownEntryIds || com.openminis.app.data.model.SystemVoiceEntries.resolve(id) != null)
+                ) members.add(id)
             }
         }
         val strategy = parseStrategy(params.optString("strategy", "fallback"))
@@ -505,8 +528,18 @@ internal object ProviderMutationMethods {
         val id = params.optString("groupId", "").ifEmpty {
             throw RPCException(-32602, "Missing 'groupId' param")
         }
-        val current = repo.group(id)
+        val published = repo.group(id)
             ?: throw RPCException(-32602, "Group not found: $id")
+
+        // [T-android-provider-mutator-lock] Edit a COPY. `repo.group(id)`
+        // returns the live object out of the published config, so writing its
+        // fields — and especially `memberEntryIds.clear()` — mutated state that
+        // Compose readers (ModelGroupDetailScreen, enabledMemberEntries) are
+        // iterating, from the debug server's HTTP thread. The clear() was the
+        // worse half: it opens a window where the group has ZERO members, and a
+        // concurrent saveConfig from any other mutator would snapshot and
+        // persist that empty group — silent data loss, not just a CME.
+        val current = published.copy(memberEntryIds = published.memberEntryIds.toMutableList())
 
         if (params.has("name")) {
             val n = params.optString("name", "")
@@ -519,7 +552,13 @@ internal object ProviderMutationMethods {
             current.memberEntryIds.clear()
             for (i in 0 until arr.length()) {
                 val mid = arr.optString(i)
-                if (mid.isNotEmpty() && mid in knownIds) current.memberEntryIds.add(mid)
+                // Built-in System voice members ("__builtin_system_speech__/…")
+                // are synthesized, never stored in modelEntries, yet are valid
+                // members of voice groups; dropping them here silently removed
+                // them from a group on any update that listed them.
+                if (mid.isNotEmpty() &&
+                    (mid in knownIds || com.openminis.app.data.model.SystemVoiceEntries.resolve(mid) != null)
+                ) current.memberEntryIds.add(mid)
             }
         }
         if (params.has("strategy")) current.strategy = parseStrategy(params.optString("strategy"))

@@ -1208,6 +1208,62 @@ final class RequestCustomizationApplicationTests: XCTestCase {
         XCTAssertEqual(config?["shared"] as? String, "control")
     }
 
+    func testApply_withoutControlsKeepsProviderAndModelLayers_BitsUT() {
+        let provider = ProviderInstance(
+            id: "provider-base-layers",
+            label: "Base Layers",
+            providerType: .openAI,
+            credentialType: .apiKey,
+            customRequestHeaders: [
+                #"X-Provider = "provider""#,
+            ],
+            customRequestBody: [
+                #"metadata.provider = true"#,
+            ]
+        )
+        let control = RequestBodyControl(
+            id: "conversation-only",
+            title: "Conversation Only",
+            kind: .toggle,
+            defaultIsActive: true,
+            payloadExpressions: [
+                "body.control_applied = true",
+                #"headers.X-Control = "control""#,
+            ]
+        )
+        let entry = makeEntry(
+            provider: provider,
+            modelID: "base-layers-model",
+            overrides: ModelOverrides(
+                customRequestHeaders: [
+                    #"X-Model = "model""#,
+                ],
+                customRequestBody: [
+                    #"metadata.model = true"#,
+                ],
+                requestBodyControls: [control]
+            )
+        )
+        var body: [String: Any] = [:]
+        var headers: [String: String] = [:]
+
+        RequestCustomization(provider: provider, modelEntry: entry)
+            .apply(
+                to: &body,
+                headers: &headers,
+                apiKey: "api-key",
+                includeControls: false
+            )
+
+        XCTAssertEqual(headers["X-Provider"], "provider")
+        XCTAssertEqual(headers["X-Model"], "model")
+        XCTAssertNil(headers["X-Control"])
+        let metadata = body["metadata"] as? [String: Any]
+        XCTAssertEqual(metadata?["provider"] as? Bool, true)
+        XCTAssertEqual(metadata?["model"] as? Bool, true)
+        XCTAssertNil(body["control_applied"])
+    }
+
     func testApply_headerNamesAndReferencesAreCaseInsensitive_BitsUT() {
         let provider = ProviderInstance(
             id: "provider-header-case",
@@ -2154,6 +2210,167 @@ final class RequestBodyControlDefaultsTests: XCTestCase {
             )
         )
     }
+
+    func testThinkingOptionGroup_usesActualResponsesRouting_BitsUT() throws {
+        func highExpression(for instance: ProviderInstance) throws -> String {
+            let control =
+                RequestBodyControlDefaults
+                    .thinkingOptionGroup(for: instance)
+            return try XCTUnwrap(
+                control.options.first {
+                    $0.thinkingDefinitionId == "high"
+                }?.payloadExpressions.first
+            )
+        }
+
+        let explicitResponses = ProviderInstance(
+            label: "Responses",
+            providerType: .openAIResponses,
+            credentialType: .apiKey
+        )
+        let codexOAuth = ProviderInstance(
+            label: "Codex",
+            providerType: .openAI,
+            credentialType: .oauth
+        )
+        let chatCompletions = ProviderInstance(
+            label: "Chat",
+            providerType: .openAI,
+            credentialType: .apiKey,
+            customBaseURL: "https://example.com/v1"
+        )
+
+        for instance in [explicitResponses, codexOAuth] {
+            XCTAssertEqual(
+                try highExpression(for: instance),
+                #"body.reasoning = {effort: "high", summary: "auto"}"#
+            )
+        }
+        XCTAssertEqual(
+            try highExpression(for: chatCompletions),
+            #"body.reasoning_effort = "high""#
+        )
+        XCTAssertEqual(
+            RequestBodyControlDefaults.thinkingExpressions(
+                for: codexOAuth,
+                level: .high
+            ),
+            [#"body.reasoning = {effort: "high", summary: "auto"}"#]
+        )
+        XCTAssertTrue(
+            RequestBodyControlDefaults.thinkingExpressions(
+                for: ThinkingLevelDefinition(
+                    definitionId: "custom-extreme",
+                    levelId: "extreme",
+                    title: "Extreme",
+                    rank: 100
+                ),
+                provider: codexOAuth
+            ).isEmpty
+        )
+    }
+
+    @MainActor
+    func testFallbackThinkingSelection_preservesConversationAndClampsToCandidate_BitsUT() {
+        let control = RequestBodyControl(
+            id: "thinking",
+            title: "Thinking",
+            kind: .optionGroup,
+            semanticKind: .thinkingBudget,
+            defaultOptionID: "high-option",
+            options: [
+                RequestBodyControlOption(
+                    id: "low-option",
+                    thinkingDefinitionId: "low",
+                    title: "Low"
+                ),
+                RequestBodyControlOption(
+                    id: "high-option",
+                    thinkingDefinitionId: "high",
+                    title: "High"
+                ),
+            ]
+        )
+        let entry = ModelEntry(
+            providerInstanceId: "provider",
+            model: LLMModel(
+                id: "reasoning-model",
+                displayName: "Reasoning Model",
+                provider: "OpenAI",
+                supportsReasoning: true
+            ),
+            overrides: ModelOverrides(
+                requestBodyControls: [control]
+            )
+        )
+
+        XCTAssertEqual(
+            AIChatViewModel.resolvedThinkingDefinitionId(
+                "low",
+                forModelEntry: entry
+            ),
+            "low"
+        )
+        XCTAssertEqual(
+            AIChatViewModel.resolvedThinkingDefinitionId(
+                "xhigh",
+                forModelEntry: entry
+            ),
+            "high"
+        )
+    }
+}
+
+final class GeminiRequestCustomizationTests: XCTestCase {
+
+    func testCloudCodeCustomizationTargetsInnerRequestBody_BitsUT() throws {
+        let instance = ProviderInstance(
+            id: "gemini-oauth",
+            label: "Gemini OAuth",
+            providerType: .gemini,
+            credentialType: .oauth,
+            customRequestBody: [
+                #"generationConfig.marker = "custom""#,
+            ]
+        )
+        let model = LLMModel(
+            id: "gemini-3-flash-preview",
+            displayName: "Gemini",
+            provider: "Google",
+            supportsReasoning: true
+        )
+        let entry = ModelEntry(
+            providerInstanceId: instance.id,
+            model: model
+        )
+        let provider = GeminiProvider(
+            oauthTokenProvider: { "token" },
+            model: model
+        )
+        provider.gcpProjectID = "project"
+        provider.requestCustomization = RequestCustomization(
+            provider: instance,
+            modelEntry: entry
+        )
+        var headers = ["Authorization": "Bearer token"]
+
+        let finalBody = provider.prepareRequestBodyForTransport(
+            [
+                "contents": [],
+                "generationConfig": ["maxOutputTokens": 1024],
+            ],
+            headers: &headers,
+            apiKey: "token"
+        )
+
+        XCTAssertNil(finalBody["generationConfig"])
+        let request = try XCTUnwrap(finalBody["request"] as? [String: Any])
+        let config = try XCTUnwrap(
+            request["generationConfig"] as? [String: Any]
+        )
+        XCTAssertEqual(config["maxOutputTokens"] as? Int, 1024)
+        XCTAssertEqual(config["marker"] as? String, "custom")
+    }
 }
 
 final class AnthropicRequestCustomizationTests: XCTestCase {
@@ -2773,7 +2990,7 @@ final class OpenAIDefaultThinkingTests: XCTestCase {
             model: model,
             level: .ultra
         )
-        XCTAssertTrue(ultraBody.isEmpty)
+        XCTAssertEqual(ultraBody["reasoning_effort"] as? String, "max")
     }
 
     func testApplyDefaultChatThinking_skipsUnsupportedModelAndCustomThinkingControl_BitsUT() {
@@ -2864,5 +3081,155 @@ final class OpenAIDefaultThinkingTests: XCTestCase {
         )
 
         XCTAssertEqual(disabledBody["reasoning_effort"] as? String, "high")
+    }
+
+    func testApplyDefaultChatThinking_preservesProviderScopedUserRules_BitsUT() {
+        let instanceID = "thinking-rules-\(UUID().uuidString)"
+        ThinkingRuleCache.shared.set(
+            [
+                ThinkingRule(
+                    kind: .custom,
+                    scope: .allModels,
+                    wireFormat: .customPath(
+                        path: "custom_thinking_effort",
+                        values: [.high: "provider-rule"],
+                        offValue: nil
+                    ),
+                    label: "provider-rule"
+                ),
+            ],
+            for: instanceID
+        )
+        defer { ThinkingRuleCache.shared.set([], for: instanceID) }
+
+        let model = LLMModel(
+            id: "mistral-large-latest",
+            displayName: "Mistral",
+            provider: "OpenAI",
+            supportsReasoning: true
+        )
+        let provider = OpenAIProvider(apiKey: "key", model: model)
+        provider.providerInstanceId = instanceID
+        provider.isMistral = true
+        var body: [String: Any] = [:]
+
+        OpenAIAgentProvider.applyDefaultChatThinking(
+            into: &body,
+            provider: provider,
+            model: model,
+            level: .high
+        )
+
+        XCTAssertEqual(body["custom_thinking_effort"] as? String, "provider-rule")
+        XCTAssertNil(body["reasoning_effort"])
+    }
+
+    func testApplyDefaultResponsesThinking_preservesCodexOffFallbackAndSemanticOverride_BitsUT() {
+        let model = LLMModel(
+            id: "gpt-5-test",
+            displayName: "Test Model",
+            provider: "OpenAI",
+            supportsReasoning: true
+        )
+        let defaultProvider = OpenAIProvider(apiKey: "key", model: model)
+        var defaultBody: [String: Any] = [:]
+
+        let requestsEncryptedReasoning =
+            OpenAIAgentProvider.applyDefaultResponsesThinking(
+                into: &defaultBody,
+                provider: defaultProvider,
+                model: model,
+                level: .off,
+                isCodexOAuth: true
+            )
+
+        XCTAssertTrue(requestsEncryptedReasoning)
+        XCTAssertEqual(
+            (defaultBody["reasoning"] as? [String: Any])?["effort"] as? String,
+            "low"
+        )
+
+        let instance = ProviderInstance(
+            id: "custom-provider",
+            label: "Custom Provider",
+            providerType: .openAIResponses,
+            credentialType: .oauth
+        )
+        let control = RequestBodyControl(
+            id: "thinking-control",
+            title: "Custom Thinking",
+            kind: .optionGroup,
+            semanticKind: .thinkingBudget
+        )
+        let entry = ModelEntry(
+            providerInstanceId: instance.id,
+            model: model,
+            overrides: ModelOverrides(requestBodyControls: [control])
+        )
+        let customProvider = OpenAIProvider(apiKey: "key", model: model)
+        customProvider.requestCustomization = RequestCustomization(
+            provider: instance,
+            modelEntry: entry
+        )
+        var customBody: [String: Any] = [:]
+
+        let customRequestsEncryptedReasoning =
+            OpenAIAgentProvider.applyDefaultResponsesThinking(
+                into: &customBody,
+                provider: customProvider,
+                model: model,
+                level: .off,
+                isCodexOAuth: true
+            )
+
+        XCTAssertFalse(customRequestsEncryptedReasoning)
+        XCTAssertNil(customBody["reasoning"])
+    }
+
+    @MainActor
+    func testFactory_preservesUpstreamThinkingRuleInstanceScope_BitsUT() {
+        let model = LLMModel(
+            id: "model",
+            displayName: "Model",
+            provider: "OpenAI"
+        )
+        let chatInstance = ProviderInstance(
+            id: "openai-chat-\(UUID().uuidString)",
+            label: "OpenAI Chat",
+            providerType: .openAI,
+            credentialType: .apiKey
+        )
+        let chatEntry = ModelEntry(
+            providerInstanceId: chatInstance.id,
+            model: model
+        )
+        let chatProvider = LLMProviderFactory.makeOpenAIProvider(
+            instance: chatInstance,
+            entry: chatEntry
+        )
+
+        XCTAssertEqual(
+            chatProvider.providerInstanceId,
+            chatInstance.id
+        )
+        XCTAssertNotNil(chatProvider.requestCustomization)
+
+        let codexInstance = ProviderInstance(
+            id: "codex-\(UUID().uuidString)",
+            label: "Codex",
+            providerType: .openAI,
+            credentialType: .oauth
+        )
+        let codexEntry = ModelEntry(
+            providerInstanceId: codexInstance.id,
+            model: model
+        )
+        let codexProvider = LLMProviderFactory.makeOpenAIProvider(
+            instance: codexInstance,
+            entry: codexEntry
+        )
+
+        XCTAssertNil(codexProvider.providerInstanceId)
+        XCTAssertNotNil(codexProvider.requestCustomization)
     }
 }

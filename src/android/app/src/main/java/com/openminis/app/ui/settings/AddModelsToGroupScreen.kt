@@ -55,6 +55,8 @@ fun AddModelsToGroupScreen(
     val modalityFilter = when (groupId) {
         config.voiceInputGroupId -> PickerModalityFilter.AUDIO_INPUT
         config.voiceOutputGroupId -> PickerModalityFilter.AUDIO_OUTPUT
+        // [T-android-vision-group] Vision Group picker: only image-capable models.
+        config.visionGroupId -> PickerModalityFilter.IMAGE_INPUT
         else -> null
     }
     val availableEntries = config.modelEntries.filter {
@@ -112,6 +114,16 @@ fun AddModelsToGroupScreen(
         // Resolved here (Composable context) — LazyListScope below can't call
         // stringResource. Localizes the injected System provider section label.
         val systemProviderLabel = stringResource(R.string.voice_provider_system)
+        // [T-picker-search-debounce] Ranked, capped search, computed here (a
+        // composable scope) so typing re-ranks only once the query settles.
+        val searchSections = com.openminis.app.ui.components.rememberModelEntryPickerSections(
+            instances = config.instances,
+            availableEntries = availableEntries,
+            searchQuery = searchQuery.value,
+            modalityFilter = modalityFilter,
+            excludeIds = existingIds,
+            systemProviderLabel = systemProviderLabel,
+        )
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -135,6 +147,7 @@ fun AddModelsToGroupScreen(
                 modalityFilter = modalityFilter,
                 excludeIds = existingIds,
                 systemProviderLabel = systemProviderLabel,
+                sections = searchSections,
             )
         }
     }

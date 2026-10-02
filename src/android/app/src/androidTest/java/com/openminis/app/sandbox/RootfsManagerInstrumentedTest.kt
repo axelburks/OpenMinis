@@ -36,13 +36,11 @@ class RootfsManagerInstrumentedTest {
 
         // Clean up from previous test runs
         manager.rootfsDir.deleteRecursively()
-        manager.prootBinary.parentFile?.deleteRecursively()
     }
 
     @After
     fun tearDown() {
         manager.rootfsDir.deleteRecursively()
-        manager.prootBinary.parentFile?.deleteRecursively()
         resetSingleton()
     }
 
@@ -77,10 +75,10 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installIfNeededExtractsRootfsFromAssets() = runBlocking {
-        // This test requires alpine-minirootfs.tar.gz in assets.
+        // This test requires the Alpine minirootfs in assets.
         // Skip if not present (CI or pre-asset-download)
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasRootfsAsset()) {
+            println("SKIP: Alpine minirootfs not in assets")
             return@runBlocking
         }
 
@@ -94,7 +92,9 @@ class RootfsManagerInstrumentedTest {
         assertEquals("aarch64", archFile.readText().trim())
 
         // Verify /var/minis subdirs created
-        val expectedDirs = listOf("attachments", "offloads", "workspace", "skills", "memory")
+        val expectedDirs = listOf(
+            "attachments", "offloads", "workspace", "skills", "memory", "shared", "mounts"
+        )
         for (subdir in expectedDirs) {
             val dir = File(manager.rootfsDir, "var/minis/$subdir")
             assertTrue("var/minis/$subdir should exist", dir.exists())
@@ -104,15 +104,17 @@ class RootfsManagerInstrumentedTest {
         // Verify resolv.conf
         val resolv = File(manager.rootfsDir, "etc/resolv.conf")
         assertTrue("resolv.conf should exist", resolv.exists())
-        val content = resolv.readText()
-        assertTrue("Should contain 8.8.8.8", content.contains("8.8.8.8"))
-        assertTrue("Should contain 8.8.4.4", content.contains("8.8.4.4"))
+        val nameservers = resolv.readLines()
+            .filter { it.startsWith("nameserver ") }
+            .map { it.removePrefix("nameserver ").trim() }
+        assertTrue("Should contain at least one DNS server", nameservers.isNotEmpty())
+        assertTrue("DNS servers should be valid IP addresses", nameservers.all(ContainerDns::isValidServer))
     }
 
     @Test
     fun installIfNeededIsIdempotent() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasRootfsAsset()) {
+            println("SKIP: Alpine minirootfs not in assets")
             return@runBlocking
         }
 
@@ -130,8 +132,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installIfNeededCleansPartialInstall() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasRootfsAsset()) {
+            println("SKIP: Alpine minirootfs not in assets")
             return@runBlocking
         }
 
@@ -149,11 +151,6 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installProotIfNeededExtractsBinary() = runBlocking {
-        if (!hasAsset("proot-aarch64")) {
-            println("SKIP: proot-aarch64 not in assets")
-            return@runBlocking
-        }
-
         manager.installProotIfNeeded()
 
         assertTrue("PRoot binary should exist", manager.prootBinary.exists())
@@ -163,11 +160,6 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installProotIfNeededIsIdempotent() = runBlocking {
-        if (!hasAsset("proot-aarch64")) {
-            println("SKIP: proot-aarch64 not in assets")
-            return@runBlocking
-        }
-
         manager.installProotIfNeeded()
         val firstSize = manager.prootBinary.length()
 
@@ -213,8 +205,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun resetDeletesAndReinstalls() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasRootfsAsset()) {
+            println("SKIP: Alpine minirootfs not in assets")
             return@runBlocking
         }
 
@@ -232,8 +224,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun resetKeepsUserDataWhenRequested() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasRootfsAsset()) {
+            println("SKIP: Alpine minirootfs not in assets")
             return@runBlocking
         }
 
@@ -330,6 +322,10 @@ class RootfsManagerInstrumentedTest {
             false
         }
     }
+
+    // [Minix] AAPT may expose the no-compress rootfs without the final .gz.
+    private fun hasRootfsAsset(): Boolean =
+        listOf("alpine-minirootfs.tar.gz", "alpine-minirootfs.tar").any(::hasAsset)
 
     private fun resetSingleton() {
         try {

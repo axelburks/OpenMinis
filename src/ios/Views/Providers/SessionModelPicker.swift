@@ -58,17 +58,17 @@ struct SessionModelPicker: View {
         ))
         .accessibilityIdentifier("sessionModelPicker")
         .alert(
-            String(localized: "This model may not work as an Agent"),
+            AppLocalized("This model may not work as an Agent"),
             isPresented: Binding(
                 get: { pendingNonTextOutput != nil },
                 set: { if !$0 { pendingNonTextOutput = nil } }
             ),
             presenting: pendingNonTextOutput
         ) { selection in
-            Button(String(localized: "Choose another model"), role: .cancel) {
+            Button(AppLocalized("Choose another model"), role: .cancel) {
                 pendingNonTextOutput = nil
             }
-            Button(String(localized: "Use anyway")) {
+            Button(AppLocalized("Use anyway")) {
                 let entry = selection.entry
                 let group = selection.group
                 let isGroupBind = selection.isGroupBind
@@ -80,7 +80,7 @@ struct SessionModelPicker: View {
                 }
             }
         } message: { selection in
-            Text(String(localized: "\(selection.entry.model.displayName) outputs \(selection.modalityLabel) and usually can't drive an Agent task. Pick a text-output model for the session, or add this model to Available Models in Agent Loop so the agent can call it via minis-model-use when it needs to generate \(selection.modalityLabel)."))
+            Text(AppLocalized("\(selection.entry.model.displayName) outputs \(selection.modalityLabel) and usually can't drive an Agent task. Pick a text-output model for the session, or add this model to Available Models in Agent Loop so the agent can call it via minis-model-use when it needs to generate \(selection.modalityLabel)."))
         }
     }
 
@@ -88,9 +88,9 @@ struct SessionModelPicker: View {
 
     private func nonTextOutputLabel(for model: LLMModel) -> String? {
         guard let modality = model.modalityOverride else { return nil }
-        if modality.contains(.imageOutput) { return String(localized: "image") }
-        if modality.contains(.audioOutput) { return String(localized: "audio") }
-        if modality.contains(.videoOutput) { return String(localized: "video") }
+        if modality.contains(.imageOutput) { return AppLocalized("image") }
+        if modality.contains(.audioOutput) { return AppLocalized("audio") }
+        if modality.contains(.videoOutput) { return AppLocalized("video") }
         return nil
     }
 
@@ -349,6 +349,6 @@ struct SessionModelDisplay {
            let group = store.group(for: groupId) {
             return group.name
         }
-        return String(localized: "No model selected")
+        return AppLocalized("No model selected")
     }
 }

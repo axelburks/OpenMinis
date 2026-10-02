@@ -15,12 +15,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -140,7 +142,7 @@ fun MemoryManagementScreen(
     if (deleteFileName != null) {
         AlertDialog(
             onDismissRequest = { deleteFileName = null },
-            title = { Text("Delete ${deleteFileName}?") },
+            title = { Text(stringResource(R.string.memory_delete_confirm_title, deleteFileName ?: "")) },
             text = { Text(stringResource(R.string.memory_delete_confirm_text)) },
             confirmButton = {
                 MinisTextButton(onClick = {
@@ -181,26 +183,53 @@ private fun MemoryFileRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // [T-android-memory-row-date-wrap] The name+size group flexes and
+                // truncates; the date never wraps.
+                //
+                // Previously neither child had a weight, so the name group claimed
+                // its full intrinsic width and the date was left with the
+                // remainder. A daily-log name is itself a date ("2026-08-16.md"),
+                // which is long enough that the 16-char "yyyy-MM-dd HH:mm" stamp no
+                // longer fit — it wrapped to two lines and made that one row
+                // visibly taller than its neighbours (user-reported).
+                //
+                // Giving the name group weight(1f, fill = false) lets it shrink
+                // only as far as needed, and maxLines/ellipsis on the NAME means
+                // the truncation lands on the element that can afford it. softWrap
+                // = false on the date is the actual guarantee of a uniform row
+                // height — the date is short, fixed-width, and the one thing that
+                // must never reflow. Deliberately NOT solved by shortening the
+                // format: the time is real information, and dropping it would only
+                // move the threshold rather than remove it.
                 Row(
+                    modifier = Modifier.weight(1f, fill = false),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
                         file.name,
                         style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     if (file.fileSize.isNotBlank()) {
                         Text(
                             file.fileSize,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     file.modifiedDate,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
             if (file.preview.isNotBlank()) {
@@ -211,6 +240,23 @@ private fun MemoryFileRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+        // [T-memory-file-delete-entrypoint] Daily logs are deletable per the
+        // repository contract, but the row previously accepted onDelete and
+        // never rendered it — the confirm dialog was unreachable, so users
+        // could not delete memory files at all (iOS exposes this via
+        // List .onDelete swipe). An always-visible trash button is the
+        // Android-convention equivalent; GLOBAL.md passes onDelete = null
+        // and keeps its chevron-only layout.
+        if (onDelete != null) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    contentDescription = stringResource(R.string.common_delete),
+                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                    modifier = Modifier.size(20.dp),
                 )
             }
         }
@@ -232,7 +278,7 @@ private fun MemoryFileRow(
  * onValueChange. Programmatic content changes (paste, IME commit, state
  * restore) don't always route through onValueChange, so Save could fail
  * to appear after a paste until the user typed another key — the exact
- * symptom reported on iOS/macOS (XIN msg 41384). Keeping Save permanently
+ * symptom reported on iOS/macOS. Keeping Save permanently
  * visible removes the dependency entirely; saveFile is idempotent so a
  * no-op Save on unchanged content is harmless.
  */

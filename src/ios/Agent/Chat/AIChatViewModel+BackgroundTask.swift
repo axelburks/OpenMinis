@@ -7,6 +7,30 @@ private let logger = AppLogger(category: "AIChatVM")
 
 extension AIChatViewModel {
 
+    // MARK: - Current turn [T-bgnotif-current-turn]
+
+    /// Index in `history` where the CURRENT user turn begins: just after the
+    /// last user message that the user actually sent (any part that is not a
+    /// tool result). Assistant turns at or after this index belong to the run
+    /// answering that message; everything before is earlier turns. 0 when no
+    /// such message exists.
+    ///
+    /// Structural rather than a count recorded at run start: `retry()` removes
+    /// the failed reply AFTER some entry points begin the run, so a recorded
+    /// count can point past the new reply. When a tool-result message carries
+    /// extra parts (e.g. a screenshot) the boundary lands later, which only
+    /// shrinks the window — it can never reach back into an earlier turn,
+    /// which is the property the callers rely on.
+    static func currentTurnStartIndex(in history: [AgentMessage]) -> Int {
+        guard let userIdx = history.lastIndex(where: { msg in
+            msg.role == .user && msg.parts.contains { part in
+                if case .toolResult = part { return false }
+                return true
+            }
+        }) else { return 0 }
+        return userIdx + 1
+    }
+
     // MARK: - Background Task
 
     func beginBackgroundProcessing() {
@@ -38,6 +62,7 @@ extension AIChatViewModel {
                 self.backgroundTaskID = .invalid
                 if expiringId != .invalid {
                     UIApplication.shared.endBackgroundTask(expiringId)
+                    AIChatViewModel.noteBackgroundTaskEnded()
                 }
                 self.beginBackgroundProcessing()
                 return
@@ -78,7 +103,16 @@ extension AIChatViewModel {
             // Must end the background task to avoid termination.
             self.endBackgroundProcessing()
         }
-        logger.info("[BKA][BGTask] started id=\(self.backgroundTaskID.rawValue) sessions=\(sessions)")
+        // [T-ios-bgkeepalive-diag] Only count a grant the OS actually gave
+        // us: beginBackgroundTask returns .invalid when the request is refused,
+        // and treating that as live is exactly the false "healthy" signal this
+        // counter exists to remove.
+        if backgroundTaskID != .invalid {
+            AIChatViewModel.noteBackgroundTaskBegan()
+        } else {
+            logger.warning("[BKA][BGTask] beginBackgroundTask REFUSED (.invalid) — no OS grant held")
+        }
+        logger.info("[BKA][BGTask] started id=\(self.backgroundTaskID.rawValue) sessions=\(sessions) liveGrants=\(AIChatViewModel.liveBackgroundTaskCount)")
         startBackgroundStatusTimer()
     }
 
@@ -104,9 +138,23 @@ extension AIChatViewModel {
                 // completion, so never badge, but DO advance the baseline so a
                 // later off-screen call for this same turn can't re-badge it.
                 lastBadgedAssistantTurnCount = max(lastBadgedAssistantTurnCount, assistantTurns)
-            } else if hasNewCompletion {
+            } else if hasNewCompletion,
+                      !AgentJobRegistry.shared.hasActiveChildren(parent: sid) {
                 lastBadgedAssistantTurnCount = assistantTurns
                 SessionBadgeStore.shared.pushFront(.unread, for: sid)
+            } else if hasNewCompletion {
+                // [T-sidebar-subagent-running] A sub agent reporting back wakes
+                // the parent for a turn, and that turn ending lands here — so a
+                // five-agent fan-out raised the red "there is something new to
+                // read" dot up to five times while the work was still going,
+                // each one reading as if the whole thing had finished. The dot
+                // is for a conversation that has come to rest; hold it until
+                // the last sibling is in, and let the final turn raise it.
+                //
+                // The baseline is deliberately NOT advanced: this turn's
+                // completion has not been announced yet, so the run that ends
+                // the fan-out must still count as new.
+                logger.info("[Badge] unread held — \(sid.prefix(8)) still has sub agents running")
             }
         }
 
@@ -125,8 +173,14 @@ extension AIChatViewModel {
             let wasBackground = UIApplication.shared.applicationState != .active
             let hasError = messages.last?.error != nil || errorMessage != nil
             let responseSummary: String = {
-                let assistantTurns = agentHistory.filter { $0.role == .assistant }
-                logger.info("[BackgroundNotification] building responseSummary from agentHistory: totalMsgs=\(agentHistory.count) assistantTurns=\(assistantTurns.count) wasBackground=\(wasBackground) hasError=\(hasError)")
+                // [T-bgnotif-current-turn] GH#263. Only THIS turn's replies are
+                // candidates. The search used to span the whole history, so a
+                // turn that failed with no text fell back to the PREVIOUS
+                // turn's reply — a lock-screen banner showing a complete answer
+                // while the bubble said "Model returned an empty response".
+                let turnStart = Self.currentTurnStartIndex(in: agentHistory)
+                let allAssistantTurns = agentHistory[min(turnStart, agentHistory.count)...].filter { $0.role == .assistant }
+                logger.verbose("[BackgroundNotification] building responseSummary from agentHistory: totalMsgs=\(agentHistory.count) turnStart=\(turnStart) assistantTurns=\(allAssistantTurns.count) wasBackground=\(wasBackground) hasError=\(hasError)")
 
                 func textFromTurn(_ msg: AgentMessage) -> String {
                     let raw = msg.parts.compactMap { part -> String? in
@@ -138,6 +192,36 @@ extension AIChatViewModel {
 
                 func hasToolUse(_ msg: AgentMessage) -> Bool {
                     msg.parts.contains { if case .toolUse = $0 { return true }; return false }
+                }
+
+                // [T-bgnotif-internal-text-leak] Never let a model-facing string
+                // become the notification body.
+                //
+                // The internal "bridge" turn inserted when a queued user message
+                // interrupts a tool loop is role=.assistant, a single .text part,
+                // and has NO toolUse — i.e. it is precisely what the
+                // "last pure-text turn" preference below looks for. It shipped to
+                // a user's lock screen verbatim ("(Interrupted mid-task by a new
+                // user message. Decide based on the new message…"), which is an
+                // instruction addressed to the model, not a summary of anything.
+                //
+                // The chat UI already hides these rows (ChatModels.isInternalBridge,
+                // CollectionViewMessageListV3, Persistence), but every one of those
+                // filters is on RawMessage/ChatMessage. This path reads
+                // `agentHistory` (AgentMessage), so it inherited none of them.
+                // Filter here rather than at each `last(where:)` so any future
+                // selection strategy added below is covered by construction.
+                func isInternalOnly(_ msg: AgentMessage) -> Bool {
+                    let raw = msg.parts.compactMap { part -> String? in
+                        if case .text(let t) = part { return t }
+                        return nil
+                    }.joined(separator: "\n")
+                    return RawMessage.isInternalBridgeText(raw)
+                }
+
+                let assistantTurns = allAssistantTurns.filter { !isInternalOnly($0) }
+                if assistantTurns.count != allAssistantTurns.count {
+                    logger.info("[BackgroundNotification] filtered \(allAssistantTurns.count - assistantTurns.count) internal-only turn(s) out of summary candidates")
                 }
 
                 for (idx, msg) in assistantTurns.enumerated() {
@@ -159,14 +243,70 @@ extension AIChatViewModel {
                     logger.info("[BackgroundNotification] source=any-text-turn(agentHistory) first20=\(String(t.prefix(20)).debugDescription)")
                     return String(t.prefix(200))
                 }
+                // No text this turn. A failed turn says why (the title already
+                // carries ❌) instead of claiming completion.
+                if hasError, let err = (messages.last?.error ?? errorMessage)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !err.isEmpty {
+                    logger.info("[BackgroundNotification] source=turn-error")
+                    return String(err.prefix(200))
+                }
+                // No usable assistant text. If the only thing this turn produced
+                // was an internal bridge, the task did not finish — it was
+                // interrupted by a queued user message — so say that in the
+                // user's own terms instead of claiming completion.
+                if allAssistantTurns.contains(where: { isInternalOnly($0) }) {
+                    logger.info("[BackgroundNotification] source=fallback-interrupted")
+                    return AppLocalized("Task interrupted by a new message. Open the session to continue.")
+                }
                 logger.info("[BackgroundNotification] source=fallback")
-                return "Task completed."
+                return AppLocalized("Task completed.")
             }()
             logger.info("[BackgroundNotification] responseSummary ready length=\(responseSummary.count) first20=\(String(responseSummary.prefix(20)).debugDescription) wasBackground=\(wasBackground)")
             let fallbackTitle = messages.first(where: { $0.role == .user })?.content.prefix(60).description ?? "Agent task"
             let bgTaskID = backgroundTaskID
             backgroundTaskID = .invalid
+            // [T-ios-bgkeepalive-diag] Decrement HERE, synchronously with the
+            // `.invalid` reset — not inside the Task below. That Task first
+            // awaits the Live Activity finish and a ChatStore lookup; if the
+            // process is suspended or terminated before it lands, the decrement
+            // never runs, while the `backgroundTaskID != .invalid` guard above
+            // makes any retry a no-op. The count would then over-report live
+            // grants forever — the same false-healthy signal this field was
+            // added to eliminate. The OS-side endBackgroundTask stays in the
+            // Task (it must outlive the notification work); only our own
+            // bookkeeping moves up, so the two can disagree for a few hundred ms
+            // in exchange for never leaking.
+            if bgTaskID != .invalid {
+                AIChatViewModel.noteBackgroundTaskEnded()
+            }
+            // [T-shortcut-duplicate-completion-notification] Read AND clear here,
+            // synchronously, before the Task below: a Shortcuts intent already
+            // posted its own completion notification for this run, so the generic
+            // one would be a second, overlapping alert for one task. Consuming the
+            // flag (rather than leaving it set) means only THIS completion is
+            // suppressed — the cached VM stays usable, and a message the user
+            // later sends by hand in the same session notifies normally.
+            // Scope is deliberately narrow: only the notification is skipped.
+            // Live Activity finish, badge counting, and endBackgroundTask all
+            // still run below.
+            let suppressGenericNotification = suppressGeneralCompletionNotification
+            suppressGeneralCompletionNotification = false
+            if suppressGenericNotification {
+                logger.info("[BackgroundNotification] suppressed — a Shortcuts intent owns this run's notification")
+            }
+            // [T-scheduled-bka-keepalive] Sessions waiting on a timer they
+            // armed count as active here too.
+            //
+            // `finishActivity` tears the Live Activity down entirely and is the
+            // visible "everything is done" state. Doing that while this or
+            // another conversation still owns a scheduled job says the work is
+            // over when it is only waiting — and it removes the very surface
+            // that shows the pending timer. `markSessionCompleted` is the right
+            // call in that case: this run finished, the activity stays for what
+            // is still outstanding.
+            let awaitingScheduled = AgentJobRegistry.shared.sessionsAwaitingScheduledFire
             let otherActive = SessionActivityTracker.shared.activeSessions
+                .union(awaitingScheduled)
                 .filter { $0 != sid }
             logger.info("[BKA][BGTask] otherActive=\(otherActive.count) ids=[\(otherActive.map { $0.prefix(8) }.joined(separator: ","))] before Task")
             Task {
@@ -187,10 +327,13 @@ extension AIChatViewModel {
                 } else {
                     sessionTitle = fallbackTitle
                 }
-                BackgroundKeepAliveManager.shared.postBackgroundTaskNotification(
-                    sessionTitle: sessionTitle, responseSummary: responseSummary, sessionId: sid, isError: hasError, wasBackground: wasBackground
-                )
+                if !suppressGenericNotification {
+                    BackgroundKeepAliveManager.shared.postBackgroundTaskNotification(
+                        sessionTitle: sessionTitle, responseSummary: responseSummary, sessionId: sid, isError: hasError, wasBackground: wasBackground
+                    )
+                }
                 await MainActor.run {
+                    // Bookkeeping was already decremented synchronously above.
                     UIApplication.shared.endBackgroundTask(bgTaskID)
                 }
             }
@@ -259,11 +402,20 @@ extension AIChatViewModel {
         case .browserTool: toolName = "browser"
         case .readImageTool: toolName = "read_image"
         case .memoryTool: toolName = "memory"
+        case .delegateTool: toolName = SubAgentDefinition.toolName
         case .nativeTool(let type): toolName = type // [Minix]
         case .info: toolName = "info"
         }
 
-        let desc = toolBlock.toolDescription
+        // [T-ios-tool-title-lost-in-status] Prefer the model-supplied
+        // `tool_title` (persisted as `toolSummary`) over the derived
+        // `toolDescription`, matching every other display site
+        // (AssistantBlockView.displayText, SessionsOffloadBridge,
+        // GetSessionStatusIntent, ToolLiveSheet). This site read
+        // `toolDescription` alone, so a tool call WITH a title still surfaced
+        // the generic derivation — e.g. a `read_image` whose title was
+        // "查看页面截图" reported the bare filename / "Read image" instead.
+        let desc = toolBlock.toolSummary ?? toolBlock.toolDescription
         let elapsed: String
         if let start = toolBlock.toolStartTime {
             elapsed = String(format: "%.1fs", Date().timeIntervalSince(start))
@@ -319,7 +471,16 @@ extension AIChatViewModel {
         let summary = "tool=\(toolName) status=\(statusStr) elapsed=\(elapsed)\(pidInfo) desc=\"\(desc.prefix(40))\"\(outputPreview)\(browserInfo)"
         SessionActivityTracker.shared.currentToolStatus = "\(toolName): \(statusStr)"
         if let sid = self.sessionId {
-            SessionActivityTracker.shared.updateToolInfo(sessionId: sid, toolName: toolName, toolStatus: statusStr)
+            // [T-ios-tool-title-lost-in-status] `toolStatus` is the USER-FACING
+            // string (the SSE path at AIChatViewModel+SSEStream.swift ~830
+            // passes `toolSummary ?? toolDescription` here, and the Live
+            // Activity renders it as the tool's subtitle). This site passed the
+            // internal lifecycle token instead — "running" / "streaming(512B)" —
+            // so whenever the background path won the race the descriptive
+            // title was replaced by machine state. Pass the same descriptive
+            // text; the lifecycle token stays in `currentToolStatus` above,
+            // which is what actually wants it.
+            SessionActivityTracker.shared.updateToolInfo(sessionId: sid, toolName: toolName, toolStatus: desc)
         }
         return summary
     }
@@ -344,6 +505,15 @@ extension AIChatViewModel {
 
         logger.info("[Background] Agent loop suspended — waiting for foreground")
 
+        // [ContinuationDiag] (#181) Parks until willEnterForeground. A known
+        // registration race here was already fixed once (see the comment further
+        // down about T-ios-bgresume-registration-race), so an
+        // entering-without-resumed here means the loop is waiting on a
+        // foreground event that already passed — the loop then looks stalled
+        // even though nothing is wrong with the network.
+        let diagStart = Date()
+        logger.info("[ContinuationDiag] entering wait for backgroundSuspended at \(Self.diagTimestamp(diagStart)) session=\(self.sessionId ?? "nil") appState=\(Self.diagAppStateName())")
+
         // Listen for foreground notification to resume
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             self.foregroundContinuation = continuation
@@ -366,7 +536,33 @@ extension AIChatViewModel {
                     self.foregroundObserver = nil
                 }
             }
+            // [T-ios-bgresume-registration-race] The `.active` early-return
+            // above and this observer leave a gap: if the loop reaches here
+            // during the inactive window of a foreground transition
+            // (willEnterForeground already delivered, didBecomeActive not
+            // yet), the notification this observer waits for has ALREADY
+            // fired and never repeats this cycle — the continuation would
+            // park forever and the loop silently dies mid-run with no
+            // error and no resume affordance. Re-check AFTER registration
+            // (same main-thread turn, so no notification can interleave):
+            // any state other than .background means we may have missed the
+            // signal — resume through the same idempotent drain the
+            // observer uses.
+            if UIApplication.shared.applicationState != .background {
+                logger.warning("[Background] App left .background before observer registration — resuming immediately (missed willEnterForeground)")
+                self.backgroundSuspended = false
+                self.beginBackgroundProcessing()
+                if let c = self.foregroundContinuation {
+                    self.foregroundContinuation = nil
+                    c.resume()
+                }
+                if let obs = self.foregroundObserver {
+                    NotificationCenter.default.removeObserver(obs)
+                    self.foregroundObserver = nil
+                }
+            }
         }
+        logger.info("[ContinuationDiag] resumed backgroundSuspended after \(Int(Date().timeIntervalSince(diagStart) * 1000))ms appState=\(Self.diagAppStateName())")
     }
 
     /// Pauses the agent loop when the user activates browser takeover.
@@ -374,9 +570,16 @@ extension AIChatViewModel {
     func waitIfBrowserTakeover() async {
         guard browserTakeoverActive else { return }
         logger.info("[Takeover] Agent loop pausing for browser takeover")
+        // [ContinuationDiag] (#181) This continuation has no timeout — if it is
+        // never resumed the agent loop parks here forever and the user sees a
+        // stalled session. An "entering" line with no matching "resumed" line is
+        // the signature of candidate 1 (continuation deadlock).
+        let diagStart = Date()
+        logger.info("[ContinuationDiag] entering wait for browserTakeover at \(Self.diagTimestamp(diagStart)) session=\(self.sessionId ?? "nil")")
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             self.takeoverContinuation = continuation
         }
+        logger.info("[ContinuationDiag] resumed browserTakeover after \(Int(Date().timeIntervalSince(diagStart) * 1000))ms")
         logger.info("[Takeover] Agent loop resumed from browser takeover")
 
         // Take a screenshot so the agent sees what the user did during takeover
@@ -385,7 +588,7 @@ extension AIChatViewModel {
             coordinateX: nil, coordinateY: nil, direction: nil, amount: nil,
             script: nil, userAgent: nil, maxDepth: nil, tabId: nil
         )
-        if let result = try? await browserTabPool.execute(action: screenshotInput),
+        if let result = try? await browserTabPool.execute(action: screenshotInput, owner: sessionId),
            let b64 = result.base64Image,
            let data = Data(base64Encoded: b64) {
             // Persist the takeover screenshot the same way browser_use
@@ -432,9 +635,17 @@ extension AIChatViewModel {
         self.takeoverTimeoutTask = timeoutTask
 
         // Suspend until the user finishes or timeout fires
+        // [ContinuationDiag] (#181) This one DOES have a 5-minute timeout, so it
+        // should always produce a matching "resumed" line. If a stall shows this
+        // entering-without-resumed, the timeout task itself failed to fire —
+        // which would point at Task.sleep being stretched (candidate 3) rather
+        // than a plain deadlock.
+        let diagStart = Date()
+        logger.info("[ContinuationDiag] entering wait for midActionTakeover at \(Self.diagTimestamp(diagStart)) session=\(self.sessionId ?? "nil")")
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             self.midActionTakeoverContinuation = continuation
         }
+        logger.info("[ContinuationDiag] resumed midActionTakeover after \(Int(Date().timeIntervalSince(diagStart) * 1000))ms")
 
         // Clean up timeout — if cancel() is a no-op, the timeout already fired
         let timedOut = timeoutTask.isCancelled == false
@@ -449,7 +660,7 @@ extension AIChatViewModel {
             coordinateX: nil, coordinateY: nil, direction: nil, amount: nil,
             script: nil, userAgent: nil, maxDepth: nil, tabId: nil
         )
-        if let result = try? await browserTabPool.execute(action: screenshotInput) {
+        if let result = try? await browserTabPool.execute(action: screenshotInput, owner: sessionId) {
             return result
         }
         return nil
@@ -497,11 +708,38 @@ extension AIChatViewModel {
         // can have many in flight at once and a stop tap should cancel
         // the entire batch. [T-concurrent-tools 2026-05-25]
         if !runningCommandPids.isEmpty {
-            // Coordinator's stopCurrentCommand() is already "kill every
-            // in-flight pid across every session", which matches what we
-            // want for concurrent tool execution: one stop tap = cancel
-            // every shell currently running.
-            Task { await ISHExecutionCoordinator.shared.stopCurrentCommand() }
+            // [T-shell-stop-blocked-by-actor] SYNCHRONOUS and nonisolated —
+            // deliberately not `Task { await …stopCurrentCommand() }`.
+            //
+            // That form has to queue on the coordinator actor, and the case
+            // Stop exists for is exactly when the coordinator is stuck: a
+            // guest process wedged on iSH's global `pids_lock` blocks the
+            // actor, so the kill request sat in the queue behind the very
+            // thing it was meant to kill. Field crash 2026-08-23 20:11 shows
+            // no `Coordinator stopping command` line at all — the user
+            // pressed Stop and the code never ran.
+            //
+            // Killing needs nothing from the actor but the pid, which is
+            // mirrored under a lock, so this runs right here on the caller.
+            // [T-p0-stop-scope] Only THIS session's pids. The coordinator has
+            // always keyed in-flight pids by session and accepted the filter;
+            // calling it unfiltered meant a Stop in one chat killed the shell
+            // commands of every other concurrently running chat. A vm with no
+            // session id yet cannot own a running command (commands run after
+            // ensureSession), so nil here is logged rather than widened.
+            let killed: Int
+            // [T-agent-wrapup-turn] Shell commands run under fsSessionId (the
+            // parent's id for an agent child, see the shared workspace) and the
+            // coordinator files in-flight pids under THAT id — so a child that
+            // scoped the kill to its own sessionId found 0 pids and its tool
+            // never stopped.
+            if let sid = fsSessionId ?? sessionId {
+                killed = ISHExecutionCoordinator.stopAllNonisolated(sessionId: sid)
+            } else {
+                logger.warning("⏹️ stopCurrentCommand — no sessionId on vm=\(self.vmInstanceId); nothing to scope the kill to")
+                killed = 0
+            }
+            logger.info("⏹️ stopCurrentCommand — signalled \(killed) shell pid(s) sid=\(self.sessionId?.prefix(8) ?? "nil")")
         }
         runningCommandPids.removeAll()
         commandStartTime = nil
